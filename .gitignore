@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# React Native / mobile
+apps/mobile/android/.gradle/
+apps/mobile/android/app/build/
+apps/mobile/android/build/
+apps/mobile/ios/build/
+apps/mobile/ios/Pods/
+apps/mobile/*.jks
+apps/mobile/keystores/
+
+# Prisma
+apps/backend/prisma/*.db
+
+# Temp
+tmp/
+.tmp/

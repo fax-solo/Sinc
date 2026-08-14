@@ -1,0 +1,49 @@
+{
+  "name": "sinc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Sinc - music discovery, playback, downloads and offline library",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "test": "npm run test --workspaces --if-present",
+    "test:backend": "npm run test -w @sinc/backend",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md}\"",
+    "postinstall": "node scripts/repair-node-modules.mjs",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@babel/plugin-proposal-decorators": "^7.24.0",
+    "@eslint/js": "^9.18.0",
+    "@react-native/babel-preset": "^0.75.5",
+    "@react-native/metro-config": "^0.75.5",
+    "@react-native/typescript-config": "^0.75.5",
+    "eslint": "^9.18.0",
+    "eslint-config-prettier": "^10.0.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.11.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.4.3",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.21.0"
+  },
+  "lint-staged": {
+    "**/*.{ts,tsx,js,json,md}": "prettier --write"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "prisma@6.19.3": true,
+    "argon2@0.45.1": true
+  }
+}

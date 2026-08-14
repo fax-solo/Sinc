@@ -1,0 +1,60 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sinc-postgres
+    environment:
+      POSTGRES_USER: sinc
+      POSTGRES_PASSWORD: sinc
+      POSTGRES_DB: sinc
+    ports:
+      - "5432:5432"
+    volumes:
+      - sinc-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sinc -d sinc"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: sinc-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - sinc-redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: sinc-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: sinc
+      MINIO_ROOT_PASSWORD: sinc-minio-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - sinc-miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: sinc-mailpit
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+volumes:
+  sinc-pgdata:
+  sinc-redisdata:
+  sinc-miniodata:

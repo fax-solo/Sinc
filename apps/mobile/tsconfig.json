@@ -1,0 +1,16 @@
+{
+  "extends": "../../node_modules/@react-native/typescript-config/tsconfig.json",
+  "compilerOptions": {
+    "types": ["react-native"],
+    "module": "esnext",
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "forceConsistentCasingInFileNames": true,
+    "experimentalDecorators": true,
+    "baseUrl": ".",
+    "paths": {
+      "@sinc/mobile/*": ["src/*"]
+    }
+  },
+  "include": ["src/**/*", "App.tsx", "index.js"]
+}
