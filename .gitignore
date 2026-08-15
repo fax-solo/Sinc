@@ -37,4 +37,4 @@ apps/backend/prisma/*.db
 
 # Temp
 tmp/
-.tmp/
+.tmp/nozbe-watermelondb-0.28.0.tgz
