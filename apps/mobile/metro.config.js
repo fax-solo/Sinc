@@ -1,27 +1,16 @@
-const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
 const path = require('path');
+const { getDefaultConfig } = require('@react-native/metro-config');
 
-/**
- * Metro configuration
- * https://reactnative.dev/docs/metro
- *
- * npm workspaces hoist dependencies to the repo root; add the root
- * node_modules and shared packages as Metro watch folders so bundling
- * resolves them (standard RN monorepo setup).
- *
- * @type {import('metro-config').MetroConfig}
- */
-const config = {
-  watchFolders: [
-    path.resolve(__dirname, '../../node_modules'),
-    path.resolve(__dirname, '../../packages'),
-  ],
-  resolver: {
-    nodeModulesPaths: [
-      path.resolve(__dirname, 'node_modules'),
-      path.resolve(__dirname, '../../node_modules'),
-    ],
-  },
-};
+const config = getDefaultConfig(__dirname);
 
-module.exports = mergeConfig(getDefaultConfig(__dirname), config);
+const root = path.resolve(__dirname, '../..');
+
+config.watchFolders = [root];
+config.resolver.nodeModulesPaths = [
+  path.resolve(root, 'node_modules'),
+  path.resolve(__dirname, 'node_modules'),
+];
+config.resolver.sourceExts = ['ts', 'tsx', 'js', 'jsx', 'json'];
+config.resolver.unstable_enablePackageExports = true;
+
+module.exports = config;

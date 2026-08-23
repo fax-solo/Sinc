@@ -1,53 +1,31 @@
-import React, {
-  createContext,
-  useContext,
-  useMemo,
-  useState,
-  useCallback,
-  type PropsWithChildren,
-} from 'react';
-import { useColorScheme } from 'react-native';
-import { createTokens, type ThemeTokens } from './tokens';
+import { createContext, useContext, useMemo, type ReactNode } from 'react';
+import { colors, elevation, radii, spacing, typography } from './tokens';
 
-export type ThemeMode = 'light' | 'dark' | 'system';
-
-interface ThemeContextValue {
-  mode: ThemeMode;
-  /** Resolved tokens honoring system color scheme when mode === 'system'. */
-  tokens: ThemeTokens;
+export interface Theme {
+  colors: typeof colors;
+  spacing: typeof spacing;
+  typography: typeof typography;
+  radii: typeof radii;
+  elevation: typeof elevation;
   isDark: boolean;
-  setMode: (mode: ThemeMode) => void;
-  toggle: () => void;
 }
 
-const ThemeContext = createContext<ThemeContextValue | null>(null);
+export const darkTheme: Theme = {
+  colors,
+  spacing,
+  typography,
+  radii,
+  elevation,
+  isDark: true,
+};
 
-export function ThemeProvider({
-  children,
-  initialMode = 'system',
-}: PropsWithChildren<{ initialMode?: ThemeMode }>): React.JSX.Element {
-  const systemScheme = useColorScheme();
-  const [mode, setMode] = useState<ThemeMode>(initialMode);
+const ThemeContext = createContext<Theme>(darkTheme);
 
-  const isDark = mode === 'system' ? systemScheme === 'dark' : mode === 'dark';
-  const tokens = useMemo(() => createTokens(isDark), [isDark]);
-
-  const toggle = useCallback(() => {
-    setMode((prev) => (prev === 'dark' ? 'light' : 'dark'));
-  }, []);
-
-  const value = useMemo<ThemeContextValue>(
-    () => ({ mode, tokens, isDark, setMode, toggle }),
-    [mode, tokens, isDark, toggle],
-  );
-
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const value = useMemo(() => darkTheme, []);
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
-export function useTheme(): ThemeContextValue {
-  const ctx = useContext(ThemeContext);
-  if (!ctx) {
-    throw new Error('useTheme must be used within a ThemeProvider');
-  }
-  return ctx;
+export function useTheme(): Theme {
+  return useContext(ThemeContext);
 }

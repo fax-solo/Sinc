@@ -1,54 +1,76 @@
-import React from 'react';
-import { Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { useTheme } from '../theme/ThemeProvider';
+import type { ComponentProps } from 'react';
+import { ActivityIndicator, Pressable, type StyleProp, type ViewStyle } from 'react-native';
+import { useTheme } from '../theme';
+import { AppText } from './AppText';
 
-interface ButtonProps {
+type Variant = 'primary' | 'secondary' | 'ghost' | 'danger';
+
+interface ButtonProps extends Omit<ComponentProps<typeof Pressable>, 'style' | 'children'> {
+  variant?: Variant;
   label: string;
-  onPress: () => void;
-  variant?: 'primary' | 'ghost';
-  disabled?: boolean;
+  loading?: boolean;
+  compact?: boolean;
+  style?: StyleProp<ViewStyle>;
 }
 
-export default function AppButton({
-  label,
-  onPress,
+export function AppButton({
   variant = 'primary',
-  disabled = false,
-}: ButtonProps): React.JSX.Element {
-  const { tokens } = useTheme();
-  const isPrimary = variant === 'primary';
+  label,
+  loading = false,
+  disabled,
+  compact = false,
+  style,
+  ...rest
+}: ButtonProps) {
+  const { colors, spacing, radii } = useTheme();
+
+  const background =
+    variant === 'primary'
+      ? colors.accent
+      : variant === 'danger'
+        ? colors.error
+        : variant === 'secondary'
+          ? colors.surfaceElevated
+          : 'transparent';
+
+  const textColor =
+    variant === 'primary'
+      ? colors.onAccent
+      : variant === 'danger'
+        ? colors.onAccent
+        : variant === 'secondary'
+          ? colors.textPrimary
+          : colors.accent;
+
+  const isDisabled = disabled === true || loading;
+
   return (
-    <TouchableOpacity
+    <Pressable
       accessibilityRole="button"
-      accessibilityLabel={label}
-      disabled={disabled}
-      onPress={onPress}
-      style={[
-        styles.base,
+      accessibilityState={{ disabled: isDisabled, busy: loading }}
+      {...rest}
+      disabled={isDisabled}
+      style={({ pressed }) => [
         {
-          backgroundColor: isPrimary ? tokens.colors.primary : tokens.colors.surfaceContainer,
-          opacity: disabled ? tokens.opacity.disabled : 1,
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: background,
+          paddingVertical: compact ? spacing.xs : spacing.sm,
+          paddingHorizontal: compact ? spacing.sm : spacing.lg,
+          borderRadius: radii.md,
+          opacity: isDisabled ? 0.5 : pressed ? 0.85 : 1,
         },
+        style,
       ]}
     >
-      <Text
-        style={[
-          tokens.typography.headline,
-          { color: isPrimary ? tokens.colors.onPrimary : tokens.colors.onSurface },
-        ]}
-      >
-        {label}
-      </Text>
-    </TouchableOpacity>
+      {loading ? (
+        <ActivityIndicator color={textColor} />
+      ) : (
+        <AppText variant="bodyLarge" style={{ color: textColor }}>
+          {label}
+        </AppText>
+      )}
+    </Pressable>
   );
 }
-
-const styles = StyleSheet.create({
-  base: {
-    minHeight: 48,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 24,
-  },
-});

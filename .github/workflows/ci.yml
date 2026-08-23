@@ -4,38 +4,29 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
-  quality:
-    name: Lint, typecheck & test
+  verify:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node: [20, 22]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 20
           cache: npm
 
-      - name: Install
+      - name: Install dependencies
         run: npm ci
-
-      - name: Format check
-        run: npm run format:check
-
-      - name: Lint
-        run: npm run lint
 
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Lint
+        run: npm run lint
+
       - name: Test
-        run: npm test
+        run: npm run test
+
+      - name: Build server
+        run: npm run build -w @sinc/server

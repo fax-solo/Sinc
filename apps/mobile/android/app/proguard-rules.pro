@@ -8,3 +8,10 @@
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
 # Add any project specific keep options here:
+
+# React Native New Architecture (Fabric): JSI/JNI resolve classes and fields
+# by their original names at runtime, so R8 renaming/stripping them breaks
+# bridge init ("no field mBinding could be found in FabricUIManager").
+-keep class com.facebook.react.fabric.** { *; }
+-keep class com.facebook.react.bridge.** { *; }
+-keep class com.facebook.react.uimanager.** { *; }

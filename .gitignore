@@ -27,13 +27,27 @@ Thumbs.db
 apps/mobile/android/.gradle/
 apps/mobile/android/app/build/
 apps/mobile/android/build/
+apps/mobile/android/app/.cxx/
+apps/mobile/android/local.properties
 apps/mobile/ios/build/
 apps/mobile/ios/Pods/
 apps/mobile/*.jks
+apps/mobile/*.keystore
 apps/mobile/keystores/
+
+# Server runtime data (music files, staging) — never publish
+apps/server/downloads/
+
+# Local DB dumps / backups
+backups/
+*.dump
+*.sql.gz
 
 # Prisma
 apps/backend/prisma/*.db
+
+# Local server keys
+apps/server/keys/
 
 # Temp
 tmp/

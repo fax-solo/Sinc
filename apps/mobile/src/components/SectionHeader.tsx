@@ -1,20 +1,28 @@
-import React from 'react';
-import { StyleSheet, Text } from 'react-native';
-import { useTheme } from '../theme/ThemeProvider';
+import { View } from 'react-native';
+import { AppText } from './AppText';
+import { useTheme } from '../theme';
 
-/** Section title used on detail and list screens. */
-export default function SectionHeader({ children }: { children: string }): React.JSX.Element {
-  const { tokens } = useTheme();
-  return (
-    <Text style={[tokens.typography.headline, styles.title, { color: tokens.colors.onSurface }]}>
-      {children}
-    </Text>
-  );
+interface SectionHeaderProps {
+  title: string;
+  action?: { label: string; onPress: () => void };
 }
 
-const styles = StyleSheet.create({
-  title: {
-    marginTop: 16,
-    marginBottom: 4,
-  },
-});
+export function SectionHeader({ title, action }: SectionHeaderProps) {
+  const { spacing } = useTheme();
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+      <AppText variant="headline">{title}</AppText>
+      {action ? (
+        <AppText
+          variant="body"
+          color="accent"
+          style={{ marginLeft: spacing.sm }}
+          suppressHighlighting
+          onPress={action.onPress}
+        >
+          {action.label}
+        </AppText>
+      ) : null}
+    </View>
+  );
+}

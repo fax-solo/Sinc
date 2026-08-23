@@ -1,0 +1,255 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  username      String    @unique
+  passwordHash  String
+  displayName   String?
+  avatarUrl     String?
+  role          String    @default("user") // user, admin
+  status        String    @default("active") // active, suspended
+  settings      Json?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastLoginAt   DateTime?
+
+  sessions      Session[]
+  devices       Device[]
+  favorites     Favorite[]
+  playlists     Playlist[]
+  history       History[]
+  downloads     DownloadJob[]
+  mfa           AdminMfa?
+  auditLogs     AuditLog[]
+  analytics     AnalyticsEvent[]
+
+  @@index([email])
+  @@index([username])
+  @@index([role])
+  @@index([status])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  refreshToken String   @unique
+  userAgent    String?
+  ipAddress    String?
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+  revokedAt    DateTime?
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([refreshToken])
+  @@index([expiresAt])
+}
+
+model Device {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  platform    String
+  pushToken   String?
+  lastSeenAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([pushToken])
+}
+
+model VerificationToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  type      String   // email_verification, password_reset
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([token])
+  @@index([type])
+}
+
+model Favorite {
+  id          String   @id @default(cuid())
+  userId      String
+  targetType  String   // track, artist, album
+  targetId    String
+  targetTitle String?
+  targetSubtitle String?
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, targetType, targetId])
+  @@index([userId, targetType])
+  @@index([targetType, targetId])
+}
+
+model Playlist {
+  id              String   @id @default(cuid())
+  userId          String
+  name            String
+  description     String?
+  artworkUrl      String?
+  isCollaborative Boolean  @default(false)
+  trackCount      Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entries         PlaylistEntry[]
+
+  @@index([userId])
+}
+
+model PlaylistEntry {
+  id         String   @id @default(cuid())
+  playlistId String
+  trackId    String
+  position   Int
+  addedAt    DateTime @default(now())
+
+  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+
+  @@unique([playlistId, trackId])
+  @@index([playlistId])
+  @@index([playlistId, position])
+  @@index([trackId])
+}
+
+model History {
+  id            String   @id @default(cuid())
+  userId        String
+  trackId       String
+  trackTitle    String?
+  trackArtist   String?
+  trackAlbum    String?
+  trackArtwork  String?
+  positionMs    Int?
+  durationMs    Int?
+  sourceKind    String?
+  playedAt      DateTime @default(now())
+
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, trackId])
+  @@index([userId, playedAt])
+  @@index([userId, trackId, playedAt])
+  @@index([playedAt])
+  @@index([trackId])
+}
+
+model DownloadJob {
+  id              String   @id @default(cuid())
+  userId          String
+  trackId         String
+  trackTitle      String
+  trackArtist     String
+  trackArtwork    String?
+  quality         String
+  status          String   @default("pending") // pending, downloading, paused, completed, failed, cancelled
+  progress        Int      @default(0)
+  bytesDownloaded BigInt   @default(0)
+  bytesTotal      BigInt?
+  errorCode       String?
+  errorMessage    String?
+  localPath       String?
+  provider        String?
+  sourceUrl       String?
+  createdAt       DateTime @default(now())
+  startedAt       DateTime?
+  completedAt     DateTime?
+
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, status, createdAt])
+  @@index([status])
+  @@index([trackId])
+}
+
+model SearchCache {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
+model Lyric {
+  id        String   @id @default(cuid())
+  trackId   String   @unique
+  title     String
+  artist    String
+  source    String   // provider name ("lrclib", ...) or "none"
+  synced    Boolean  @default(false)
+  content   String   // LRC text when synced, else plain text (may be empty when unavailable)
+  language  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([trackId])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String
+  action     String   // e.g. user.promote, user.suspend, session.revoke, playlist.delete
+  targetType String
+  targetId   String?
+  details    Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  actor      User     @relation(fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@index([actorId])
+  @@index([action])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+}
+
+model AdminMfa {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  secret    String   // base32 TOTP secret
+  enabled   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Privacy-clean, opt-in usage analytics. Events carry no PII: only an event
+// name, an optional entity id (e.g. track id) and small scalar metadata. Rows
+// are only written when the owning user has explicitly enabled analytics.
+model AnalyticsEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  event     String   // e.g. search:success, playback:start, playback:complete, download:complete, lyrics:matched
+  entityId  String?
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([event])
+  @@index([event, createdAt])
+  @@index([createdAt])
+}

@@ -56,18 +56,18 @@ Sinc/
 
 ## Roadmap Status
 
-| Phase                         | Status                          |
-| ----------------------------- | ------------------------------- |
-| M0 — Repository & tooling     | Not started (awaiting approval) |
-| M1 — Auth & foundation        | Not started                     |
-| M2 — Core music experience    | Not started                     |
-| M3 — Local library & offline  | Not started                     |
-| M4 — Background systems       | Not started                     |
-| M5 — Lyrics                   | Not started                     |
-| M6 — Personalization          | Not started                     |
-| M7 — Advanced mobile features | Not started                     |
-| M8 — Administration           | Not started                     |
-| M9 — Production hardening     | Not started                     |
+| Phase                         | Status      |
+| ----------------------------- | ----------- |
+| M0 — Repository & tooling     | Done        |
+| M1 — Auth & foundation        | Done        |
+| M2 — Core music experience    | Done        |
+| M3 — Local library & offline  | Done        |
+| M4 — Background systems       | Done        |
+| M5 — Lyrics                   | Done        |
+| M6 — Personalization          | Done        |
+| M7 — Advanced mobile features | Done        |
+| M8 — Administration           | Done        |
+| M9 — Production hardening     | In progress |
 
 See [`ARCHITECTURE_ROADMAP.md`](ARCHITECTURE_ROADMAP.md) for the full milestone breakdown and dependencies.
 

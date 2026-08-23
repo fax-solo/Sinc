@@ -13,18 +13,22 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint .",
     "test": "npm run test --workspaces --if-present",
-    "test:backend": "npm run test -w @sinc/backend",
+    "test:server": "npm run test -w @sinc/server",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md}\"",
-    "postinstall": "node scripts/repair-node-modules.mjs",
-    "prepare": "husky"
+    "prepare": "husky",
+    "dev:mobile": "npm run start -w @sinc/mobile",
+    "dev:server": "npm run dev -w @sinc/server",
+    "android": "npm run android -w @sinc/mobile",
+    "ios": "npm run ios -w @sinc/mobile"
   },
   "devDependencies": {
-    "@babel/plugin-proposal-decorators": "^7.24.0",
     "@eslint/js": "^9.18.0",
     "@react-native/babel-preset": "^0.75.5",
     "@react-native/metro-config": "^0.75.5",
     "@react-native/typescript-config": "^0.75.5",
+    "@types/node": "^22.10.7",
+    "@types/react": "^18.3.18",
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^10.0.1",
     "eslint-plugin-react-hooks": "^7.1.1",
@@ -44,6 +48,8 @@
   "allowScripts": {
     "esbuild@0.28.2": true,
     "prisma@6.19.3": true,
-    "argon2@0.45.1": true
+    "argon2@0.45.1": true,
+    "@prisma/client@6.19.3": true,
+    "@prisma/engines@6.19.3": true
   }
 }

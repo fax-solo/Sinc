@@ -1,59 +1,42 @@
-import React from 'react';
-import { StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { useTheme } from '../theme/ThemeProvider';
+import { Pressable, StyleSheet } from 'react-native';
+import { AppText } from './AppText';
+import { useTheme } from '../theme';
 
-/** Local library search input with a clear affordance. */
-export default function SearchBar({
-  value,
-  onChangeText,
-  placeholder,
-}: {
-  value: string;
-  onChangeText: (text: string) => void;
-  placeholder: string;
-}): React.JSX.Element {
-  const { tokens } = useTheme();
+interface SearchBarProps {
+  onPress: () => void;
+}
+
+export function SearchBar({ onPress }: SearchBarProps) {
+  const { colors, radii, spacing } = useTheme();
+
   return (
-    <View style={[styles.wrap, { backgroundColor: tokens.colors.surfaceContainerHigh }]}>
-      <TextInput
-        style={[styles.input, tokens.typography.body, { color: tokens.colors.onBackground }]}
-        value={value}
-        onChangeText={onChangeText}
-        placeholder={placeholder}
-        placeholderTextColor={tokens.colors.onSurfaceVariant}
-        autoCorrect={false}
-        autoCapitalize="none"
-        returnKeyType="search"
-      />
-      {value.length > 0 ? (
-        <TouchableOpacity
-          accessibilityRole="button"
-          accessibilityLabel="Clear search"
-          onPress={() => onChangeText('')}
-          style={styles.clear}
-        >
-          <Text style={[tokens.typography.body, { color: tokens.colors.onSurfaceVariant }]}>
-            {'\u2715'}
-          </Text>
-        </TouchableOpacity>
-      ) : null}
-    </View>
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="search"
+      accessibilityLabel="Search songs, albums and artists"
+      style={({ pressed }) => [
+        styles.bar,
+        {
+          backgroundColor: colors.surfaceElevated,
+          borderRadius: radii.full,
+          paddingVertical: spacing.sm,
+          paddingHorizontal: spacing.md,
+        },
+        pressed && styles.pressed,
+      ]}
+    >
+      <AppText variant="body" color="textSecondary">
+        Search songs, albums & artists
+      </AppText>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  wrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    minHeight: 44,
+  bar: {
+    alignItems: 'flex-start',
   },
-  input: {
-    flex: 1,
-    paddingVertical: 10,
-  },
-  clear: {
-    padding: 6,
+  pressed: {
+    opacity: 0.7,
   },
 });

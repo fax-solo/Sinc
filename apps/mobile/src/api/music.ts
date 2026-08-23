@@ -1,163 +1,236 @@
+import { apiClient } from './client';
+import { config } from '../app/config';
 import type {
   CanonicalAlbum,
   CanonicalArtist,
+  CanonicalPlaylist,
   CanonicalTrack,
-  PlaybackResolveResult,
-  SourceInfo,
+  TrackLyrics,
 } from '@sinc/shared';
-import { apiClient } from './client';
 
-export type SearchType = 'all' | 'songs' | 'artists' | 'albums' | 'playlists';
-
-export interface SearchGroupMeta {
-  page: number;
-  limit: number;
-  total: number;
-  totalPages: number;
-  hasNext: boolean;
+export interface SearchResults {
+  tracks?: { data: Array<{ track: CanonicalTrack; score: number }>; meta: unknown };
+  artists?: { data: CanonicalArtist[]; meta: unknown };
+  albums?: { data: CanonicalAlbum[]; meta: unknown };
+  playlists?: { data: CanonicalPlaylist[]; meta: unknown };
 }
 
-export interface ScoredTrack {
-  track: CanonicalTrack;
-  score: number;
+export type SearchType = 'all' | 'tracks' | 'artists' | 'albums' | 'playlists';
+
+export interface PlaybackSource {
+  uri: string;
+  mimeType: string;
+  quality: string;
+  provider: string;
+  expiresIn: number;
 }
 
-export interface SearchResponse {
-  tracks: { data: ScoredTrack[]; meta: SearchGroupMeta };
-  artists: { data: CanonicalArtist[]; meta: SearchGroupMeta };
-  albums: { data: CanonicalAlbum[]; meta: SearchGroupMeta };
-  playlists: { data: unknown[]; meta: SearchGroupMeta };
+export interface HomeFeed {
+  popularTracks: CanonicalTrack[];
+  newAlbums: CanonicalAlbum[];
+  topPlaylists: CanonicalPlaylist[];
+  topArtists: CanonicalArtist[];
+  starterMixes: DailyMix[];
 }
 
-export interface SearchSuggestion {
-  type: 'song' | 'artist' | 'album';
+export type MixKind = 'daily' | 'favorites' | 'discovery' | 'artist' | 'mood';
+
+export interface DailyMix {
   id: string;
-  text: string;
-  subtitle?: string;
+  name: string;
+  kind: MixKind;
+  genre: string;
+  description?: string;
   artworkUrl?: string;
-}
-
-export interface SearchParams {
-  q: string;
-  type?: Exclude<SearchType, 'all'>;
-  artist?: string;
-  album?: string;
-  durationMin?: number;
-  durationMax?: number;
-  page?: number;
-  limit?: number;
-}
-
-export interface ProviderSummary {
-  attempted: string[];
-  succeeded: string[];
-  failed: Array<{ provider: string; error: string }>;
-}
-
-export interface TrackDetailResponse {
-  track: CanonicalTrack;
-  providers: ProviderSummary;
-}
-
-export interface ArtistDetailResponse {
-  artist: CanonicalArtist;
-  topTracks: CanonicalTrack[];
-  albums: CanonicalAlbum[];
-  relatedArtists: CanonicalArtist[];
-  providers: ProviderSummary;
-}
-
-export interface AlbumDetailResponse {
-  album: CanonicalAlbum;
+  trackCount: number;
   tracks: CanonicalTrack[];
-  providers: ProviderSummary;
 }
 
-export interface TrackSourcesResponse {
-  track: CanonicalTrack;
-  sources: SourceInfo[];
-  providers: ProviderSummary;
+export type HomeSection =
+  | { kind: 'quick-access'; title: string; playlists: CanonicalPlaylist[] }
+  | { kind: 'recently-played'; title: string; tracks: CanonicalTrack[] }
+  | { kind: 'mixes'; title: string; mixes: DailyMix[] }
+  | { kind: 'tracks'; title: string; explanation?: string; tracks: CanonicalTrack[] }
+  | { kind: 'albums'; title: string; explanation?: string; albums: CanonicalAlbum[] }
+  | { kind: 'artists'; title: string; explanation?: string; artists: CanonicalArtist[] }
+  | { kind: 'playlists'; title: string; explanation?: string; playlists: CanonicalPlaylist[] };
+
+export interface PersonalizedHomeFeed {
+  sections: HomeSection[];
+  personalized: boolean;
 }
 
-export interface DetailQueryOptions {
-  provider?: string;
-  limit?: number;
-  offset?: number;
+/** Local-library summary sent with the personalized feed request. */
+export interface LibraryPayload {
+  playlists: Array<{
+    id: string;
+    name: string;
+    artworkUrl?: string;
+    trackCount: number;
+    updatedAt: number;
+  }>;
+  recentlyPlayedPlaylistIds: string[];
+  downloadedTracks: CanonicalTrack[];
+  followedArtists: CanonicalArtist[];
+  followedAlbums: CanonicalAlbum[];
 }
 
-/** First provider id available on an entity (provider-qualified detail ids). */
-export function providerIdOf(providerIds: Record<string, string> | undefined): string | undefined {
-  return providerIds ? Object.values(providerIds)[0] : undefined;
-}
-
-function toQueryString(params: object): string {
-  const parts = Object.entries(params)
-    .filter(([, value]) => value !== undefined && value !== '')
-    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
-  return parts.length > 0 ? `?${parts.join('&')}` : '';
+export interface DownloadJob {
+  id: string;
+  trackId: string;
+  trackTitle: string;
+  trackArtist: string;
+  trackArtwork?: string | null;
+  quality: string;
+  status: string;
+  progress: number;
+  bytesDownloaded: number;
+  bytesTotal?: number | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  provider?: string | null;
+  sourceUrl?: string | null;
+  localPath?: string | null;
+  createdAt: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
 }
 
 export const musicApi = {
-  async search(params: SearchParams): Promise<SearchResponse> {
-    return apiClient.request<SearchResponse>(
-      `/music/search${toQueryString({
-        q: params.q,
-        type: params.type,
-        artist: params.artist,
-        album: params.album,
-        durationMin: params.durationMin,
-        durationMax: params.durationMax,
-        page: params.page,
-        limit: params.limit,
-      })}`,
+  getHomeFeed(): Promise<HomeFeed> {
+    return apiClient.get<HomeFeed>('/music/home');
+  },
+
+  getPersonalizedHomeFeed(library: LibraryPayload): Promise<PersonalizedHomeFeed> {
+    return apiClient.post<PersonalizedHomeFeed>('/music/home/personalized', { library });
+  },
+
+  recordPlay(track: CanonicalTrack): Promise<{ ok: boolean }> {
+    return apiClient.post<{ ok: boolean }>('/music/history', {
+      trackId: track.id,
+      trackTitle: track.title,
+      trackArtist: track.artists[0]?.name,
+      trackAlbum: track.album?.title,
+      trackArtwork: track.artworkUrl,
+      durationMs: track.durationMs,
+    });
+  },
+
+  recordCollectionPlay(item: {
+    id: string;
+    type: 'mix' | 'album' | 'playlist';
+    title: string;
+    subtitle?: string;
+    artworkUrl?: string;
+  }): Promise<{ ok: boolean }> {
+    return apiClient.post<{ ok: boolean }>('/music/history/collections', {
+      itemId: item.id,
+      itemType: item.type,
+      title: item.title,
+      subtitle: item.subtitle,
+      artworkUrl: item.artworkUrl,
+    });
+  },
+
+  syncFavorites(tracks: CanonicalTrack[]): Promise<{ ok: boolean }> {
+    return apiClient.put<{ ok: boolean }>('/music/favorites', {
+      tracks: tracks.map((t) => ({
+        trackId: t.id,
+        trackTitle: t.title,
+        trackSubtitle: t.artists[0]?.name,
+      })),
+    });
+  },
+
+  search(query: string, type: SearchType = 'all', signal?: AbortSignal): Promise<SearchResults> {
+    return apiClient.get<SearchResults>(
+      `/music/search?q=${encodeURIComponent(query)}&type=${type}&limit=25`,
+      undefined,
+      signal
     );
   },
 
-  async suggest(q: string, limit = 8): Promise<SearchSuggestion[]> {
-    const response = await apiClient.request<{ suggestions: SearchSuggestion[] }>(
-      `/music/search/suggest${toQueryString({ q, limit })}`,
-    );
-    return response.suggestions;
-  },
-
-  async getTrackDetail(id: string, opts: DetailQueryOptions = {}): Promise<TrackDetailResponse> {
-    return apiClient.request<TrackDetailResponse>(
-      `/music/tracks/${encodeURIComponent(id)}${toQueryString(opts)}`,
+  getTrack(id: string): Promise<{ track: CanonicalTrack; sources: PlaybackSource[] }> {
+    return apiClient.get<{ track: CanonicalTrack; sources: PlaybackSource[] }>(
+      `/music/tracks/${encodeURIComponent(id)}`
     );
   },
 
-  async getArtistDetail(id: string, opts: DetailQueryOptions = {}): Promise<ArtistDetailResponse> {
-    return apiClient.request<ArtistDetailResponse>(
-      `/music/artists/${encodeURIComponent(id)}${toQueryString(opts)}`,
+  resolvePlayback(id: string): Promise<PlaybackSource> {
+    return apiClient.get<PlaybackSource>(`/music/tracks/${encodeURIComponent(id)}/play`);
+  },
+
+  getAlbum(id: string): Promise<{ album: CanonicalAlbum; tracks: CanonicalTrack[] }> {
+    return apiClient.get<{ album: CanonicalAlbum; tracks: CanonicalTrack[] }>(
+      `/music/albums/${encodeURIComponent(id)}`
     );
   },
 
-  async getAlbumDetail(id: string, opts: DetailQueryOptions = {}): Promise<AlbumDetailResponse> {
-    return apiClient.request<AlbumDetailResponse>(
-      `/music/albums/${encodeURIComponent(id)}${toQueryString(opts)}`,
+  getArtist(
+    id: string
+  ): Promise<{ artist: CanonicalArtist; albums: CanonicalAlbum[]; topTracks: CanonicalTrack[] }> {
+    return apiClient.get<{
+      artist: CanonicalArtist;
+      albums: CanonicalAlbum[];
+      topTracks: CanonicalTrack[];
+    }>(`/music/artists/${encodeURIComponent(id)}`);
+  },
+
+  getPlaylist(id: string): Promise<{ playlist: CanonicalPlaylist; tracks: CanonicalTrack[] }> {
+    return apiClient.get<{ playlist: CanonicalPlaylist; tracks: CanonicalTrack[] }>(
+      `/music/playlists/${encodeURIComponent(id)}`
     );
   },
 
-  /** Backend intentionally 404s until M3.2; kept for the playlist screen. */
-  async getPlaylistDetail(id: string, opts: DetailQueryOptions = {}): Promise<unknown> {
-    return apiClient.request<unknown>(
-      `/music/playlists/${encodeURIComponent(id)}${toQueryString(opts)}`,
-    );
+  startDownload(id: string, track: CanonicalTrack): Promise<DownloadJob> {
+    return apiClient.post<DownloadJob>(`/music/tracks/${encodeURIComponent(id)}/download`, {
+      track,
+    });
   },
 
-  async getTrackSources(id: string, provider?: string): Promise<TrackSourcesResponse> {
-    return apiClient.request<TrackSourcesResponse>(
-      `/music/tracks/${encodeURIComponent(id)}/sources${toQueryString({ provider })}`,
-    );
+  listDownloads(): Promise<DownloadJob[]> {
+    return apiClient.get<DownloadJob[]>('/music/downloads');
   },
 
-  /** Resolve a track to one playable, signed stream URL (M2.6 backend). */
-  async resolvePlayback(
-    trackId: string,
-    opts: DetailQueryOptions = {},
-  ): Promise<PlaybackResolveResult> {
-    return apiClient.request<PlaybackResolveResult>(
-      `/playback/tracks/${encodeURIComponent(trackId)}/resolve${toQueryString(opts)}`,
-    );
+  getDownload(jobId: string): Promise<DownloadJob> {
+    return apiClient.get<DownloadJob>(`/music/downloads/${encodeURIComponent(jobId)}`);
+  },
+
+  deleteDownload(jobId: string): Promise<void> {
+    return apiClient.delete<void>(`/music/downloads/${encodeURIComponent(jobId)}`);
+  },
+
+  downloadFileUrl(jobId: string): string {
+    return `${config.apiBaseUrl}/music/downloads/${encodeURIComponent(jobId)}/file`;
+  },
+
+  getLyrics(id: string, track: CanonicalTrack): Promise<TrackLyrics> {
+    return apiClient.post<TrackLyrics>(`/music/tracks/${encodeURIComponent(id)}/lyrics`, {
+      track,
+    });
   },
 };
+
+export interface SpotifyImportPlaylist {
+  id: string;
+  name: string;
+  owner: string;
+  artworkUrl: string | null;
+  totalCount: number;
+  truncated: boolean;
+}
+
+export interface SpotifyImportResult {
+  playlist: SpotifyImportPlaylist;
+  tracks: CanonicalTrack[];
+  counts: {
+    fetched: number;
+    matched: number;
+    unresolved: number;
+    duplicates: number;
+  };
+}
+
+export async function importSpotifyPlaylist(url: string): Promise<SpotifyImportResult> {
+  return apiClient.post<SpotifyImportResult>('/music/import/spotify', { url });
+}
