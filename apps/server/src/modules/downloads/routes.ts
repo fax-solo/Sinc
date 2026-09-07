@@ -6,6 +6,7 @@ import type { CanonicalTrack } from '@sinc/shared';
 import { AppError } from '@sinc/shared';
 import type { TokenService } from '../auth/tokens.js';
 import { authGuard, type AuthenticatedRequest } from '../../plugins/guard.js';
+import { prisma } from '../../lib/prisma.js';
 import type { DownloadsService } from './service.js';
 
 export function registerDownloadRoutes(
@@ -59,7 +60,15 @@ export function registerDownloadRoutes(
     try {
       await fs.access(filePath);
     } catch {
-      return reply.status(404).send({ error: 'Download not found' });
+      // Ephemeral hosts (HF Spaces etc.) lose staged files on restart; the
+      // job row would otherwise block re-downloads forever.
+      await prisma.downloadJob
+        .update({
+          where: { id: jobId },
+          data: { status: 'failed', errorMessage: 'File expired — retry download' },
+        })
+        .catch(() => undefined);
+      return reply.status(404).send({ error: 'Download expired — retry' });
     }
     const ext = path.extname(filePath).toLowerCase();
     const type = ext === '.ogg' ? 'audio/ogg' : 'audio/mpeg';
