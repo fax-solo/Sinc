@@ -28,7 +28,6 @@ model User {
   playlists     Playlist[]
   history       History[]
   downloads     DownloadJob[]
-  mfa           AdminMfa?
   auditLogs     AuditLog[]
   analytics     AnalyticsEvent[]
 
@@ -223,16 +222,6 @@ model AuditLog {
   @@index([action])
   @@index([targetType, targetId])
   @@index([createdAt])
-}
-
-model AdminMfa {
-  id        String   @id @default(cuid())
-  userId    String   @unique
-  secret    String   // base32 TOTP secret
-  enabled   Boolean  @default(false)
-  createdAt DateTime @default(now())
-
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 // Privacy-clean, opt-in usage analytics. Events carry no PII: only an event

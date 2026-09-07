@@ -3,6 +3,7 @@ import { AppText } from '../../components/AppText';
 import { AppButton } from '../../components/AppButton';
 import { useTheme } from '../../theme';
 import { APP_VERSION } from '../../services/updates/appUpdates';
+import { config } from '../../app/config';
 
 export function UpdateRequiredScreen({ minAppVersion }: { minAppVersion: string }) {
   const { colors, spacing, radii } = useTheme();
@@ -24,10 +25,8 @@ export function UpdateRequiredScreen({ minAppVersion }: { minAppVersion: string 
           Installed: {APP_VERSION}
         </AppText>
         <AppButton
-          label="Open the store"
-          onPress={() =>
-            void Linking.openURL('https://play.google.com/store/apps/details?id=com.sinc.app')
-          }
+          label="Download latest version"
+          onPress={() => void Linking.openURL(config.githubReleasePageUrl)}
           style={{ marginTop: spacing.lg }}
         />
       </View>

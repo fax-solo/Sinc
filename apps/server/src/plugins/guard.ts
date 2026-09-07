@@ -1,6 +1,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { AuthenticationError, AuthorizationError } from '@sinc/shared';
 import type { TokenService } from '../modules/auth/tokens.js';
+import { prisma } from '../lib/prisma.js';
 
 export interface AuthenticatedRequest extends FastifyRequest {
   auth: {
@@ -26,19 +27,35 @@ async function resolveAuth(
   }
 
   const token = authHeader.slice(7);
+  let payload: { sub: string; sid: string };
   try {
-    const payload = await tokenService.verifyAccessToken(token);
-    return {
-      userId: payload.sub,
-      sessionId: payload.sid,
-      // Tokens issued before roles existed carry no claims; treat them as a
-      // regular active user until the next refresh re-issues the token.
-      role: payload.role ?? 'user',
-      status: payload.status ?? 'active',
-    };
+    payload = await tokenService.verifyAccessToken(token);
   } catch {
     throw new AuthenticationError('Invalid or expired token');
   }
+
+  // Roles/status are read from the database on every request so that
+  // suspensions, session revocations, deletions and re-issued tokens take
+  // effect immediately instead of being deferred to the next token refresh.
+  const session = await prisma.session.findUnique({
+    where: { id: payload.sid },
+    include: { user: true },
+  });
+  if (
+    !session ||
+    session.revokedAt ||
+    session.expiresAt < new Date() ||
+    session.userId !== payload.sub
+  ) {
+    throw new AuthenticationError('Invalid or expired session');
+  }
+
+  return {
+    userId: session.userId,
+    sessionId: session.id,
+    role: session.user.role,
+    status: session.user.status,
+  };
 }
 
 export function authGuard(tokenService: TokenService, options: GuardOptions = {}) {

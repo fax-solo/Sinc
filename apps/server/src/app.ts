@@ -134,7 +134,7 @@ export async function buildApp(
 
   registerLyricsRoutes(app, lyrics, tokenService);
 
-  const adminService = new AdminService();
+  const adminService = new AdminService(downloads);
   registerAdminRoutes(app, adminService, tokenService);
 
   const analytics = new AnalyticsService();

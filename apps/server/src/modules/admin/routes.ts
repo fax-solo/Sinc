@@ -25,9 +25,8 @@ export function registerAdminRoutes(
   tokenService: TokenService
 ): void {
   const guard = adminGuard(tokenService);
-  const clientIp = (request: FastifyRequest): string | undefined =>
-    (request.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ||
-    (request.headers['x-real-ip'] as string | undefined);
+
+  // ---- User / list management --------------------------------------------
 
   app.get('/admin/stats/overview', { preHandler: guard }, async () => {
     return admin.statsOverview();
@@ -44,18 +43,34 @@ export function registerAdminRoutes(
   });
 
   app.get('/admin/users', { preHandler: guard }, async (request) => {
-    const { page, limit, query } = request.query as {
+    const { page, limit, query, role, status, sort } = request.query as {
       page?: unknown;
       limit?: unknown;
       query?: unknown;
+      role?: unknown;
+      status?: unknown;
+      sort?: unknown;
     };
     const q = typeof query === 'string' ? query.trim().slice(0, 80) : undefined;
-    return admin.listUsers(intParam(page, 1, 10_000), intParam(limit, 20, 100), q || undefined);
+    const r = role === 'admin' || role === 'user' ? role : undefined;
+    const s = status === 'active' || status === 'suspended' ? status : undefined;
+    const so = sort === 'createdAt' || sort === 'lastLoginAt' ? sort : 'createdAt';
+    return admin.listUsers(intParam(page, 1, 10_000), intParam(limit, 20, 100), {
+      query: q,
+      role: r,
+      status: s,
+      sort: so,
+    });
   });
 
   app.get('/admin/users/:id', { preHandler: guard }, async (request) => {
     const { id } = request.params as { id: string };
     return admin.getUser(id);
+  });
+
+  app.get('/admin/users/:id/detail', { preHandler: guard }, async (request) => {
+    const { id } = request.params as { id: string };
+    return admin.userDetail(id);
   });
 
   app.patch('/admin/users/:id', { preHandler: guard }, async (request) => {
@@ -68,28 +83,25 @@ export function registerAdminRoutes(
         'action must be one of: promote, demote, suspend, unsuspend, delete, reset-password'
       );
     }
-    const otp = request.headers['x-admin-otp'] as string | undefined;
-    await admin.assertMfa(auth.userId, otp);
-    const ip = clientIp(request);
 
     switch (action) {
       case 'promote':
-        await admin.promote(auth.userId, id, ip);
+        await admin.promote(auth.userId, id);
         break;
       case 'demote':
-        await admin.demote(auth.userId, id, ip);
+        await admin.demote(auth.userId, id);
         break;
       case 'suspend':
-        await admin.suspend(auth.userId, id, ip);
+        await admin.suspend(auth.userId, id);
         break;
       case 'unsuspend':
-        await admin.unsuspend(auth.userId, id, ip);
+        await admin.unsuspend(auth.userId, id);
         break;
       case 'delete':
-        await admin.deleteUser(auth.userId, id, ip);
+        await admin.deleteUser(auth.userId, id);
         break;
       case 'reset-password':
-        return admin.forceReset(auth.userId, id, ip);
+        return admin.forceReset(auth.userId, id);
     }
     return { ok: true };
   });
@@ -97,18 +109,14 @@ export function registerAdminRoutes(
   app.delete('/admin/users/:id', { preHandler: guard }, async (request) => {
     const auth = (request as AuthenticatedRequest).auth;
     const { id } = request.params as { id: string };
-    const otp = request.headers['x-admin-otp'] as string | undefined;
-    await admin.assertMfa(auth.userId, otp);
-    await admin.deleteUser(auth.userId, id, clientIp(request));
+    await admin.deleteUser(auth.userId, id);
     return { ok: true };
   });
 
   app.post('/admin/users/:id/reset-password', { preHandler: guard }, async (request) => {
     const auth = (request as AuthenticatedRequest).auth;
     const { id } = request.params as { id: string };
-    const otp = request.headers['x-admin-otp'] as string | undefined;
-    await admin.assertMfa(auth.userId, otp);
-    return admin.forceReset(auth.userId, id, clientIp(request));
+    return admin.forceReset(auth.userId, id);
   });
 
   app.get('/admin/users/:id/sessions', { preHandler: guard }, async (request) => {
@@ -119,11 +127,11 @@ export function registerAdminRoutes(
   app.delete('/admin/sessions/:id', { preHandler: guard }, async (request) => {
     const auth = (request as AuthenticatedRequest).auth;
     const { id } = request.params as { id: string };
-    const otp = request.headers['x-admin-otp'] as string | undefined;
-    await admin.assertMfa(auth.userId, otp);
-    await admin.revokeSession(auth.userId, id, clientIp(request));
+    await admin.revokeSession(auth.userId, id);
     return { ok: true };
   });
+
+  // ---- Playlists ---------------------------------------------------------
 
   app.get('/admin/playlists', { preHandler: guard }, async (request) => {
     const { page, limit, query } = request.query as {
@@ -138,11 +146,62 @@ export function registerAdminRoutes(
   app.delete('/admin/playlists/:id', { preHandler: guard }, async (request) => {
     const auth = (request as AuthenticatedRequest).auth;
     const { id } = request.params as { id: string };
-    const otp = request.headers['x-admin-otp'] as string | undefined;
-    await admin.assertMfa(auth.userId, otp);
-    await admin.deletePlaylist(auth.userId, id, clientIp(request));
+    await admin.deletePlaylist(auth.userId, id);
     return { ok: true };
   });
+
+  // ---- Downloads monitoring ----------------------------------------------
+
+  app.get('/admin/downloads', { preHandler: guard }, async (request) => {
+    const { page, limit, status, query, userId } = request.query as {
+      page?: unknown;
+      limit?: unknown;
+      status?: unknown;
+      query?: unknown;
+      userId?: unknown;
+    };
+    const sq = typeof status === 'string' ? status.slice(0, 20) : undefined;
+    const q = typeof query === 'string' ? query.trim().slice(0, 80) : undefined;
+    const uid = typeof userId === 'string' && userId.length > 0 ? userId.slice(0, 100) : undefined;
+    return admin.listDownloads(intParam(page, 1, 10_000), intParam(limit, 30, 200), {
+      status: sq,
+      query: q,
+      userId: uid,
+    });
+  });
+
+  app.get('/admin/downloads/stats', { preHandler: guard }, async () => {
+    return admin.downloadStats();
+  });
+
+  app.post('/admin/downloads/:id/retry', { preHandler: guard }, async (request) => {
+    const auth = (request as AuthenticatedRequest).auth;
+    const { id } = request.params as { id: string };
+    return admin.retryDownload(auth.userId, id);
+  });
+
+  app.post('/admin/downloads/:id/cancel', { preHandler: guard }, async (request) => {
+    const auth = (request as AuthenticatedRequest).auth;
+    const { id } = request.params as { id: string };
+    return admin.cancelDownload(auth.userId, id);
+  });
+
+  // ---- Devices -----------------------------------------------------------
+
+  app.get('/admin/devices', { preHandler: guard }, async (request) => {
+    const { userId } = request.query as { userId?: unknown };
+    const uid = typeof userId === 'string' && userId.length > 0 ? userId.slice(0, 100) : undefined;
+    return admin.listDevices(uid);
+  });
+
+  app.delete('/admin/devices/:id', { preHandler: guard }, async (request) => {
+    const auth = (request as AuthenticatedRequest).auth;
+    const { id } = request.params as { id: string };
+    await admin.revokeDevice(auth.userId, id);
+    return { ok: true };
+  });
+
+  // ---- Audit -------------------------------------------------------------
 
   app.get('/admin/audit', { preHandler: guard }, async (request) => {
     const { page, limit, action } = request.query as {
@@ -154,33 +213,18 @@ export function registerAdminRoutes(
     return admin.listAudit(intParam(page, 1, 10_000), intParam(limit, 30, 100), a);
   });
 
-  // ---- MFA (self-service for the signed-in admin) -----------------------
+  // ---- System / reliability ----------------------------------------------
 
-  app.get('/admin/mfa', { preHandler: guard }, async (request) => {
-    const auth = (request as AuthenticatedRequest).auth;
-    return admin.mfaStatus(auth.userId);
+  app.get('/admin/system', { preHandler: guard }, async () => {
+    return admin.systemHealth();
   });
 
-  app.post('/admin/mfa/enroll', { preHandler: guard }, async (request) => {
-    const auth = (request as AuthenticatedRequest).auth;
-    return admin.mfaEnroll(auth.userId);
+  app.get('/admin/caches', { preHandler: guard }, async () => {
+    return admin.cacheSizes();
   });
 
-  app.post('/admin/mfa/verify', { preHandler: guard }, async (request) => {
-    const auth = (request as AuthenticatedRequest).auth;
-    const body = (request.body ?? {}) as { code?: unknown };
-    const code = String(body.code ?? '').trim();
-    if (!/^\d{6}$/.test(code)) throw new ValidationError('A 6-digit code is required');
-    await admin.mfaVerify(auth.userId, code, clientIp(request));
-    return { ok: true };
-  });
-
-  app.post('/admin/mfa/disable', { preHandler: guard }, async (request) => {
-    const auth = (request as AuthenticatedRequest).auth;
-    const body = (request.body ?? {}) as { code?: unknown };
-    const code = String(body.code ?? '').trim();
-    if (!/^\d{6}$/.test(code)) throw new ValidationError('A 6-digit code is required');
-    await admin.mfaDisable(auth.userId, code, clientIp(request));
-    return { ok: true };
+  app.get('/admin/reliability', { preHandler: guard }, async (request) => {
+    const { days } = request.query as { days?: unknown };
+    return admin.reliabilityOverview(intParam(days, 30, 90));
   });
 }

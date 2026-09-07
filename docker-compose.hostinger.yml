@@ -1,0 +1,58 @@
+#
+# Hostinger KVM VPS deployment for the Sinc API.
+#
+# Usage (over SSH on the VPS, from the repo checkout):
+#   docker compose -f docker-compose.hostinger.yml up -d --build
+#
+# Requirements on the VPS:
+#   - Docker Engine + Docker Compose plugin (setup script installs these)
+#   - Ubuntu 22.04/24.04
+#   - A .env file in this directory with the Sinc secrets (see deploy-hostinger.sh)
+#
+version: "3.8"
+
+services:
+  sinc-api:
+    # Build context MUST be the repo root (the Dockerfile copies packages/shared
+    # and apps/server). The build target is the runtime image.
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    image: sinc-api:latest
+    container_name: sinc-api
+    restart: unless-stopped
+    # Note: with the nginx TLS proxy in front, the API is exposed on
+    # 127.0.0.1:3000 only (internal). External clients reach it at
+    # https://<domain> via nginx on 443. If you skip the proxy for a quick test,
+    # change this to "3000:3000" to expose it publicly on the VPS.
+    expose:
+      - "3000"
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - .env
+    environment:
+      # Override the run-time defaults baked into the Dockerfile so downloads
+      # and logs live on a persistent host volume.
+      NODE_ENV: production
+      DOWNLOAD_DIR: /data/downloads
+      PORT: "3000"
+      HOST: "0.0.0.0"
+    volumes:
+      # Persistent downloads survive container restarts/upgrades.
+      - sinc_downloads:/data/downloads
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-fsS",
+          "http://127.0.0.1:3000/health",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  sinc_downloads:

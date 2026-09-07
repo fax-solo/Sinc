@@ -13,6 +13,8 @@ import { ArtistRow } from '../../components/ArtistRow';
 import { AlbumRow } from '../../components/AlbumRow';
 import { AppButton } from '../../components/AppButton';
 import { SecuritySettings } from '../lock/SecuritySettings';
+import { AboutUpdatesView } from '../updates/AboutUpdatesView';
+import { useUpdateStore } from '../updates/updateStore';
 import { SpotifyImportScreen } from './SpotifyImportScreen';
 import { useTheme } from '../../theme';
 import { playerService } from '../../services/player/PlayerService';
@@ -37,7 +39,8 @@ type LibraryView =
   | { kind: 'spotify-import' }
   | { kind: 'playlist'; playlist: LocalPlaylist }
   | { kind: 'downloads' }
-  | { kind: 'settings' };
+  | { kind: 'settings' }
+  | { kind: 'about' };
 
 function SectionRow({
   icon,
@@ -102,6 +105,46 @@ function SectionHeader({ title, onBack }: { title: string; onBack: () => void })
 }
 
 const TRACK_ROW_HEIGHT = 64;
+
+/** Stepped discovery-control slider: 0 = stay familiar, 1 = always new. */
+function DiscoverySlider() {
+  const { colors, spacing, radii } = useTheme();
+  const preference = useLibraryStore((s) => s.discoveryPreference);
+  const steps = 10;
+  const active = Math.round(preference * steps);
+
+  return (
+    <View style={{ marginTop: spacing.lg }}>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+        <AppText variant="small" color="textMuted">
+          More familiar
+        </AppText>
+        <AppText variant="small" color="textMuted">
+          More new
+        </AppText>
+      </View>
+      <View
+        style={{ flexDirection: 'row', gap: spacing.xxs, marginTop: spacing.sm }}
+        accessibilityLabel={`Discovery preference ${Math.round(preference * 100)}%`}
+      >
+        {Array.from({ length: steps + 1 }, (_, i) => (
+          <Pressable
+            key={i}
+            onPress={() => useLibraryStore.getState().setDiscoveryPreference(i / steps)}
+            accessibilityRole="adjustable"
+            accessibilityLabel={`Discovery level ${i}`}
+            style={[
+              styles.discoveryStep,
+              { flex: 1, borderRadius: radii.sm },
+              i <= active && { backgroundColor: colors.accent },
+              !(i <= active) && { backgroundColor: colors.surfaceElevated },
+            ]}
+          />
+        ))}
+      </View>
+    </View>
+  );
+}
 
 function TrackListView({
   title,
@@ -524,11 +567,12 @@ function DownloadsView({ onBack }: { onBack: () => void }) {
 }
 
 export function LibraryScreen() {
-  const { colors, spacing, radii } = useTheme();
+  const { colors, spacing } = useTheme();
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<LibraryNavigation>();
   const user = useAuthStore((s) => s.user);
   const downloads = useDownloadsStore((s) => s.downloads);
+  const softStatus = useUpdateStore((s) => s.softStatus);
   const favoriteTracks = useLibraryStore((s) => s.favoriteTracks);
   const recentlyPlayed = useLibraryStore((s) => s.recentlyPlayed);
   const followedArtists = useLibraryStore((s) => s.followedArtists);
@@ -599,12 +643,18 @@ export function LibraryScreen() {
     return <SecuritySettings onBack={() => setView({ kind: 'root' })} />;
   }
 
+  if (view.kind === 'about') {
+    return <AboutUpdatesView onBack={() => setView({ kind: 'root' })} />;
+  }
+
   return (
     <ScrollView
       style={{ backgroundColor: colors.background, flex: 1 }}
       contentContainerStyle={[styles.content, { paddingTop: insets.top + spacing.md }]}
     >
       <AppText variant="display">Your Library</AppText>
+
+      <DiscoverySlider />
 
       {recentPlaylists.length > 0 ? (
         <View style={{ marginTop: spacing.lg }}>
@@ -681,6 +731,13 @@ export function LibraryScreen() {
           title="Security"
           subtitle="PIN & biometric app lock"
           onPress={() => setView({ kind: 'settings' })}
+        />
+        <SectionRow
+          icon="information-circle"
+          iconColor="#0E7C86"
+          title="About & updates"
+          subtitle={softStatus === 'available' ? 'Update available' : 'Version & app updates'}
+          onPress={() => setView({ kind: 'about' })}
         />
         {user?.role === 'admin' ? (
           <SectionRow
@@ -763,6 +820,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     fontSize: 14,
+  },
+  discoveryStep: {
+    height: 24,
   },
   emptyText: {
     textAlign: 'center',

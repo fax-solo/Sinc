@@ -9,6 +9,7 @@ import { musicApi } from '../../api/music';
 import { getCachedPersonalizedHome } from '../../api/resultCache';
 import { useAuthStore } from '../auth/authStore';
 import { playerService } from '../../services/player/PlayerService';
+import { useLibraryStore } from '../../services/library/libraryStore';
 import { recordCollectionPlay } from '../../services/library/sync';
 import { shareEntity } from '../../utils/share';
 import type { DailyMix } from '../../api/music';
@@ -107,6 +108,25 @@ export function MixScreen({ route, navigation }: Props) {
     });
   }, [resolved]);
 
+  const notInterestedAt = useLibraryStore((s) => s.thumbsDown[resolved?.id ?? '']);
+
+  const notInterested = useCallback(() => {
+    if (!resolved) return;
+    useLibraryStore.getState().setThumb(resolved.id, notInterestedAt ? 'none' : 'down');
+  }, [resolved, notInterestedAt]);
+
+  const renderItem = useCallback(
+    ({ item, index }: { item: CanonicalTrack; index: number }) => (
+      <SongRow
+        track={item}
+        showFavorite
+        showAdd
+        onPress={() => (resolved ? playAll(resolved.tracks, index) : undefined)}
+      />
+    ),
+    [playAll, resolved]
+  );
+
   if (loading) {
     return (
       <View
@@ -142,13 +162,6 @@ export function MixScreen({ route, navigation }: Props) {
       </View>
     );
   }
-
-  const renderItem = useCallback(
-    ({ item, index }: { item: CanonicalTrack; index: number }) => (
-      <SongRow track={item} showFavorite showAdd onPress={() => playAll(resolved.tracks, index)} />
-    ),
-    [playAll, resolved]
-  );
 
   return (
     <FlatList
@@ -229,6 +242,28 @@ export function MixScreen({ route, navigation }: Props) {
             >
               <AppText variant="bodyLarge" color="textPrimary">
                 Share
+              </AppText>
+            </Pressable>
+            <Pressable
+              onPress={notInterested}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel={
+                notInterestedAt ? 'Restore this mix' : "Don't show mixes like this"
+              }
+              style={[
+                styles.shareButton,
+                {
+                  backgroundColor: notInterestedAt ? colors.error : colors.surfaceElevated,
+                  borderRadius: radii.full,
+                },
+              ]}
+            >
+              <AppText
+                variant="bodyLarge"
+                style={{ color: notInterestedAt ? colors.onAccent : colors.textPrimary }}
+              >
+                {notInterestedAt ? 'Restore' : 'Not interested'}
               </AppText>
             </Pressable>
           </View>

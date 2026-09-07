@@ -11,6 +11,12 @@ export interface LocalPlaylist {
   updatedAt: number;
 }
 
+export interface PlayStat {
+  count: number;
+  completedCount: number;
+  lastPlayedAt: number;
+}
+
 interface LibraryState {
   favoriteTracks: CanonicalTrack[];
   recentlyPlayed: CanonicalTrack[];
@@ -18,6 +24,17 @@ interface LibraryState {
   followedAlbums: CanonicalAlbum[];
   playlists: LocalPlaylist[];
   recentlyPlayedPlaylistIds: string[];
+
+  /** On-device listening signals (the ranking inputs for the server engine). */
+  playStats: Record<string, PlayStat>;
+  skipStats: Record<string, number>;
+  artistPlayStats: Record<string, number>;
+  thumbsUp: Record<string, number>;
+  thumbsDown: Record<string, number>;
+  hiddenTrackIds: string[];
+  hiddenArtistNames: string[];
+  /** 0 = stay familiar, 1 = always new. */
+  discoveryPreference: number;
 
   favoriteIds: ReadonlySet<string>;
   followedArtistIds: ReadonlySet<string>;
@@ -36,10 +53,28 @@ interface LibraryState {
   addToPlaylist: (id: string, track: CanonicalTrack) => void;
   removeFromPlaylist: (id: string, trackId: string) => void;
   recordPlaylistPlayed: (id: string) => void;
+
+  recordPlayStarted: (track: CanonicalTrack) => void;
+  recordPlayCompleted: (track: CanonicalTrack) => void;
+  recordSkip: (track: CanonicalTrack) => void;
+  getThumb: (targetId: string) => 'up' | 'down' | undefined;
+  setThumb: (targetId: string, value: 'up' | 'down' | 'none') => void;
+  hideTrack: (trackId: string) => void;
+  hideArtist: (name: string) => void;
+  unhideTrack: (trackId: string) => void;
+  unhideArtist: (name: string) => void;
+  setDiscoveryPreference: (value: number) => void;
 }
 
 const MAX_RECENT = 100;
 const MAX_RECENT_PLAYLISTS = 5;
+const MAX_PLAY_STATS = 500;
+const MAX_HIDDEN_TRACKS = 200;
+const MAX_HIDDEN_ARTISTS = 50;
+
+function clamp(value: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, value));
+}
 
 function prependUnique<T extends { id: string }>(items: T[], item: T, max: number): T[] {
   return [item, ...items.filter((i) => i.id !== item.id)].slice(0, max);
@@ -47,6 +82,17 @@ function prependUnique<T extends { id: string }>(items: T[], item: T, max: numbe
 
 function idsOf<T extends { id: string }>(items: T[]): Set<string> {
   return new Set(items.map((i) => i.id));
+}
+
+function prunePlayStats(stats: Record<string, PlayStat>): Record<string, PlayStat> {
+  const kept = Object.entries(stats)
+    .sort((a, b) => b[1].lastPlayedAt - a[1].lastPlayedAt)
+    .slice(0, MAX_PLAY_STATS);
+  return Object.fromEntries(kept);
+}
+
+function addCapped(list: string[], value: string, cap: number): string[] {
+  return list.includes(value) ? list : [...list, value].slice(-cap);
 }
 
 function emptyState(): Pick<
@@ -60,6 +106,14 @@ function emptyState(): Pick<
   | 'favoriteIds'
   | 'followedArtistIds'
   | 'followedAlbumIds'
+  | 'playStats'
+  | 'skipStats'
+  | 'artistPlayStats'
+  | 'thumbsUp'
+  | 'thumbsDown'
+  | 'hiddenTrackIds'
+  | 'hiddenArtistNames'
+  | 'discoveryPreference'
 > {
   return {
     favoriteTracks: [],
@@ -71,6 +125,14 @@ function emptyState(): Pick<
     favoriteIds: new Set<string>(),
     followedArtistIds: new Set<string>(),
     followedAlbumIds: new Set<string>(),
+    playStats: {},
+    skipStats: {},
+    artistPlayStats: {},
+    thumbsUp: {},
+    thumbsDown: {},
+    hiddenTrackIds: [],
+    hiddenArtistNames: [],
+    discoveryPreference: 0.5,
   };
 }
 
@@ -175,6 +237,94 @@ export const useLibraryStore = create<LibraryState>()(
         const next = [id, ...ids.filter((i) => i !== id)].slice(0, MAX_RECENT_PLAYLISTS);
         set({ recentlyPlayedPlaylistIds: next });
       },
+
+      recordPlayStarted: (track) => {
+        set((state) => {
+          const prev = state.playStats[track.id] ?? {
+            count: 0,
+            completedCount: 0,
+            lastPlayedAt: 0,
+          };
+          const playStats = prunePlayStats({
+            ...state.playStats,
+            [track.id]: {
+              ...prev,
+              count: prev.count + 1,
+              lastPlayedAt: Date.now(),
+            },
+          });
+          const artist = track.artists[0]?.name;
+          const artistPlayStats = artist
+            ? {
+                ...state.artistPlayStats,
+                [artist]: (state.artistPlayStats[artist] ?? 0) + 1,
+              }
+            : state.artistPlayStats;
+          return { playStats, artistPlayStats };
+        });
+      },
+
+      recordPlayCompleted: (track) => {
+        set((state) => {
+          const prev = state.playStats[track.id] ?? {
+            count: 1,
+            completedCount: 0,
+            lastPlayedAt: Date.now(),
+          };
+          return {
+            playStats: {
+              ...state.playStats,
+              [track.id]: { ...prev, completedCount: prev.completedCount + 1 },
+            },
+          };
+        });
+      },
+
+      recordSkip: (track) => {
+        set((state) => ({
+          skipStats: {
+            ...state.skipStats,
+            [track.id]: (state.skipStats[track.id] ?? 0) + 1,
+          },
+        }));
+      },
+
+      getThumb: (targetId) =>
+        get().thumbsUp[targetId] ? 'up' : get().thumbsDown[targetId] ? 'down' : undefined,
+
+      setThumb: (targetId, value) => {
+        set((state) => {
+          const thumbsUp = { ...state.thumbsUp };
+          const thumbsDown = { ...state.thumbsDown };
+          delete thumbsUp[targetId];
+          delete thumbsDown[targetId];
+          if (value === 'up') thumbsUp[targetId] = Date.now();
+          else if (value === 'down') thumbsDown[targetId] = Date.now();
+          return { thumbsUp, thumbsDown };
+        });
+      },
+
+      hideTrack: (trackId) =>
+        set((state) => ({
+          hiddenTrackIds: addCapped(state.hiddenTrackIds, trackId, MAX_HIDDEN_TRACKS),
+        })),
+
+      hideArtist: (name) =>
+        set((state) => ({
+          hiddenArtistNames: addCapped(state.hiddenArtistNames, name, MAX_HIDDEN_ARTISTS),
+        })),
+
+      unhideTrack: (trackId) =>
+        set((state) => ({
+          hiddenTrackIds: state.hiddenTrackIds.filter((id) => id !== trackId),
+        })),
+
+      unhideArtist: (name) =>
+        set((state) => ({
+          hiddenArtistNames: state.hiddenArtistNames.filter((n) => n !== name),
+        })),
+
+      setDiscoveryPreference: (value) => set({ discoveryPreference: clamp(value, 0, 1) }),
     }),
     {
       name: STORAGE_KEYS.LIBRARY,
@@ -183,7 +333,7 @@ export const useLibraryStore = create<LibraryState>()(
         setItem: (key, value) => storage.setString(key, value),
         removeItem: (key) => storage.remove(key),
       })),
-      version: 2,
+      version: 3,
       partialize: (state) => ({
         favoriteTracks: state.favoriteTracks,
         recentlyPlayed: state.recentlyPlayed,
@@ -191,6 +341,14 @@ export const useLibraryStore = create<LibraryState>()(
         followedAlbums: state.followedAlbums,
         playlists: state.playlists,
         recentlyPlayedPlaylistIds: state.recentlyPlayedPlaylistIds,
+        playStats: state.playStats,
+        skipStats: state.skipStats,
+        artistPlayStats: state.artistPlayStats,
+        thumbsUp: state.thumbsUp,
+        thumbsDown: state.thumbsDown,
+        hiddenTrackIds: state.hiddenTrackIds,
+        hiddenArtistNames: state.hiddenArtistNames,
+        discoveryPreference: state.discoveryPreference,
       }),
       onRehydrateStorage: () => (state) => {
         if (state) {

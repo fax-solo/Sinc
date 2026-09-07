@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CanonicalTrack } from '@sinc/shared';
-import { PersonalizationService, type DailyMix, type LibraryPayload } from './personalization.js';
+import {
+  PersonalizationService,
+  parseLibraryPayload,
+  type DailyMix,
+  type LibraryPayload,
+} from './personalization.js';
 
 function track(id: string, artist = 'Fresh Artist', title = `Track ${id}`): CanonicalTrack {
   return {
@@ -499,5 +504,298 @@ describe('PersonalizationService', () => {
       (s) => s.kind === 'albums' && s.title === 'Albums you might like'
     );
     expect(albums?.kind === 'albums' && albums.explanation).toContain('New Artist');
+  });
+
+  it('sanitizes and caps the signals portion of the library payload', () => {
+    const library = parseLibraryPayload({
+      signals: {
+        playCounts: Array.from({ length: 500 }, (_, i) => ({
+          trackId: `t${i % 10}`,
+          count: 1,
+          lastPlayedAt: 1,
+        })),
+        artistPlayCounts: [
+          { name: 'A', count: 3 },
+          { name: '', count: 9 },
+        ],
+        skipCounts: [
+          { trackId: 'a', count: -5 },
+          { trackId: 'b', count: 1 },
+        ],
+        completedCounts: [
+          { trackId: 'a', count: 'x' },
+          { trackId: 'b', count: 2 },
+        ],
+        thumbs: [
+          { targetId: '', value: 'up' },
+          { targetId: 't1', value: 'no' },
+          { targetId: 't2', value: 'down' },
+        ],
+        hiddenTrackIds: ['h1', '', 42],
+        hiddenArtistNames: ['art', ''],
+        discoveryPreference: 2.5,
+      } as never,
+      playlists: 'not-a-list' as never,
+    });
+
+    expect(library.playlists).toEqual([]);
+    const s = library.signals!;
+    expect(s).toBeDefined();
+    expect(s.playCounts!.length).toBeLessThanOrEqual(300);
+    expect(s.artistPlayCounts).toEqual([{ name: 'A', count: 3 }]);
+    expect(s.skipCounts!.map((x) => x.trackId)).toEqual(['b']);
+    expect(s.completedCounts!.map((x) => x.trackId)).toEqual(['b']);
+    expect(s.thumbs).toEqual([
+      { targetId: 't1', value: 'up' },
+      { targetId: 't2', value: 'down' },
+    ]);
+    expect(s.hiddenTrackIds).toEqual(['h1']);
+    expect(s.hiddenArtistNames).toEqual(['art']);
+    expect(s.discoveryPreference).toBe(1);
+  });
+
+  it('parses empty or garbage signals without throwing', () => {
+    expect(parseLibraryPayload({ signals: 'garbage' as never }).signals).toBeUndefined();
+    expect(parseLibraryPayload({}).signals).toBeUndefined();
+    expect(parseLibraryPayload(undefined).signals).toBeUndefined();
+  });
+
+  it('ranks engagement into the daily mix: thumbs-up first, skip-heavy last', async () => {
+    const history = [historyRow('t1', 'Pop Artist')];
+    const deezer = makeDeezer({});
+    deezer.genreChartTracks.mockResolvedValue([
+      track('sh-1', 'Skipper', 'Skipped'),
+      track('bu-1', 'Booster', 'Boosted'),
+      ...Array.from({ length: 8 }, (_, i) => track(`x-${i}`, `Newcomer ${i}`, `T${i}`)),
+      track('kn-1', 'Pop Artist', 'Known'),
+    ]);
+    const library: LibraryPayload = {
+      signals: {
+        playCounts: [{ trackId: 'sh-1', count: 5, lastPlayedAt: Date.now() }],
+        skipCounts: [{ trackId: 'sh-1', count: 4 }],
+        completedCounts: [{ trackId: 'sh-1', count: 0 }],
+        thumbs: [{ targetId: 'bu-1', value: 'up' }],
+      },
+    };
+    const service = new PersonalizationService(makeDb(history, []) as never);
+    const mixes = await service.buildMixes(
+      'user-1',
+      makeItunes({ 'Pop Artist': 'Pop' }) as never,
+      deezer as never,
+      { library }
+    );
+    const daily = mixes.find((m) => m.id === 'mix:132')!;
+    expect(daily.tracks[0].id).toBe('bu-1');
+    const buIdx = daily.tracks.findIndex((t) => t.id === 'bu-1');
+    const shIdx = daily.tracks.findIndex((t) => t.id === 'sh-1');
+    expect(buIdx).toBe(0);
+    expect(shIdx).toBeGreaterThan(buIdx);
+  });
+
+  it('excludes hidden and thumbs-downed tracks from every rail', async () => {
+    const history = [historyRow('t1', 'Pop Artist')];
+    const deezer = makeDeezer({});
+    const pool = [
+      track('hush-1', 'Hidden Artist', 'H'),
+      track('boo-1', 'Booed Artist', 'B'),
+      ...Array.from({ length: 12 }, (_, i) => track(`ok-${i}`, `N${i}`, `A${i}`)),
+    ];
+    deezer.genreChartTracks.mockResolvedValue(pool);
+    const library: LibraryPayload = {
+      signals: {
+        hiddenTrackIds: ['hush-1'],
+        thumbs: [{ targetId: 'boo-1', value: 'down' }],
+      },
+    };
+    const service = new PersonalizationService(makeDb(history, []) as never);
+    const mixes = await service.buildMixes(
+      'user-1',
+      makeItunes({ 'Pop Artist': 'Pop' }) as never,
+      deezer as never,
+      { library }
+    );
+    const ids = mixes.flatMap((m) => m.tracks.map((t) => t.id));
+    expect(ids).not.toContain('hush-1');
+    expect(ids).not.toContain('boo-1');
+  });
+
+  it('drops the Discovery Mix when the user prefers staying familiar', async () => {
+    const history = ['A1', 'A2', 'A3', 'A4', 'A5', 'A6'].map((name, i) =>
+      historyRow(`t${i + 1}`, name)
+    );
+    const deezer = makeDeezer({ A1: 101, A2: 102, A3: 103, A4: 104, A5: 105, A6: 106 });
+    deezer.genreChartTracks.mockImplementation(async (id: number) =>
+      Array.from({ length: 8 }, (_, i) => track(`g${id}-${i}`, `D${id}-${i}`, `T${i}`))
+    );
+    const service = new PersonalizationService(makeDb(history, []) as never);
+    const low = await service.buildMixes('user-1', makeItunes() as never, deezer as never, {
+      library: { signals: { discoveryPreference: 0.1 } },
+    });
+    expect(low.some((m) => m.kind === 'discovery')).toBe(false);
+    const high = await service.buildMixes('user-1', makeItunes() as never, deezer as never, {
+      library: { signals: { discoveryPreference: 0.9 } },
+    });
+    expect(high.some((m) => m.kind === 'discovery')).toBe(true);
+  });
+
+  it('serves more familiar artists when the discovery preference is low', async () => {
+    const historyRowA = historyRow('t1', 'Pop Artist');
+    const deezer = makeDeezer({});
+    const pool = [
+      ...Array.from({ length: 20 }, (_, i) => track(`k-${i}`, 'Pop Artist', `K${i}`)),
+      ...Array.from({ length: 20 }, (_, i) => track(`f-${i}`, `Fresh ${i}`, `F${i}`)),
+    ];
+    deezer.genreChartTracks.mockResolvedValue(pool);
+    const service = new PersonalizationService(makeDb([historyRowA], []) as never);
+    const knownOf = (mixes: DailyMix[]) => {
+      const daily = mixes.find((m) => m.id === 'mix:132')!;
+      return daily.tracks.filter((t) => t.artists[0]?.name === 'Pop Artist').length;
+    };
+    const low = await service.buildMixes(
+      'user-1',
+      makeItunes({ 'Pop Artist': 'Pop' }) as never,
+      deezer as never,
+      {
+        library: { signals: { discoveryPreference: 0.05 } },
+      }
+    );
+    const high = await service.buildMixes(
+      'user-1',
+      makeItunes({ 'Pop Artist': 'Pop' }) as never,
+      deezer as never,
+      {
+        library: { signals: { discoveryPreference: 0.95 } },
+      }
+    );
+    expect(knownOf(low)).toBeGreaterThan(knownOf(high));
+  });
+
+  it('builds On repeat and Your top songs from device play counts', async () => {
+    const library: LibraryPayload = {
+      downloadedTracks: [1, 2, 3, 4].map((i) => track(`rp-${i}`, `RP Artist ${i}`, `Repeat ${i}`)),
+      signals: {
+        playCounts: [
+          { trackId: 'rp-1', count: 5, lastPlayedAt: Date.now() },
+          { trackId: 'rp-2', count: 3, lastPlayedAt: Date.now() },
+          { trackId: 'rp-3', count: 2, lastPlayedAt: Date.now() },
+          { trackId: 'rp-4', count: 1, lastPlayedAt: Date.now() },
+        ],
+      },
+    };
+    const service = new PersonalizationService(makeDb([], []) as never);
+    const feed = await service.buildFeed('user-1', makeItunes() as never, makeDeezer() as never, {
+      library,
+    });
+    const onRepeat = trackSection(feed, 'On repeat')!;
+    expect(onRepeat.tracks.map((t) => t.id)).toEqual(['rp-1', 'rp-2', 'rp-3']);
+    const top = trackSection(feed, 'Your top songs')!;
+    expect(top.tracks.map((t) => t.id)).toEqual(['rp-1', 'rp-2', 'rp-3', 'rp-4']);
+  });
+
+  it('hides skip-heavy tracks from On repeat / Your top songs', async () => {
+    const library: LibraryPayload = {
+      downloadedTracks: [1, 2, 3, 4].map((i) => track(`rp-${i}`, `RP Artist ${i}`, `Repeat ${i}`)),
+      signals: {
+        playCounts: [
+          { trackId: 'rp-1', count: 5, lastPlayedAt: Date.now() },
+          { trackId: 'rp-2', count: 3, lastPlayedAt: Date.now() },
+          { trackId: 'rp-3', count: 2, lastPlayedAt: Date.now() },
+          { trackId: 'rp-4', count: 1, lastPlayedAt: Date.now() },
+        ],
+        skipCounts: [{ trackId: 'rp-1', count: 4 }],
+      },
+    };
+    const service = new PersonalizationService(makeDb([], []) as never);
+    const feed = await service.buildFeed('user-1', makeItunes() as never, makeDeezer() as never, {
+      library,
+    });
+    expect(trackSection(feed, 'On repeat')).toBeUndefined();
+    const top = trackSection(feed, 'Your top songs')!;
+    expect(top.tracks.map((t) => t.id)).not.toContain('rp-1');
+  });
+
+  it('surfaces a thumbs-up artist in the recommended songs explanation', async () => {
+    const history = [historyRow('t1', 'Pop Artist')];
+    const deezer = makeDeezer({ 'Pop Artist': 132 });
+    deezer.genreChartTracks.mockResolvedValue(
+      Array.from({ length: 60 }, (_, i) => track(`g${i}`, `N${i}`, `A${i}`))
+    );
+    const library: LibraryPayload = {
+      signals: { thumbs: [{ targetId: 'artist:Pop Artist', value: 'up' }] },
+    };
+    const service = new PersonalizationService(makeDb(history, []) as never);
+    const feed = await service.buildFeed(
+      'user-1',
+      makeItunes({ 'Pop Artist': 'Pop' }) as never,
+      deezer as never,
+      { library }
+    );
+    const songs = trackSection(feed, 'Recommended songs');
+    expect(songs?.explanation).toBe('Because you liked Pop Artist');
+  });
+
+  it('de-weights a genre once two downvotes share it', async () => {
+    const history = [historyRow('t1', 'Pop Artist'), historyRow('t2', 'Rock Artist')];
+    const deezer = makeDeezer({ 'Pop Artist': 132, 'Rock Artist': 152, 'Bad Artist': 152 });
+    const service = new PersonalizationService(makeDb(history, []) as never);
+    const library: LibraryPayload = {
+      signals: {
+        thumbs: [
+          { targetId: 'artist:Rock Artist', value: 'down' },
+          { targetId: 'artist:Bad Artist', value: 'down' },
+        ],
+      },
+    };
+    const diag = await service.diagnostics('user-1', makeItunes() as never, deezer as never, {
+      library,
+    });
+    expect(diag.learning.suppressedGenres.some((s) => s.genreId === 152)).toBe(true);
+    expect(diag.learning.excludedArtists).toContain('Rock Artist');
+    expect(diag.learning.excludedTrackCount).toBe(0);
+    const g152 = diag.seeds.topGenres.find((g) => g.genreId === 152);
+    const g132 = diag.seeds.topGenres.find((g) => g.genreId === 132);
+    expect(g152?.score).toBeLessThan(0.5);
+    expect(g132?.score).toBeGreaterThan(g152?.score ?? 0);
+  });
+
+  it('expands a mix across artists instead of clustering one', async () => {
+    const history = [historyRow('t1', 'Pop Artist')];
+    const deezer = makeDeezer({});
+    const pool = Array.from({ length: 20 }, (_, i) =>
+      i % 2 === 0 ? track(`a-${i}`, 'ArtistA', `A${i}`) : track(`b-${i}`, 'ArtistB', `B${i}`)
+    );
+    deezer.genreChartTracks.mockResolvedValue(pool);
+    const service = new PersonalizationService(makeDb(history, []) as never);
+    const mixes = await service.buildMixes(
+      'user-1',
+      makeItunes({ 'Pop Artist': 'Pop' }) as never,
+      deezer as never
+    );
+    const daily = mixes.find((m) => m.id === 'mix:132')!;
+    for (let i = 0; i < Math.min(6, daily.tracks.length - 1); i++) {
+      expect(daily.tracks[i].artists[0]?.name).not.toBe(daily.tracks[i + 1].artists[0]?.name);
+    }
+  });
+
+  it('drops a daily mix the user marked not-interested', async () => {
+    const history = [historyRow('t1', 'Pop Artist')];
+    const deezer = makeDeezer({ 'Pop Artist': 132 });
+    deezer.genreChartTracks.mockResolvedValue(
+      Array.from({ length: 60 }, (_, i) => track(`g${i}`, `N${i}`, `A${i}`))
+    );
+    const itunes = makeItunes({ 'Pop Artist': 'Pop' });
+    const service = new PersonalizationService(makeDb(history, []) as never);
+
+    const before = await service.buildFeed('user-1', itunes as never, deezer as never, {
+      library: {},
+    });
+    expect(mixSection(before)?.mixes.some((m) => m.id === 'mix:132')).toBe(true);
+
+    const library: LibraryPayload = {
+      signals: { thumbs: [{ targetId: 'mix:132', value: 'down' }] },
+    };
+    const after = await service.buildFeed('user-1', itunes as never, deezer as never, { library });
+    const daily = (mixSection(after)?.mixes ?? []).filter((m) => m.kind === 'daily');
+    expect(daily.some((m) => m.id === 'mix:132')).toBe(false);
   });
 });

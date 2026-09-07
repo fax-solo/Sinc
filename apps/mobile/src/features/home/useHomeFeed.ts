@@ -4,7 +4,6 @@ import {
   musicApi,
   type HomeFeed,
   type HomeSection,
-  type LibraryPayload,
   type PersonalizedHomeFeed,
 } from '../../api/music';
 import {
@@ -16,35 +15,12 @@ import {
 import { useAuthStore } from '../auth/authStore';
 import { useDownloadsStore } from '../../services/library/downloadsStore';
 import { useLibraryStore } from '../../services/library/libraryStore';
+import { useLocalDigest } from './localDigest';
+import { buildLibraryPayload } from './libraryPayload';
 
 export interface HomeFeedBundle {
   home: HomeFeed;
   personalized: PersonalizedHomeFeed | null;
-}
-
-/** Builds the local-library summary sent with the personalized feed request. */
-function buildLibraryPayload(): LibraryPayload {
-  const library = useLibraryStore.getState();
-  const downloads = useDownloadsStore.getState().downloads;
-  const downloadedTracks = downloads
-    .filter((d) => d.phase === 'completed')
-    .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))
-    .slice(0, 20)
-    .map((d) => d.track);
-
-  return {
-    playlists: library.playlists.map((p) => ({
-      id: p.id,
-      name: p.name,
-      artworkUrl: p.tracks.find((t) => t.artworkUrl)?.artworkUrl,
-      trackCount: p.tracks.length,
-      updatedAt: p.updatedAt,
-    })),
-    recentlyPlayedPlaylistIds: library.recentlyPlayedPlaylistIds,
-    downloadedTracks,
-    followedArtists: library.followedArtists,
-    followedAlbums: library.followedAlbums,
-  };
 }
 
 /** Maps the public global feed into Home sections (signed-out / fallback). */
@@ -154,10 +130,30 @@ export function useHomeFeed() {
   const followedArtists = useLibraryStore((s) => s.followedArtists);
   const followedAlbums = useLibraryStore((s) => s.followedAlbums);
   const downloads = useDownloadsStore((s) => s.downloads);
+  const playStats = useLibraryStore((s) => s.playStats);
+  const skipStats = useLibraryStore((s) => s.skipStats);
+  const thumbsUp = useLibraryStore((s) => s.thumbsUp);
+  const thumbsDown = useLibraryStore((s) => s.thumbsDown);
+  const hiddenTrackIds = useLibraryStore((s) => s.hiddenTrackIds);
+  const hiddenArtistNames = useLibraryStore((s) => s.hiddenArtistNames);
+  const discoveryPreference = useLibraryStore((s) => s.discoveryPreference);
   const libraryVersion = useMemo(
     () =>
-      `${playlists.length}:${recentlyPlayedPlaylistIds.length}:${followedArtists.length}:${followedAlbums.length}:${downloads.length}`,
-    [playlists, recentlyPlayedPlaylistIds, followedArtists, followedAlbums, downloads]
+      `${playlists.length}:${recentlyPlayedPlaylistIds.length}:${followedArtists.length}:${followedAlbums.length}:${downloads.length}:${Object.keys(playStats).length}:${Object.keys(skipStats).length}:${Object.keys(thumbsUp).length + Object.keys(thumbsDown).length}:${hiddenTrackIds.length}:${hiddenArtistNames.length}:${discoveryPreference.toFixed(2)}`,
+    [
+      playlists,
+      recentlyPlayedPlaylistIds,
+      followedArtists,
+      followedAlbums,
+      downloads,
+      playStats,
+      skipStats,
+      thumbsUp,
+      thumbsDown,
+      hiddenTrackIds,
+      hiddenArtistNames,
+      discoveryPreference,
+    ]
   );
 
   const home = useQuery<HomeFeed>({
@@ -173,6 +169,8 @@ export function useHomeFeed() {
     retry: 1,
   });
 
+  const localSections = useLocalDigest();
+
   const personalized = useQuery<PersonalizedHomeFeed>({
     queryKey: ['home-feed-personalized', userId, libraryVersion],
     queryFn: async () => {
@@ -187,14 +185,18 @@ export function useHomeFeed() {
     retry: 1,
   });
 
-  /** Final section list: personalized feed when signed in, global fallback otherwise. */
+  /** Final section list: server feed when signed in, local digest as instant/offline
+   *  fallback, global feed when signed out. */
   const sections = useMemo(() => {
     if (personalized.data && personalized.data.sections.length > 0) {
       return dedupeSections(personalized.data.sections);
     }
+    if (signedIn && localSections.length > 0) {
+      return localSections;
+    }
     if (home.data) return dedupeSections(globalSections(home.data));
     return [];
-  }, [personalized.data, home.data]);
+  }, [personalized.data, home.data, localSections, signedIn]);
 
   return {
     home,

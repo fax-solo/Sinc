@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { Prisma } from '@prisma/client';
-import type { UserRole } from '@sinc/shared';
-import { AuthorizationError, ConflictError, NotFoundError } from '@sinc/shared';
+import type { CanonicalTrack, UserRole } from '@sinc/shared';
+import { ConflictError, NotFoundError } from '@sinc/shared';
 import { prisma } from '../../lib/prisma.js';
-import { otpauthUri, generateTotpSecret, verifyTotp } from '../../lib/totp.js';
 import { toCanonicalUser } from '../auth/serializers.js';
+import type { DownloadsService } from '../downloads/service.js';
 
 export type AdminAction =
   | 'user.promote'
@@ -15,8 +18,9 @@ export type AdminAction =
   | 'user.reset_password'
   | 'session.revoke'
   | 'playlist.delete'
-  | 'mfa.enable'
-  | 'mfa.disable';
+  | 'device.revoke'
+  | 'download.retry'
+  | 'download.cancel';
 
 export interface AdminUserRow {
   id: string;
@@ -99,6 +103,8 @@ async function activeUsersPerDay(since: Date): Promise<Map<string, number>> {
 }
 
 export class AdminService {
+  constructor(private readonly downloads?: DownloadsService) {}
+
   /** Writes an audit row for an admin action (called by every mutating method). */
   private async audit(input: AuditInput): Promise<void> {
     await prisma.auditLog.create({
@@ -128,29 +134,30 @@ export class AdminService {
     }
   }
 
-  private async mfaFor(userId: string): Promise<{ secret: string; enabled: boolean } | null> {
-    return prisma.adminMfa.findUnique({
-      where: { userId },
-      select: { secret: true, enabled: true },
-    });
-  }
-
   // ---- Users -------------------------------------------------------------
 
   async listUsers(
     page: number,
     limit: number,
-    query?: string
+    opts: {
+      query?: string;
+      role?: 'user' | 'admin';
+      status?: 'active' | 'suspended';
+      sort?: 'createdAt' | 'lastLoginAt';
+    } = {}
   ): Promise<{ users: AdminUserRow[]; total: number }> {
-    const where = query
-      ? {
-          OR: [
-            { email: { contains: query, mode: 'insensitive' as const } },
-            { username: { contains: query, mode: 'insensitive' as const } },
-            { displayName: { contains: query, mode: 'insensitive' as const } },
-          ],
-        }
-      : undefined;
+    const where: Prisma.UserWhereInput = {};
+    if (opts.query) {
+      where.OR = [
+        { email: { contains: opts.query, mode: 'insensitive' as const } },
+        { username: { contains: opts.query, mode: 'insensitive' as const } },
+        { displayName: { contains: opts.query, mode: 'insensitive' as const } },
+      ];
+    }
+    if (opts.role) where.role = opts.role;
+    if (opts.status) where.status = opts.status;
+    const orderBy: Prisma.UserOrderByWithRelationInput =
+      opts.sort === 'lastLoginAt' ? { lastLoginAt: 'desc' } : { createdAt: 'desc' };
 
     const [rows, total] = await Promise.all([
       prisma.user.findMany({
@@ -167,7 +174,7 @@ export class AdminService {
           lastLoginAt: true,
           _count: { select: { sessions: true } },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy,
         skip: (page - 1) * limit,
         take: limit,
       }),
@@ -404,9 +411,7 @@ export class AdminService {
     });
   }
 
-  async statsActivity(
-    days: number
-  ): Promise<
+  async statsActivity(days: number): Promise<
     Array<{
       day: string;
       signups: number;
@@ -532,7 +537,7 @@ export class AdminService {
     }>;
     total: number;
   }> {
-    const where = action ? { action } : undefined;
+    const where = action ? { action: { startsWith: action } } : undefined;
     const [rows, total] = await Promise.all([
       prisma.auditLog.findMany({
         where,
@@ -556,60 +561,396 @@ export class AdminService {
     };
   }
 
-  // ---- MFA ---------------------------------------------------------------
+  // ---- Downloads monitoring ---------------------------------------------
 
-  async mfaStatus(userId: string): Promise<{ enabled: boolean }> {
-    const mfa = await this.mfaFor(userId);
-    return { enabled: mfa?.enabled === true };
-  }
+  async listDownloads(
+    page: number,
+    limit: number,
+    opts: { status?: string; query?: string; userId?: string } = {}
+  ): Promise<{
+    jobs: Array<{
+      id: string;
+      userId: string;
+      trackTitle: string;
+      trackArtist: string;
+      status: string;
+      progress: number;
+      provider?: string | null;
+      errorCode?: string | null;
+      errorMessage?: string | null;
+      createdAt: string;
+      completedAt?: string | null;
+    }>;
+    total: number;
+  }> {
+    const statuses = ['pending', 'downloading', 'paused', 'completed', 'failed', 'cancelled'];
+    const status = statuses.includes(opts.status ?? '') ? opts.status : undefined;
 
-  /** Generates a fresh TOTP secret for an admin (re-enrollment invalidates the old one). */
-  async mfaEnroll(userId: string): Promise<{ secret: string; otpauthUrl: string }> {
-    const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
-    if (!user) throw new NotFoundError('User');
-    const secret = generateTotpSecret();
-    await prisma.adminMfa.upsert({
-      where: { userId },
-      create: { userId, secret, enabled: false },
-      update: { secret, enabled: false },
-    });
-    return { secret, otpauthUrl: otpauthUri(secret, user.email) };
-  }
-
-  async mfaVerify(userId: string, code: string, ip?: string): Promise<void> {
-    const mfa = await this.mfaFor(userId);
-    if (!mfa) throw new NotFoundError('MFA enrollment');
-    if (!verifyTotp(mfa.secret, code)) throw new AuthorizationError('Invalid authentication code');
-    await prisma.adminMfa.update({ where: { userId }, data: { enabled: true } });
-    await this.audit({
-      actorId: userId,
-      action: 'mfa.enable',
-      targetType: 'admin',
-      targetId: userId,
-      ip,
-    });
-  }
-
-  async mfaDisable(userId: string, code: string, ip?: string): Promise<void> {
-    const mfa = await this.mfaFor(userId);
-    if (!mfa) throw new NotFoundError('MFA enrollment');
-    if (!verifyTotp(mfa.secret, code)) throw new AuthorizationError('Invalid authentication code');
-    await prisma.adminMfa.delete({ where: { userId } });
-    await this.audit({
-      actorId: userId,
-      action: 'mfa.disable',
-      targetType: 'admin',
-      targetId: userId,
-      ip,
-    });
-  }
-
-  /** Challenge check for destructive writes: admins with MFA must send a valid code. */
-  async assertMfa(actorId: string, code: string | undefined): Promise<void> {
-    const mfa = await this.mfaFor(actorId);
-    if (!mfa?.enabled) return;
-    if (!code || !verifyTotp(mfa.secret, code)) {
-      throw new AuthorizationError('A valid MFA code is required for this action');
+    const where: Prisma.DownloadJobWhereInput = {};
+    if (status) where.status = status;
+    if (opts.userId) where.userId = opts.userId;
+    if (opts.query) {
+      where.OR = [
+        { trackTitle: { contains: opts.query, mode: 'insensitive' as const } },
+        { trackArtist: { contains: opts.query, mode: 'insensitive' as const } },
+      ];
     }
+
+    const [rows, total] = await Promise.all([
+      prisma.downloadJob.findMany({
+        where,
+        select: {
+          id: true,
+          userId: true,
+          trackTitle: true,
+          trackArtist: true,
+          status: true,
+          progress: true,
+          provider: true,
+          errorCode: true,
+          errorMessage: true,
+          createdAt: true,
+          completedAt: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.downloadJob.count({ where }),
+    ]);
+
+    return {
+      jobs: rows.map((r) => ({
+        id: r.id,
+        userId: r.userId,
+        trackTitle: r.trackTitle,
+        trackArtist: r.trackArtist,
+        status: r.status,
+        progress: r.progress,
+        provider: r.provider,
+        errorCode: r.errorCode,
+        errorMessage: r.errorMessage,
+        createdAt: r.createdAt.toISOString(),
+        completedAt: r.completedAt?.toISOString() ?? null,
+      })),
+      total,
+    };
+  }
+
+  async downloadStats(): Promise<{
+    total: number;
+    byStatus: Record<string, number>;
+    completed: number;
+    failed: number;
+    successRate: number | null;
+  }> {
+    return cachedStats('admin:downloads:stats', 60_000, async () => {
+      const statuses = ['pending', 'downloading', 'paused', 'completed', 'failed', 'cancelled'];
+      const counts = await Promise.all(
+        statuses.map((s) => prisma.downloadJob.count({ where: { status: s } }))
+      );
+      const byStatus: Record<string, number> = {};
+      statuses.forEach((s, i) => {
+        byStatus[s] = counts[i];
+      });
+      const completed = byStatus.completed;
+      const failed = byStatus.failed;
+      const finished = completed + failed;
+      return {
+        total: counts.reduce((a, b) => a + b, 0),
+        byStatus,
+        completed,
+        failed,
+        successRate: finished > 0 ? (completed / finished) * 100 : null,
+      };
+    });
+  }
+
+  async retryDownload(actorId: string, jobId: string): Promise<{ ok: boolean }> {
+    const job = await prisma.downloadJob.findUnique({ where: { id: jobId } });
+    if (!job) throw new NotFoundError('Download');
+    if (job.status === 'downloading') return { ok: true };
+    await prisma.downloadJob.update({
+      where: { id: jobId },
+      data: { status: 'failed', errorMessage: 'Marked for retry by admin' },
+    });
+    await this.audit({
+      actorId,
+      action: 'download.retry',
+      targetType: 'download',
+      targetId: jobId,
+      details: { trackTitle: job.trackTitle, status: job.status },
+    });
+
+    if (this.downloads) {
+      const track: CanonicalTrack = {
+        id: job.trackId,
+        title: job.trackTitle,
+        artists: [
+          {
+            id: `admin:${job.userId}`,
+            name: job.trackArtist ?? 'Unknown Artist',
+            providerIds: {},
+            genres: [],
+          },
+        ],
+        providerIds: {},
+        durationMs: 0,
+        explicit: false,
+      };
+      void this.downloads.startDownload(job.userId, track).catch(() => undefined);
+    }
+    return { ok: true };
+  }
+
+  async cancelDownload(actorId: string, jobId: string): Promise<{ ok: boolean }> {
+    const job = await prisma.downloadJob.findUnique({ where: { id: jobId } });
+    if (!job) throw new NotFoundError('Download');
+    await prisma.downloadJob.update({
+      where: { id: jobId },
+      data: { status: 'cancelled', errorMessage: 'Cancelled by admin' },
+    });
+    await this.audit({
+      actorId,
+      action: 'download.cancel',
+      targetType: 'download',
+      targetId: jobId,
+      details: { trackTitle: job.trackTitle },
+    });
+    return { ok: true };
+  }
+
+  // ---- Devices -----------------------------------------------------------
+
+  async listDevices(userId?: string): Promise<{
+    devices: Array<{
+      id: string;
+      userId: string;
+      name: string;
+      platform: string;
+      lastSeenAt: string;
+      createdAt: string;
+    }>;
+    total: number;
+  }> {
+    const where = userId ? { userId } : undefined;
+    const [rows, total] = await Promise.all([
+      prisma.device.findMany({
+        where,
+        orderBy: { lastSeenAt: 'desc' },
+        take: 200,
+      }),
+      prisma.device.count({ where }),
+    ]);
+    return {
+      devices: rows.map((d) => ({
+        id: d.id,
+        userId: d.userId,
+        name: d.name,
+        platform: d.platform,
+        lastSeenAt: d.lastSeenAt.toISOString(),
+        createdAt: d.createdAt.toISOString(),
+      })),
+      total,
+    };
+  }
+
+  async revokeDevice(actorId: string, deviceId: string): Promise<{ ok: boolean }> {
+    const device = await prisma.device.findUnique({ where: { id: deviceId } });
+    if (!device) throw new NotFoundError('Device');
+    await prisma.device.delete({ where: { id: deviceId } });
+    await this.audit({
+      actorId,
+      action: 'device.revoke',
+      targetType: 'device',
+      targetId: deviceId,
+      details: { name: device.name, platform: device.platform },
+    });
+    return { ok: true };
+  }
+
+  // ---- User detail -------------------------------------------------------
+
+  async userDetail(userId: string): Promise<{
+    user: ReturnType<typeof toCanonicalUser>;
+    emailVerified: boolean;
+    sessionCount: number;
+    devices: number;
+    favorites: number;
+    playlists: number;
+    downloads: number;
+    completedDownloads: number;
+    historyCount: number;
+    totalPlays: number;
+  }> {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundError('User');
+    const [sessionCount, devices, favorites, playlists, downloads, completedDownloads, historyAgg] =
+      await Promise.all([
+        prisma.session.count({ where: { userId } }),
+        prisma.device.count({ where: { userId } }),
+        prisma.favorite.count({ where: { userId } }),
+        prisma.playlist.count({ where: { userId } }),
+        prisma.downloadJob.count({ where: { userId } }),
+        prisma.downloadJob.count({ where: { userId, status: 'completed' } }),
+        prisma.history.groupBy({ by: ['userId'], where: { userId }, _count: { _all: true } }),
+      ]);
+    return {
+      user: toCanonicalUser(user),
+      emailVerified: user.emailVerified,
+      sessionCount,
+      devices,
+      favorites,
+      playlists,
+      downloads,
+      completedDownloads,
+      historyCount: historyAgg[0]?._count._all ?? 0,
+      totalPlays: historyAgg[0]?._count._all ?? 0,
+    };
+  }
+
+  // ---- System / health ---------------------------------------------------
+
+  async systemHealth(): Promise<{
+    uptimeSec: number;
+    nodeVersion: string;
+    platform: string;
+    arch: string;
+    cpuCores: number;
+    memory: { total: number; free: number; used: number };
+    downloadsDir: {
+      path: string;
+      usedBytes: number | null;
+      fileCount: number;
+      aversions: Record<string, number>;
+    };
+    dbStatus: 'ok' | 'error';
+  }> {
+    const downloadDir = process.env.DOWNLOAD_DIR ?? './downloads';
+    let usedBytes: number | null = null;
+    let fileCount = 0;
+    const aversions: Record<string, number> = {};
+    try {
+      const entries = await fs.readdir(downloadDir, { withFileTypes: true });
+      const files = entries.filter((e) => e.isFile());
+      fileCount = files.length;
+      let total = 0;
+      const counts: Record<string, number> = {};
+      for (const f of files) {
+        try {
+          const s = await fs.stat(path.join(downloadDir, f.name));
+          total += s.size;
+          const ext = path.extname(f.name).toLowerCase() || 'none';
+          counts[ext] = (counts[ext] ?? 0) + 1;
+        } catch {
+          /* skip */
+        }
+      }
+      usedBytes = total;
+      Object.assign(aversions, counts);
+    } catch {
+      usedBytes = null;
+    }
+
+    let dbStatus: 'ok' | 'error' = 'ok';
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+    } catch {
+      dbStatus = 'error';
+    }
+
+    const mem = process.memoryUsage();
+
+    return {
+      uptimeSec: Math.round(process.uptime()),
+      nodeVersion: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      cpuCores: os.availableParallelism?.() ?? os.cpus().length,
+      memory: {
+        total: os.totalmem(),
+        free: os.freemem(),
+        used: mem.rss,
+      },
+      downloadsDir: {
+        path: downloadDir,
+        usedBytes,
+        fileCount,
+        aversions,
+      },
+      dbStatus,
+    };
+  }
+
+  async cacheSizes(): Promise<{
+    searchCacheRows: number;
+    searchCacheBytes: number | null;
+    lyrics: number;
+  }> {
+    return cachedStats('admin:caches', 60_000, async () => {
+      const [searchCacheRows, lyrics] = await Promise.all([
+        prisma.searchCache.count(),
+        prisma.lyric.count(),
+      ]);
+      return { searchCacheRows, searchCacheBytes: null, lyrics };
+    });
+  }
+
+  // ---- Reliability analytics ---------------------------------------------
+
+  async reliabilityOverview(days = 30): Promise<{
+    events: Record<string, number>;
+    totals: {
+      searches: number;
+      playbackStarts: number;
+      playbackCompletes: number;
+      downloadsCompleted: number;
+      lyricsMatched: number;
+    };
+    rates: {
+      playbackCompletionRate: number | null;
+      downloadCompletionRate: number | null;
+      lyricsMatchRate: number | null;
+    };
+  }> {
+    return cachedStats(`admin:reliability:${days}`, 60_000, async () => {
+      const since = new Date(Date.now() - days * 24 * 3600 * 1000);
+      const rows = await prisma.analyticsEvent.groupBy({
+        by: ['event'],
+        where: { createdAt: { gte: since } },
+        _count: { _all: true },
+      });
+      const events: Record<string, number> = {};
+      for (const r of rows) {
+        events[r.event] = r._count._all;
+      }
+
+      const searches = events['search:success'] ?? 0;
+      const playbackStarts = events['playback:start'] ?? 0;
+      const playbackCompletes = events['playback:complete'] ?? 0;
+      const downloadsCompleted = events['download:complete'] ?? 0;
+      const lyricsMatched = events['lyrics:matched'] ?? 0;
+
+      const ratio = (a: number, b: number): number | null => (b > 0 ? (a / b) * 100 : null);
+
+      const downloadRate =
+        downloadsCompleted + searches > 0 ? ratio(downloadsCompleted, searches) : null;
+
+      return {
+        events,
+        totals: {
+          searches,
+          playbackStarts,
+          playbackCompletes,
+          downloadsCompleted,
+          lyricsMatched,
+        },
+        rates: {
+          playbackCompletionRate: ratio(playbackCompletes, playbackStarts),
+          downloadCompletionRate: downloadRate,
+          lyricsMatchRate: ratio(lyricsMatched, searches),
+        },
+      };
+    });
   }
 }

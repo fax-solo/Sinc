@@ -107,6 +107,7 @@ class PlayerService {
     this.initialize();
     return this.enqueue(async () => {
       const store = usePlayerStore.getState();
+      this.recordSkipped(store);
       store.next();
       if (store.status === 'ended') {
         await nativeBridge.player.stop();
@@ -120,6 +121,7 @@ class PlayerService {
     this.initialize();
     return this.enqueue(async () => {
       const store = usePlayerStore.getState();
+      this.recordSkipped(store);
       store.previous();
       if (store.status === 'ended') {
         await nativeBridge.player.stop();
@@ -127,6 +129,13 @@ class PlayerService {
       }
       await this.loadAndPlayCurrent();
     });
+  }
+
+  /** A manual next/previous before the track ends counts as a skip. */
+  private recordSkipped(store: ReturnType<typeof usePlayerStore.getState>): void {
+    if (store.status !== 'playing' && store.status !== 'paused') return;
+    const current = selectCurrentTrack(store);
+    if (current) useLibraryStore.getState().recordSkip(current);
   }
 
   seekTo(positionMs: number): Promise<void> {
@@ -163,6 +172,7 @@ class PlayerService {
         const current = selectCurrentTrack(usePlayerStore.getState());
         if (current && current.id === event.trackId) {
           useLibraryStore.getState().recordPlayed(current);
+          useLibraryStore.getState().recordPlayStarted(current);
           recordPlay(current);
           track('playback:start', current.id);
         }
@@ -202,6 +212,8 @@ class PlayerService {
       return;
     }
 
+    // The current track actually played to completion.
+    useLibraryStore.getState().recordPlayCompleted(current);
     track('playback:complete', trackId);
     store.next();
     if (store.status === 'ended') {

@@ -255,8 +255,13 @@ export function HomeScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<HomeNavigation>();
   const { home, personalized, sections } = useHomeFeed();
-  const isLoading = home.isLoading || (personalized.isEnabled && personalized.isLoading);
-  const isError = !isLoading && home.isError && (!personalized.isEnabled || personalized.isError);
+  const isLoading =
+    (home.isLoading || (personalized.isEnabled && personalized.isLoading)) && sections.length === 0;
+  const isError =
+    sections.length === 0 &&
+    !isLoading &&
+    home.isError &&
+    (!personalized.isEnabled || personalized.isError);
   const refreshing = home.isRefetching || personalized.isRefetching;
 
   // Warm the image cache for the first artworks of each section so scrolling

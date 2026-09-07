@@ -14,13 +14,62 @@ import { decodeTrackId, isYtdlpId } from '../../lib/ytdlp.js';
 import { searchKey, type SearchCache } from '../../lib/search-cache.js';
 import { normalizeText, pickBestMatch } from '../../lib/track-match.js';
 import { parsePlaylistId, fetchPlaylistTracks, type SpotifyRawTrack } from '../../lib/spotify.js';
-import { authGuard, type AuthenticatedRequest } from '../../plugins/guard.js';
+import { adminGuard, authGuard, type AuthenticatedRequest } from '../../plugins/guard.js';
+import { prisma } from '../../lib/prisma.js';
 import type { TokenService } from '../auth/tokens.js';
-import type { PersonalizationService, DailyMix, LibraryPayload } from './personalization.js';
+import type {
+  PersonalizationService,
+  DailyMix,
+  LibraryPayload,
+  LibrarySignals,
+} from './personalization.js';
 import { parseLibraryPayload } from './personalization.js';
 import type { MusicSignalService } from './signals.js';
 
 type SearchType = 'all' | 'tracks' | 'artists' | 'albums' | 'playlists';
+
+/**
+ * Mirrors a user's on-device playlists (sent with the personalized feed) into
+ * the Playlist table so admin tooling can see them. The library payload is the
+ * authoritative full snapshot of the user's local playlists, so missing ones
+ * are pruned. IDs are namespaced by user to keep them collision-free. Never
+ * throws; sync failures must not break feed generation.
+ */
+export async function syncUserPlaylists(userId: string, library: LibraryPayload): Promise<void> {
+  const playlists = library.playlists ?? [];
+  if (playlists.length === 0) {
+    await prisma.playlist.deleteMany({ where: { userId } });
+    return;
+  }
+  const seen = new Set<string>();
+  await Promise.all(
+    playlists.map((p) => {
+      const id = `${userId}::${p.id}`;
+      seen.add(id);
+      const stamped = p.updatedAt > 0 ? new Date(p.updatedAt) : new Date();
+      return prisma.playlist.upsert({
+        where: { id },
+        create: {
+          id,
+          userId,
+          name: p.name,
+          artworkUrl: p.artworkUrl ?? null,
+          trackCount: p.trackCount,
+          createdAt: stamped,
+        },
+        update: {
+          name: p.name,
+          artworkUrl: p.artworkUrl ?? null,
+          trackCount: p.trackCount,
+          updatedAt: stamped,
+        },
+      });
+    })
+  );
+  if (seen.size > 0) {
+    await prisma.playlist.deleteMany({ where: { userId, id: { notIn: [...seen] } } });
+  }
+}
 
 interface Paginated<T> {
   data: T[];
@@ -270,6 +319,39 @@ async function resolveTrack(
   return { track };
 }
 
+/**
+ * A cheap stable-ish impression of the on-device signals, used in the mix
+ * cache key so feedback, discovery preference and play-count changes bite
+ * within the 24h mix window without churning mixes on every single play
+ * (counts are quantized by 20 plays).
+ */
+function signalFingerprint(signals: LibrarySignals | undefined): string {
+  const s = signals ?? {};
+  let plays = 0;
+  for (const p of s.playCounts ?? []) plays += p.count;
+  let skips = 0;
+  for (const k of s.skipCounts ?? []) skips += k.count;
+  let done = 0;
+  for (const c of s.completedCounts ?? []) done += c.count;
+  let thumbsUp = 0;
+  let thumbsDown = 0;
+  for (const t of s.thumbs ?? []) {
+    if (t.value === 'up') thumbsUp += 1;
+    else thumbsDown += 1;
+  }
+  const preference = typeof s.discoveryPreference === 'number' ? s.discoveryPreference : 0.5;
+  return [
+    Math.round(plays / 20),
+    Math.round(skips / 50),
+    Math.round(done / 20),
+    thumbsUp,
+    thumbsDown,
+    (s.hiddenTrackIds ?? []).length,
+    (s.hiddenArtistNames ?? []).length,
+    preference,
+  ].join(':');
+}
+
 export function buildMusicRoutes(
   app: FastifyInstance,
   itunes: ItunesAdapter,
@@ -381,10 +463,17 @@ export function buildMusicRoutes(
       const body = (request.body ?? {}) as { library?: unknown };
       const library: LibraryPayload = parseLibraryPayload(body.library);
 
+      try {
+        await syncUserPlaylists(userId, library);
+      } catch (err) {
+        request.log.warn({ err }, 'Failed to sync user playlists');
+      }
+
       // Mixes keep a stable identity for 24h and regenerate gradually
       // (a refresh keeps ~60% of the previous tracks), so they never
-      // reshuffle completely between opens.
-      const mixKey = `person:mix:${userId}`;
+      // reshuffle completely between opens. The signal fingerprint shifts
+      // the key when feedback or preference meaningfully change.
+      const mixKey = `person:mix:${userId}:${signalFingerprint(library.signals)}`;
       const cachedMixes = await cache.get<DailyMix[]>(mixKey);
       let mixes: DailyMix[] = [];
       if (cachedMixes) {
@@ -400,6 +489,19 @@ export function buildMusicRoutes(
 
       const feed = await personalization.buildHomeFeed(userId, itunes, deezer, { library, mixes });
       return reply.send(feed);
+    }
+  );
+
+  // Recommendation-quality diagnostics for admin tooling.
+  app.get(
+    '/admin/recommendations/diagnostics',
+    { preHandler: adminGuard(tokenService) },
+    async (request) => {
+      const { userId } = request.query as { userId?: unknown };
+      if (typeof userId !== 'string' || !userId) {
+        throw new ValidationError('userId is required');
+      }
+      return personalization.diagnostics(userId, itunes, deezer);
     }
   );
 

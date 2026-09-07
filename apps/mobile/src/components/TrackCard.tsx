@@ -17,10 +17,23 @@ export const TrackCard = memo(function TrackCard({ track, onPress }: TrackCardPr
   const artist = track.artists[0]?.name ?? 'Unknown artist';
   const isFavorite = useLibraryStore((s) => s.favoriteIds.has(track.id));
   const isDownloaded = useDownloadsStore((s) => s.downloadedIds.has(track.id));
+  const thumbsUpAt = useLibraryStore((s) => s.thumbsUp[track.id]);
+  const thumbsDownAt = useLibraryStore((s) => s.thumbsDown[track.id]);
+  const thumb: 'up' | 'down' | undefined = thumbsUpAt ? 'up' : thumbsDownAt ? 'down' : undefined;
+
+  const toggleThumb = (value: 'up' | 'down') => {
+    useLibraryStore.getState().setThumb(track.id, thumb === value ? 'none' : value);
+  };
+
+  const hide = () => {
+    useLibraryStore.getState().hideTrack(track.id);
+    if (artist !== 'Unknown artist') useLibraryStore.getState().hideArtist(artist);
+  };
 
   return (
     <Pressable
       onPress={onPress}
+      onLongPress={hide}
       accessibilityRole="button"
       accessibilityLabel={`${track.title} by ${artist}`}
       style={({ pressed }) => [
@@ -42,6 +55,48 @@ export const TrackCard = memo(function TrackCard({ track, onPress }: TrackCardPr
             ) : null}
           </View>
         )}
+        <View style={[styles.thumbRow, { gap: spacing.xxs }]}>
+          <Pressable
+            onPress={() => toggleThumb('up')}
+            hitSlop={6}
+            accessibilityRole="button"
+            accessibilityLabel={thumb === 'up' ? 'Clear thumbs up' : 'Thumbs up'}
+            style={[
+              styles.thumbButton,
+              {
+                backgroundColor: thumb === 'up' ? colors.accent : colors.surfaceElevated,
+                borderRadius: radii.full,
+              },
+            ]}
+          >
+            <AppText
+              variant="small"
+              style={{ color: thumb === 'up' ? colors.onAccent : colors.textPrimary }}
+            >
+              ▲
+            </AppText>
+          </Pressable>
+          <Pressable
+            onPress={() => toggleThumb('down')}
+            hitSlop={6}
+            accessibilityRole="button"
+            accessibilityLabel={thumb === 'down' ? 'Clear thumbs down' : 'Thumbs down'}
+            style={[
+              styles.thumbButton,
+              {
+                backgroundColor: thumb === 'down' ? colors.error : colors.surfaceElevated,
+                borderRadius: radii.full,
+              },
+            ]}
+          >
+            <AppText
+              variant="small"
+              style={{ color: thumb === 'down' ? colors.onAccent : colors.textPrimary }}
+            >
+              ▼
+            </AppText>
+          </Pressable>
+        </View>
       </View>
       <View style={{ padding: spacing.sm }}>
         <AppText variant="body" style={styles.title} numberOfLines={1}>
@@ -74,6 +129,18 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
+  },
+  thumbRow: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    flexDirection: 'row',
+  },
+  thumbButton: {
+    width: 22,
+    height: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   title: {},
   pressed: {

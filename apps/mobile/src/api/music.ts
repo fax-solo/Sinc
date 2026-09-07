@@ -60,6 +60,18 @@ export interface PersonalizedHomeFeed {
   personalized: boolean;
 }
 
+/** On-device listening signals shipped with the personalized feed request. */
+export interface LibrarySignals {
+  playCounts: Array<{ trackId: string; count: number; lastPlayedAt: number }>;
+  artistPlayCounts: Array<{ name: string; count: number }>;
+  skipCounts: Array<{ trackId: string; count: number }>;
+  completedCounts: Array<{ trackId: string; count: number }>;
+  thumbs: Array<{ targetId: string; value: 'up' | 'down' }>;
+  hiddenTrackIds: string[];
+  hiddenArtistNames: string[];
+  discoveryPreference: number;
+}
+
 /** Local-library summary sent with the personalized feed request. */
 export interface LibraryPayload {
   playlists: Array<{
@@ -73,6 +85,7 @@ export interface LibraryPayload {
   downloadedTracks: CanonicalTrack[];
   followedArtists: CanonicalArtist[];
   followedAlbums: CanonicalAlbum[];
+  signals?: LibrarySignals;
 }
 
 export interface DownloadJob {

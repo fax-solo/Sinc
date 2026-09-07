@@ -1,142 +1,118 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { CanonicalTrack } from '@sinc/shared';
-import { storage, STORAGE_KEYS } from '../../utils/storage';
-import { useLibraryStore } from './libraryStore';
+import { useLibraryStore, type PlayStat } from './libraryStore';
 
-function track(id: string, title = `Track ${id}`): CanonicalTrack {
+function track(id: string, artist = `Artist ${id}`): CanonicalTrack {
   return {
     id,
-    title,
-    artists: [{ id: `a-${id}`, name: 'Artist', providerIds: {}, genres: [] }],
+    title: `Track ${id}`,
+    artists: [{ id: `artist:${artist}`, name: artist, providerIds: {}, genres: [] }],
     durationMs: 1000,
     artworkUrl: undefined,
-    providerIds: { itunes: id },
+    providerIds: {},
     explicit: false,
   };
 }
 
-function resetStore() {
-  void useLibraryStore.persist.clearStorage();
+function resetSignals() {
   useLibraryStore.setState({
-    favoriteTracks: [],
-    recentlyPlayed: [],
-    followedArtists: [],
-    followedAlbums: [],
-    playlists: [],
+    playStats: {},
+    skipStats: {},
+    artistPlayStats: {},
+    thumbsUp: {},
+    thumbsDown: {},
+    hiddenTrackIds: [],
+    hiddenArtistNames: [],
+    discoveryPreference: 0.5,
   });
 }
 
 beforeEach(() => {
-  storage.remove(STORAGE_KEYS.LIBRARY);
-  resetStore();
+  resetSignals();
 });
 
-describe('libraryStore', () => {
-  it('toggles favorite tracks', () => {
-    const t = track('itunes:1');
-    expect(useLibraryStore.getState().isFavorite(t.id)).toBe(false);
+describe('libraryStore signals (v3)', () => {
+  it('recordPlayStarted bumps count, lastPlayedAt and artist stats', () => {
+    const t = track('t1', 'Solo');
+    useLibraryStore.getState().recordPlayStarted(t);
+    useLibraryStore.getState().recordPlayStarted(t);
 
-    useLibraryStore.getState().toggleFavorite(t);
-    expect(useLibraryStore.getState().isFavorite(t.id)).toBe(true);
-    expect(useLibraryStore.getState().favoriteTracks).toHaveLength(1);
-
-    useLibraryStore.getState().toggleFavorite(t);
-    expect(useLibraryStore.getState().isFavorite(t.id)).toBe(false);
-    expect(useLibraryStore.getState().favoriteTracks).toHaveLength(0);
+    const stat = useLibraryStore.getState().playStats['t1'];
+    expect(stat?.count).toBe(2);
+    expect(stat?.completedCount).toBe(0);
+    expect(typeof stat?.lastPlayedAt).toBe('number');
+    expect(useLibraryStore.getState().artistPlayStats['Solo']).toBe(2);
   });
 
-  it('recordPlayed prepends and de-duplicates recents', () => {
-    const t1 = track('itunes:1');
-    const t2 = track('itunes:2');
-
-    useLibraryStore.getState().recordPlayed(t1);
-    useLibraryStore.getState().recordPlayed(t2);
-    useLibraryStore.getState().recordPlayed(t1);
-
-    expect(useLibraryStore.getState().recentlyPlayed.map((t) => t.id)).toEqual([
-      'itunes:1',
-      'itunes:2',
-    ]);
+  it('recordPlayCompleted bumps completed count', () => {
+    const t = track('t1');
+    useLibraryStore.getState().recordPlayCompleted(t);
+    expect(useLibraryStore.getState().playStats['t1']?.completedCount).toBe(1);
   });
 
-  it('recordPlayed caps the recent list', () => {
-    const max = 100;
-    for (let i = 0; i < max + 10; i++) {
-      useLibraryStore.getState().recordPlayed(track(`itunes:${i}`));
-    }
-    expect(useLibraryStore.getState().recentlyPlayed).toHaveLength(max);
+  it('recordSkip bumps skip stats', () => {
+    useLibraryStore.getState().recordSkip(track('t1'));
+    useLibraryStore.getState().recordSkip(track('t1'));
+    expect(useLibraryStore.getState().skipStats['t1']).toBe(2);
   });
 
-  it('toggles followed artists and albums', () => {
-    const artist = {
-      id: 'artist-1',
-      name: 'A',
-      providerIds: {},
-      genres: [],
-      artworkUrl: undefined,
-    };
-    const album = {
-      id: 'album-1',
-      title: 'Al',
-      artist: { id: 'artist-1', name: 'A', providerIds: {}, genres: [], artworkUrl: undefined },
-      providerIds: {},
-      artworkUrl: undefined,
-      trackCount: 0,
-      type: 'album' as const,
-    };
-
-    useLibraryStore.getState().toggleFollowArtist(artist);
-    expect(useLibraryStore.getState().isFollowedArtist('artist-1')).toBe(true);
-
-    useLibraryStore.getState().toggleFollowAlbum(album);
-    expect(useLibraryStore.getState().isFollowedAlbum('album-1')).toBe(true);
-
-    useLibraryStore.getState().toggleFollowArtist(artist);
-    expect(useLibraryStore.getState().isFollowedArtist('artist-1')).toBe(false);
+  it('keeps playStats capped and prunes least-recently-played', () => {
+    const seed: Record<string, PlayStat> = {};
+    for (let i = 0; i < 500; i++) seed[`t${i}`] = { count: 1, completedCount: 0, lastPlayedAt: i };
+    useLibraryStore.setState({ playStats: seed });
+    useLibraryStore.getState().recordPlayStarted(track('new'));
+    const keys = Object.keys(useLibraryStore.getState().playStats);
+    expect(keys.length).toBe(500);
+    expect(keys).not.toContain('t0');
+    expect(keys).toContain('new');
   });
 
-  it('creates, renames, deletes playlists', () => {
-    const id = useLibraryStore.getState().addPlaylist('Road trip');
-    expect(useLibraryStore.getState().playlists).toHaveLength(1);
+  it('setThumb toggles up/down/none and getThumb reflects it', () => {
+    const store = useLibraryStore.getState();
+    expect(store.getThumb('itunes:1')).toBeUndefined();
 
-    useLibraryStore.getState().renamePlaylist(id, 'Gym');
-    expect(useLibraryStore.getState().playlists[0]?.name).toBe('Gym');
+    store.setThumb('itunes:1', 'up');
+    expect(useLibraryStore.getState().getThumb('itunes:1')).toBe('up');
+    expect(useLibraryStore.getState().thumbsUp['itunes:1']).toBeTypeOf('number');
 
-    useLibraryStore.getState().deletePlaylist(id);
-    expect(useLibraryStore.getState().playlists).toHaveLength(0);
+    useLibraryStore.getState().setThumb('itunes:1', 'down');
+    const after = useLibraryStore.getState();
+    expect(after.getThumb('itunes:1')).toBe('down');
+    expect(after.thumbsUp['itunes:1']).toBeUndefined();
+    expect(after.thumbsDown['itunes:1']).toBeTypeOf('number');
+
+    useLibraryStore.getState().setThumb('itunes:1', 'none');
+    const cleared = useLibraryStore.getState();
+    expect(cleared.getThumb('itunes:1')).toBeUndefined();
   });
 
-  it('adds and removes tracks from a playlist without duplicates', () => {
-    const id = useLibraryStore.getState().addPlaylist('Mix');
-    useLibraryStore.getState().addToPlaylist(id, track('itunes:1'));
-    useLibraryStore.getState().addToPlaylist(id, track('itunes:1'));
-    useLibraryStore.getState().addToPlaylist(id, track('itunes:2'));
-    expect(useLibraryStore.getState().playlists[0]?.tracks.map((t) => t.id)).toEqual([
-      'itunes:1',
-      'itunes:2',
-    ]);
+  it('hideTrack/hideArtist cap and unhide', () => {
+    const state = useLibraryStore.getState();
+    state.hideTrack('a');
+    state.hideTrack('b');
+    state.hideArtist('Artist A');
+    expect(useLibraryStore.getState().hiddenTrackIds).toEqual(['a', 'b']);
+    expect(useLibraryStore.getState().hiddenArtistNames).toEqual(['Artist A']);
 
-    useLibraryStore.getState().removeFromPlaylist(id, 'itunes:1');
-    expect(useLibraryStore.getState().playlists[0]?.tracks.map((t) => t.id)).toEqual(['itunes:2']);
+    useLibraryStore.getState().unhideTrack('a');
+    useLibraryStore.getState().unhideArtist('Artist A');
+    expect(useLibraryStore.getState().hiddenTrackIds).toEqual(['b']);
+    expect(useLibraryStore.getState().hiddenArtistNames).toEqual([]);
   });
 
-  it('tracks recently played playlists, most recent first', () => {
-    const a = useLibraryStore.getState().addPlaylist('A');
-    const b = useLibraryStore.getState().addPlaylist('B');
-    const c = useLibraryStore.getState().addPlaylist('C');
-
-    useLibraryStore.getState().recordPlaylistPlayed(a);
-    useLibraryStore.getState().recordPlaylistPlayed(b);
-    useLibraryStore.getState().recordPlaylistPlayed(c);
-    useLibraryStore.getState().recordPlaylistPlayed(a);
-
-    expect(useLibraryStore.getState().recentlyPlayedPlaylistIds).toEqual([a, c, b]);
+  it('keeps hiddenTrackIds capped at 200', () => {
+    for (let i = 0; i < 210; i++) useLibraryStore.getState().hideTrack(`h${i}`);
+    expect(useLibraryStore.getState().hiddenTrackIds.length).toBe(200);
+    expect(useLibraryStore.getState().hiddenTrackIds).not.toContain('h0');
+    expect(useLibraryStore.getState().hiddenTrackIds[199]).toBe('h209');
   });
 
-  it('removes deleted playlists from recently played', () => {
-    const id = useLibraryStore.getState().addPlaylist('Soon gone');
-    useLibraryStore.getState().recordPlaylistPlayed(id);
-    useLibraryStore.getState().deletePlaylist(id);
-    expect(useLibraryStore.getState().recentlyPlayedPlaylistIds).not.toContain(id);
+  it('clamps discoveryPreference to [0,1]', () => {
+    useLibraryStore.getState().setDiscoveryPreference(2);
+    expect(useLibraryStore.getState().discoveryPreference).toBe(1);
+    useLibraryStore.getState().setDiscoveryPreference(-0.5);
+    expect(useLibraryStore.getState().discoveryPreference).toBe(0);
+    useLibraryStore.getState().setDiscoveryPreference(0.42);
+    expect(useLibraryStore.getState().discoveryPreference).toBe(0.42);
   });
 });

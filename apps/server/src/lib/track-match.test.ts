@@ -42,6 +42,13 @@ describe('searchTitle', () => {
     expect(searchTitle('Bloodline (Remix)')).toBe('Bloodline (Remix)');
     expect(searchTitle('Calm (feat. Someone)')).toBe('Calm');
   });
+
+  it('keeps multi-word variant phrases like "sped up" in the search title', () => {
+    expect(searchTitle('Blinding Lights (sped up)')).toBe('Blinding Lights (sped up)');
+    expect(searchTitle('Blinding Lights (slowed + reverb)')).toBe(
+      'Blinding Lights (slowed + reverb)'
+    );
+  });
 });
 
 describe('compactText', () => {
@@ -111,6 +118,65 @@ describe('pickBestMatch', () => {
       ]
     );
     expect(best?.candidate.ref).toBe('r');
+  });
+
+  it('prefers the requested sped-up variant over the official upload', () => {
+    const best = pickBestMatch(
+      { title: 'Blinding Lights (sped up)', artist: 'The Weeknd', durationMs: 161_000 },
+      [
+        {
+          title: 'Blinding Lights (Official Video)',
+          artist: 'The Weeknd',
+          durationMs: 203_000,
+          ref: 'official',
+        },
+        {
+          title: 'The Weeknd - Blinding Lights (Sped Up)',
+          artist: 'Fan Uploader',
+          durationMs: 154_000,
+          ref: 'spedup',
+        },
+      ]
+    );
+    expect(best?.candidate.ref).toBe('spedup');
+    expect(best!.score).toBeGreaterThan(45);
+  });
+
+  it('prefers the requested slowed variant over the original', () => {
+    const best = pickBestMatch(
+      { title: 'Another Love (slowed + reverb)', artist: 'Tom Odell', durationMs: 261_000 },
+      [
+        { title: 'Another Love', artist: 'Tom Odell', durationMs: 244_000, ref: 'original' },
+        {
+          title: 'Another Love (slowed + reverb)',
+          artist: 'Nightcore Edits',
+          durationMs: 259_000,
+          ref: 'slowed',
+        },
+      ]
+    );
+    expect(best?.candidate.ref).toBe('slowed');
+  });
+
+  it('ignores the variant priority when the query asks for nothing', () => {
+    const best = pickBestMatch(
+      { title: 'Blinding Lights', artist: 'The Weeknd', durationMs: 203_000 },
+      [
+        {
+          title: 'Blinding Lights (Official Video)',
+          artist: 'The Weeknd',
+          durationMs: 203_000,
+          ref: 'official',
+        },
+        {
+          title: 'The Weeknd - Blinding Lights (Sped Up)',
+          artist: 'Fan Uploader',
+          durationMs: 154_000,
+          ref: 'spedup',
+        },
+      ]
+    );
+    expect(best?.candidate.ref).toBe('official');
   });
 
   it('penalizes a different artist reusing the title', () => {

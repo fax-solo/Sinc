@@ -3,7 +3,6 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { buildApp, bootstrapAdmin } from '../../app.js';
 import { loadEnv } from '../../config/env.js';
 import { prisma } from '../../lib/prisma.js';
-import { totpCode } from '../../lib/totp.js';
 
 const app = await buildApp();
 const suffix = randomUUID().slice(0, 8);
@@ -28,13 +27,14 @@ async function registerUser(email: string, username: string): Promise<string> {
   return res.json().tokens.accessToken as string;
 }
 
-function authHeaders(token: string, otp?: string): Record<string, string> {
-  return { authorization: `Bearer ${token}`, ...(otp ? { 'x-admin-otp': otp } : {}) };
+function authHeaders(token: string): Record<string, string> {
+  return { authorization: `Bearer ${token}` };
 }
 
 let adminToken = '';
 let userToken = '';
 let userId = '';
+let deviceId = '';
 
 afterAll(async () => {
   await prisma.user
@@ -80,10 +80,10 @@ describe('admin module', () => {
     expect(forbidden.statusCode).toBe(403);
   });
 
-  it('lists users with search', async () => {
+  it('lists users with search and filters', async () => {
     const res = await app.inject({
       method: 'GET',
-      url: '/admin/users?query=user_',
+      url: '/admin/users?query=user_&role=user&status=active&sort=createdAt',
       headers: authHeaders(adminToken),
     });
     expect(res.statusCode).toBe(200);
@@ -91,6 +91,7 @@ describe('admin module', () => {
     expect(body.users.length).toBeGreaterThanOrEqual(1);
     expect(body.users[0]).toHaveProperty('role');
     expect(body.users[0]).toHaveProperty('status');
+    expect(typeof body.total).toBe('number');
   });
 
   it('rejects an admin acting on their own account', async () => {
@@ -127,6 +128,14 @@ describe('admin module', () => {
     });
     expect(promote.statusCode).toBe(200);
 
+    const demote = await app.inject({
+      method: 'PATCH',
+      url: `/admin/users/${userId}`,
+      headers: authHeaders(adminToken),
+      payload: { action: 'demote' },
+    });
+    expect(demote.statusCode).toBe(200);
+
     const suspend = await app.inject({
       method: 'PATCH',
       url: `/admin/users/${userId}`,
@@ -145,11 +154,12 @@ describe('admin module', () => {
 
     const audit = await app.inject({
       method: 'GET',
-      url: `/admin/audit?limit=50`,
+      url: `/admin/audit?limit=50&action=user`,
       headers: authHeaders(adminToken),
     });
     const actions = audit.json().entries.map((e: { action: string }) => e.action);
     expect(actions).toContain('user.promote');
+    expect(actions).toContain('user.demote');
     expect(actions).toContain('user.suspend');
     expect(actions).toContain('user.unsuspend');
   });
@@ -170,6 +180,81 @@ describe('admin module', () => {
       headers: authHeaders(adminToken),
     });
     expect(revoke.statusCode).toBe(200);
+  });
+
+  it('blocks a suspended user and a revoked session immediately', async () => {
+    const email = `lockout-${suffix}@sinc.dev`;
+    const token = await registerUser(email, `lockout_${suffix}`);
+    const res = await app.inject({
+      method: 'GET',
+      url: '/auth/me',
+      headers: authHeaders(token),
+    });
+    expect(res.statusCode).toBe(200);
+
+    const victim = await prisma.user.findUnique({ where: { email } });
+    expect(victim).toBeTruthy();
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/admin/users/${victim!.id}`,
+      headers: authHeaders(adminToken),
+      payload: { action: 'suspend' },
+    });
+    const suspended = await app.inject({
+      method: 'GET',
+      url: '/auth/me',
+      headers: authHeaders(token),
+    });
+    expect(suspended.statusCode).toBe(403);
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/admin/users/${victim!.id}`,
+      headers: authHeaders(adminToken),
+      payload: { action: 'unsuspend' },
+    });
+    const restored = await app.inject({
+      method: 'GET',
+      url: '/auth/me',
+      headers: authHeaders(token),
+    });
+    expect(restored.statusCode).toBe(200);
+
+    const sessions = await app.inject({
+      method: 'GET',
+      url: `/admin/users/${victim!.id}/sessions`,
+      headers: authHeaders(adminToken),
+    });
+    const sessionId = sessions.json().sessions[0].id;
+    await app.inject({
+      method: 'DELETE',
+      url: `/admin/sessions/${sessionId}`,
+      headers: authHeaders(adminToken),
+    });
+    const revoked = await app.inject({
+      method: 'GET',
+      url: '/auth/me',
+      headers: authHeaders(token),
+    });
+    expect(revoked.statusCode).toBe(401);
+
+    await prisma.user.deleteMany({ where: { email } });
+  });
+
+  it('returns user detail with per-user activity counts', async () => {
+    const detail = await app.inject({
+      method: 'GET',
+      url: `/admin/users/${userId}/detail`,
+      headers: authHeaders(adminToken),
+    });
+    expect(detail.statusCode).toBe(200);
+    const body = detail.json();
+    expect(body.user.id).toBe(userId);
+    expect(typeof body.sessionCount).toBe('number');
+    expect(typeof body.favorites).toBe('number');
+    expect(typeof body.playlists).toBe('number');
+    expect(typeof body.downloads).toBe('number');
   });
 
   it('returns stats overview and activity', async () => {
@@ -216,91 +301,157 @@ describe('admin module', () => {
     expect(res.json().token).toBeTruthy();
   });
 
-  describe('MFA', () => {
-    let secret = '';
-
-    it('enrolls an admin with a fresh TOTP secret', async () => {
-      const res = await app.inject({
-        method: 'POST',
-        url: '/admin/mfa/enroll',
-        headers: authHeaders(adminToken),
-      });
-      expect(res.statusCode).toBe(200);
-      secret = res.json().secret as string;
-      expect(res.json().otpauthUrl).toContain('otpauth://totp/');
+  it('lists download jobs, stats, retry, and cancel', async () => {
+    const labeled = `j-${suffix}`;
+    await prisma.downloadJob.create({
+      data: {
+        userId,
+        trackId: 'itunes:1',
+        trackTitle: `Failed ${labeled}`,
+        trackArtist: 'Admin Test',
+        quality: 'high',
+        status: 'failed',
+        errorCode: 'DOWNLOAD_FAILED',
+        errorMessage: 'network error',
+      },
+    });
+    await prisma.downloadJob.create({
+      data: {
+        userId,
+        trackId: 'itunes:2',
+        trackTitle: `Completed ${labeled}`,
+        trackArtist: 'Admin Test',
+        quality: 'high',
+        status: 'completed',
+        progress: 100,
+      },
     });
 
-    it('rejects an invalid verification code', async () => {
-      const res = await app.inject({
-        method: 'POST',
-        url: '/admin/mfa/verify',
-        headers: authHeaders(adminToken),
-        payload: { code: '000000' },
-      });
-      expect(res.statusCode).toBe(403);
+    const list = await app.inject({
+      method: 'GET',
+      url: `/admin/downloads?status=failed&query=${encodeURIComponent(labeled)}`,
+      headers: authHeaders(adminToken),
     });
+    expect(list.statusCode).toBe(200);
+    const failedId = list.json().jobs[0].id;
+    expect(list.json().jobs[0].status).toBe('failed');
 
-    it('enables MFA with a valid code', async () => {
-      const code = totpCode(secret);
-      const res = await app.inject({
-        method: 'POST',
-        url: '/admin/mfa/verify',
-        headers: authHeaders(adminToken),
-        payload: { code },
-      });
-      expect(res.statusCode).toBe(200);
+    const stats = await app.inject({
+      method: 'GET',
+      url: '/admin/downloads/stats',
+      headers: authHeaders(adminToken),
     });
+    expect(stats.statusCode).toBe(200);
+    expect(typeof stats.json().successRate).toBe('number');
 
-    it('blocks destructive writes without a valid MFA code once enabled', async () => {
-      const blocked = await app.inject({
-        method: 'PATCH',
-        url: `/admin/users/${userId}`,
-        headers: authHeaders(adminToken),
-        payload: { action: 'suspend' },
-      });
-      expect(blocked.statusCode).toBe(403);
-      expect(blocked.json().message).toContain('MFA');
-
-      const wrong = await app.inject({
-        method: 'PATCH',
-        url: `/admin/users/${userId}`,
-        headers: authHeaders(adminToken, '000000'),
-        payload: { action: 'suspend' },
-      });
-      expect(wrong.statusCode).toBe(403);
-
-      const ok = await app.inject({
-        method: 'PATCH',
-        url: `/admin/users/${userId}`,
-        headers: authHeaders(adminToken, totpCode(secret)),
-        payload: { action: 'suspend' },
-      });
-      expect(ok.statusCode).toBe(200);
-
-      const audit = await app.inject({
-        method: 'GET',
-        url: '/admin/audit?limit=10',
-        headers: authHeaders(adminToken),
-      });
-      const actions = audit.json().entries.map((e: { action: string }) => e.action);
-      expect(actions).toContain('mfa.enable');
+    const retry = await app.inject({
+      method: 'POST',
+      url: `/admin/downloads/${failedId}/retry`,
+      headers: authHeaders(adminToken),
     });
+    expect(retry.statusCode).toBe(200);
 
-    it('deletes a user with MFA', async () => {
-      const res = await app.inject({
-        method: 'DELETE',
-        url: `/admin/users/${userId}`,
-        headers: authHeaders(adminToken, totpCode(secret)),
-      });
-      expect(res.statusCode).toBe(200);
-
-      const audit = await app.inject({
-        method: 'GET',
-        url: '/admin/audit?limit=10',
-        headers: authHeaders(adminToken),
-      });
-      const actions = audit.json().entries.map((e: { action: string }) => e.action);
-      expect(actions).toContain('user.delete');
+    const cancel = await app.inject({
+      method: 'POST',
+      url: `/admin/downloads/${failedId}/cancel`,
+      headers: authHeaders(adminToken),
     });
+    expect(cancel.statusCode).toBe(200);
+
+    const audit = await app.inject({
+      method: 'GET',
+      url: '/admin/audit?action=download',
+      headers: authHeaders(adminToken),
+    });
+    const actions = audit.json().entries.map((e: { action: string }) => e.action);
+    expect(actions).toContain('download.retry');
+    expect(actions).toContain('download.cancel');
+  });
+
+  it('lists and revokes devices', async () => {
+    const row = await prisma.device.create({
+      data: {
+        userId,
+        name: `Device ${suffix}`,
+        platform: 'android',
+      },
+    });
+    deviceId = row.id;
+
+    const list = await app.inject({
+      method: 'GET',
+      url: '/admin/devices',
+      headers: authHeaders(adminToken),
+    });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().devices.some((d: { id: string }) => d.id === deviceId)).toBe(true);
+
+    const revoke = await app.inject({
+      method: 'DELETE',
+      url: `/admin/devices/${deviceId}`,
+      headers: authHeaders(adminToken),
+    });
+    expect(revoke.statusCode).toBe(200);
+
+    const audit = await app.inject({
+      method: 'GET',
+      url: '/admin/audit?action=device',
+      headers: authHeaders(adminToken),
+    });
+    const actions = audit.json().entries.map((e: { action: string }) => e.action);
+    expect(actions).toContain('device.revoke');
+  });
+
+  it('returns system health and cache sizes', async () => {
+    const sys = await app.inject({
+      method: 'GET',
+      url: '/admin/system',
+      headers: authHeaders(adminToken),
+    });
+    expect(sys.statusCode).toBe(200);
+    const body = sys.json();
+    expect(body.dbStatus).toBe('ok');
+    expect(typeof body.uptimeSec).toBe('number');
+    expect(typeof body.nodeVersion).toBe('string');
+
+    const caches = await app.inject({
+      method: 'GET',
+      url: '/admin/caches',
+      headers: authHeaders(adminToken),
+    });
+    expect(caches.statusCode).toBe(200);
+    expect(typeof caches.json().lyrics).toBe('number');
+  });
+
+  it('returns reliability analytics', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/admin/reliability?days=7',
+      headers: authHeaders(adminToken),
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.totals.searches).toBeGreaterThanOrEqual(0);
+    expect(
+      body.rates.playbackCompletionRate === null ||
+        typeof body.rates.playbackCompletionRate === 'number'
+    ).toBe(true);
+  });
+
+  it('deletes a user with audit row', async () => {
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/admin/users/${userId}`,
+      headers: authHeaders(adminToken),
+    });
+    expect(res.statusCode).toBe(200);
+
+    const audit = await app.inject({
+      method: 'GET',
+      url: '/admin/audit?limit=10&action=user.delete',
+      headers: authHeaders(adminToken),
+    });
+    const actions = audit.json().entries.map((e: { action: string }) => e.action);
+    expect(actions).toContain('user.delete');
   });
 });

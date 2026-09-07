@@ -124,14 +124,11 @@ export function baseTitle(title: string): string {
  * "(Remix)"/"(Live)" are kept so yt-dlp still finds the intended version.
  */
 export function searchTitle(title: string): string {
-  const variantSet = new Set<string>(VARIANT_TAGS);
   return title
     .replace(/\(([^)]*)\)/g, (match, inner: string) => {
-      const words = inner
-        .toLowerCase()
-        .split(/[^\p{L}\p{N}]+/u)
-        .filter(Boolean);
-      return words.some((w) => variantSet.has(w)) ? match : ' ';
+      const normalized = inner.toLowerCase();
+      const isVariant = (VARIANT_TAGS as readonly string[]).some((tag) => normalized.includes(tag));
+      return isVariant ? match : ' ';
     })
     .replace(/\s+/g, ' ')
     .trim();
@@ -209,24 +206,43 @@ export function pickBestMatch(
     }
 
     let penalty = 0;
+    let variantHit = false;
     const lowerCandidate = cTitleNorm;
     for (const tag of VARIANT_TAGS) {
       const inCandidate = lowerCandidate.includes(tag);
       const inQuery = qTitleNorm.includes(tag);
       if (inCandidate && !inQuery) penalty += VARIANT_PENALTY[tag] ?? 0;
     }
+    // When the query explicitly asks for a version (sped up, slowed, remix,
+    // ...), lean toward candidates that actually carry that version instead of
+    // a plain/original upload. Variant edits are almost always fan uploads, so
+    // the uploader-is-not-the-artist penalty below is relaxed for exact hits.
+    const queryVariants = VARIANT_TAGS.filter((t) => qTitleNorm.includes(t));
+    const baseMatched =
+      cTitleBase === qTitleBase ||
+      (Boolean(qTitleBase) && (cTitleBase.includes(qTitleBase) || qTitleBase.includes(cTitleBase)));
+    if (queryVariants.length > 0 && baseMatched) {
+      const variantMatches = queryVariants.filter((t) => lowerCandidate.includes(t));
+      if (variantMatches.length === queryVariants.length) {
+        penalty += 35; // requested version present — preferred
+        variantHit = true;
+      } else if (variantMatches.length === 0) {
+        penalty -= 15 * queryVariants.length; // plain original vs. requested version
+      }
+    }
     // Co-credit separators not present in the requested title signal a
     // mashup/duet upload (e.g. "bloodline x pony").
     const coCredit = /\+|&|\bx\b|,|\bfeat\b|\bft\.?\b|\bwith\b|\bduet\b/i;
     if (coCredit.test(lowerCandidate) && !coCredit.test(qTitleNorm)) penalty -= 40;
-    // A different artist's upload gets a hard penalty even if titles coincide.
+    // A different artist's upload gets a hard penalty even if titles coincide,
+    // unless it is exactly the requested version (fan uploads are expected).
     if (
       qArtistNorm &&
       cArtistNorm &&
       artistScore === 0 &&
       tokenSimilarity(cArtistNorm, qArtistNorm) < 0.3
     ) {
-      penalty -= 50;
+      penalty -= variantHit ? 0 : 50;
     }
 
     const score = titleScore + artistScore + durationScore + penalty;
