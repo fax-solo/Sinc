@@ -70,10 +70,11 @@ jobs:
           fi
 
       - name: Build release APK
-        run: ./gradlew :app:assembleRelease \
-          -PversionCode="${VERSION_CODE}" \
-          -PversionName="${VERSION_NAME}"
         working-directory: apps/mobile/android
+        run: |
+          ./gradlew :app:assembleRelease \
+            -PversionCode="${VERSION_CODE}" \
+            -PversionName="${VERSION_NAME}"
 
       - name: Rename APK
         run: |
