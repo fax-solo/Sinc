@@ -1,113 +1,109 @@
-# Sinc — Music Discovery, Playback, Downloads & Offline Library
+# Sinc — play any song, keep any song 💛
 
-**Sinc** is a production-grade, cross-platform (Android + iOS) music application combining discovery, unified search, playback, synchronized lyrics, downloads, and an offline-first personal library — built with a provider-agnostic architecture that keeps metadata discovery and playable/downloadable sources as separate concepts.
+Sinc is a free Android music app. Search any song, play it instantly, sing along with synced
+lyrics, and download the ones you love — as normal, properly-tagged audio files that show up in
+**every other music player** on your phone.
 
-> This repository currently contains the **complete architecture and implementation roadmap**. Per the master prompt, no code is written until the architecture, database model, provider abstraction, mobile state model, background execution strategy, notification system, and download/playback state machines are fully defined and agreed upon.
+No account. No subscription. Runs entirely on your phone.
 
-## Architecture Documents
+---
 
-| #   | Deliverable             | Document                                                                     |
-| --- | ----------------------- | ---------------------------------------------------------------------------- |
-| A   | Product architecture    | [`ARCHITECTURE_PRODUCT.md`](ARCHITECTURE_PRODUCT.md)                         |
-| B   | Mobile architecture     | [`ARCHITECTURE_MOBILE.md`](ARCHITECTURE_MOBILE.md)                           |
-| B1  | Mobile — global stores  | [`ARCHITECTURE_MOBILE_STORES.md`](ARCHITECTURE_MOBILE_STORES.md)             |
-| B2  | Mobile — query layer    | [`ARCHITECTURE_MOBILE_QUERY.md`](ARCHITECTURE_MOBILE_QUERY.md)               |
-| B3  | Mobile — local database | [`ARCHITECTURE_MOBILE_DATABASE.md`](ARCHITECTURE_MOBILE_DATABASE.md)         |
-| B4  | Mobile — repositories   | [`ARCHITECTURE_MOBILE_REPOSITORIES.md`](ARCHITECTURE_MOBILE_REPOSITORIES.md) |
-| C   | Backend architecture    | [`ARCHITECTURE_BACKEND.md`](ARCHITECTURE_BACKEND.md)                         |
-| D   | Database schema         | [`ARCHITECTURE_DATABASE.md`](ARCHITECTURE_DATABASE.md)                       |
-| E   | API specification       | [`ARCHITECTURE_API.md`](ARCHITECTURE_API.md)                                 |
-| F   | Provider architecture   | [`ARCHITECTURE_PROVIDERS.md`](ARCHITECTURE_PROVIDERS.md)                     |
-| G   | Background architecture | [`ARCHITECTURE_BACKGROUND.md`](ARCHITECTURE_BACKGROUND.md)                   |
-| H   | Security model          | [`ARCHITECTURE_SECURITY.md`](ARCHITECTURE_SECURITY.md)                       |
-| I   | Testing strategy        | [`ARCHITECTURE_TESTING.md`](ARCHITECTURE_TESTING.md)                         |
-| J   | Deployment architecture | [`ARCHITECTURE_DEPLOYMENT.md`](ARCHITECTURE_DEPLOYMENT.md)                   |
-| K   | Build roadmap           | [`ARCHITECTURE_ROADMAP.md`](ARCHITECTURE_ROADMAP.md)                         |
+## ⬇️ Download & install
 
-## Key Architectural Decisions (summary)
+1. Open the [**latest release**](https://github.com/fax-solo/Sinc/releases/latest) page.
+2. Download the `sinc-*.*.*-*.apk` file.
+3. Open the downloaded file. If Android asks, allow installing apps from your browser/files
+   (one-time prompt). Done! 🎉
 
-1. **Metadata ≠ source.** MusicBrainz/Last.fm provide discovery; legally-permitted source providers (e.g., Internet Archive, Jamendo, Creative Commons) provide audio. The app never downloads protected audio.
-2. **Provider abstraction.** Every provider is an isolated adapter behind `MetadataProvider` / `SourceProvider` / `LyricsProvider` interfaces, registered dynamically with circuit breakers. Adding/removing providers requires no core changes.
-3. **Offline-first mobile.** WatermelonDB (SQLite) is the local source of truth; TanStack Query for server state; Zustand for client/playback/download state; optimistic mutations + sync queue + deterministic conflict resolution.
-4. **Explicit state machines.** Downloads (`QUEUED→RESOLVING→DOWNLOADING→PROCESSING→FETCHING_LYRICS→FINALIZING→COMPLETED`) and playback (`IDLE→LOADING→BUFFERING→PLAYING⇄PAUSED→ENDED/ERROR`) are modeled, never boolean flags.
-5. **Platform-honest background.** Android uses Media3 foreground service + DownloadManager + WorkManager; iOS uses AVAudioSession + URLSession background + BGAppRefreshTask. Everything persists state and recovers on process death.
-6. **Security by default.** Argon2id, RS256 access (15m) + rotating hashed refresh tokens, RBAC server-enforced, MFA for admin writes, Keychain/Keystore client storage, signed URLs only, audit logs for all admin actions.
-7. **Deterministic recommendations first.** Weighted familiar/similar/discovery (70/20/10, configurable), evolved later without redesign.
+**Requires:** an Android phone, 8.0 or newer (works best on 64-bit phones — realistically
+anything from ~2016 on — and tested on Android 15).
 
-## Technology Stack
+### Keeping the app updated
 
-- **Mobile:** React Native 0.74+ / TypeScript, React Navigation, TanStack Query, Zustand, WatermelonDB, native modules (ExoPlayer/AVPlayer, DownloadManager/URLSession, FCM/APNs, Keychain/Keystore), Sentry.
-- **Backend:** Node.js 20 / TypeScript, Fastify, PostgreSQL 16 + Prisma, Redis + BullMQ, S3-compatible object storage, Socket.io, Zod, Pino, Prometheus/Grafana.
-- **Infra:** Docker, GitHub Actions, Terraform (optional), Cloudflare, Sentry, Testcontainers, Detox.
+Inside the app, go to **Library → Settings → About & updates**. When a new release is out,
+Sinc tells you and offers a direct download — no Play Store, no manual uninstall.
 
-## Repository Layout (target)
+---
 
-```
-Sinc/
-├── ARCHITECTURE_*.md          # Architecture documents (this repo, present)
-├── docs/                      # ADRs, setup, contribution (roadmap)
-├── packages/
-│   └── shared/                # Canonical types, DTOs, normalization (roadmap)
-├── apps/
-│   ├── backend/               # Fastify API + workers (roadmap)
-│   └── mobile/                # React Native app (roadmap)
-└── infrastructure/            # Docker, terraform, CI (roadmap)
-```
+## ✨ Features
 
-## Roadmap Status
+### 🎧 Discover & play
 
-| Phase                         | Status      |
-| ----------------------------- | ----------- |
-| M0 — Repository & tooling     | Done        |
-| M1 — Auth & foundation        | Done        |
-| M2 — Core music experience    | Done        |
-| M3 — Local library & offline  | Done        |
-| M4 — Background systems       | Done        |
-| M5 — Lyrics                   | Done        |
-| M6 — Personalization          | Done        |
-| M7 — Advanced mobile features | Done        |
-| M8 — Administration           | Done        |
-| M9 — Production hardening     | In progress |
+- Search any song, artist or album — Sinc finds a working audio source for you automatically.
+- A home feed with fresh picks that change every day.
+- Play in the background — reply to texts while the chorus drops. 😉
+- Full queue control: jump around, reshuffle feelings, no interruptions.
 
-See [`ARCHITECTURE_ROADMAP.md`](ARCHITECTURE_ROADMAP.md) for the full milestone breakdown and dependencies.
+### 📥 Download & own it
 
-## Releasing the Android app
+- **Real downloads** — not a cache only you can find. Songs are saved to `Music/Sinc` in your
+  phone storage as proper `.m4a` / `.mp3` files.
+- **Artist, title & album tags + cover art baked in** — other music players (YouTube Music,
+  Samsung Music, anything) show the song correctly, cover and all.
+- Download a whole **Spotify playlist** in one tap: paste the playlist, Sinc queues it up and
+  downloads in the background.
+- A live **download queue** with real progress — you can see it move, cancel anything, retry
+  the ones that failed.
+- Smart matching that refuses garbage: slowed & reverb remixes, sped-up nightcore, live
+  "but it's actually a re-upload with a different duration" traps get rejected, and you get the
+  actual song (or an honest failure telling you it couldn't validate a clean source).
 
-The `v*` tag push workflow (`.github/workflows/release-apk.yml`) builds a release APK,
-publishes it as a GitHub release named `sinc-<major>.<minor>.<patch>-<code>.apk`, and the
-app's "About & updates" screen tells users when a newer build exists.
+### 🎤 Lyrics
 
-One-time setup:
+- **Synced lyrics**: they scroll with the song as it plays.
+- Works for **Arabic** too — twin-letter variants (ة/ه, ى/ي, Persian forms) are folded so
+  lyrics for Arabic songs actually load.
+- Falls back to plain (un-synced) lyrics when no timed version exists.
 
-1. Generate the release keystore and add the four secrets it prints to
-   **Settings > Secrets and variables > Actions**:
+### ❤️ Your library
 
-   ```bash
-   bash scripts/generate-release-keystore.sh
-   ```
+- Liked songs, recently played, playlists — offline, on-device.
+- Your downloads live in the **Library** section; the **Settings** section keeps things tidy.
 
-2. The release signing key must never change, or existing installs cannot update.
+### 🔄 Updates built-in
 
-To cut a release:
+- The app checks GitHub Releases itself and offers to update with one tap.
 
-1. Bump `APP_VERSION` in `apps/mobile/src/services/updates/appUpdates.ts` to match the new
-   version (the workflow refuses to build if the tag and constant disagree), then commit.
-2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. The workflow builds `sinc-X.Y.Z-<code>.apk`, uploads it to a release with auto-generated
-   notes, and the app surfaces an "Update available" download for it.
+---
 
-## Review Points / Decisions Needed
+## 🚀 First steps
 
-Before implementation begins, the following choices should be confirmed:
+1. Open Sinc. Search for a song in the search bar.
+2. Tap a result — it starts playing, and lyrics load underneath it.
+3. Like it? Tap **download** (↓). Watch the queue chew through, check your progress.
+4. Open any other music player — your song is there, named and tagged like a normal file.
+5. Paste a Spotify playlist URL via **Library → Download a playlist** and let it run while
+   your phone charges.
 
-1. **Provider set** — which metadata providers (MusicBrainz, Last.fm, iTunes, Deezer metadata) and which legally-permitted source providers (Internet Archive, Jamendo, FMA) to integrate first.
-2. **Local DB** — WatermelonDB (chosen) vs alternatives (Realm, SQLite + Drizzle).
-3. **Real-time transport** — Socket.io (chosen) vs native WebSocket.
-4. **Hosting** — Render/Fly/Railway (fast MVP) vs managed Kubernetes.
-5. **Monorepo tooling** — Turborepo vs Nx.
-6. **Push provider** — FCM + APNs direct vs Expo Push (if Expo used).
-7. **Analytics** — PostHog (self-hosted option) vs Matomo vs Sentry-only for MVP.
+---
 
-## Legal Boundary (explicit)
+## 🛠 For developers
 
-Sinc resolves audio only from sources it is **legally permitted to access** (public domain, Creative Commons, open archives, and content the user has rights to). It does not download or extract protected audio from services where that behavior is prohibited. The provider abstraction and source-resolution scoring are designed to enforce this boundary, not to circumvent it.
+- Tech: React Native (TypeScript) app with an on-device engine (Python + yt-dlp + ffmpeg)
+  bundled in the APK — the app runs fully local, no server required. A prototype TypeScript
+  server lives under [`apps/server`](apps/server).
+- Build from source: `npm install`, then build the engine binaries with
+  `bash scripts/build-mobile-media-binaries.sh`, then:
+
+  ```bash
+  cd apps/mobile/android
+  ./gradlew assembleRelease     # APK lands in apps/mobile/android/app/build/outputs/apk/release/
+  ```
+
+- The bundled engine binaries are **not** committed; the script above (and the release CI)
+  fetches/builds them.
+- Cutting an official release: see [`docs/RELEASING.md`](docs/RELEASING.md).
+- Full architecture docs live in the [`ARCHITECTURE_*.md`](.) files at the repo root, plus
+  status notes in [`docs/`](docs/) (QA, milestones).
+
+---
+
+## ⚖️ A note on responsibility
+
+Sinc streams and downloads from the sources it finds and is made **for personal use**.
+Please respect the copyright law where you live and the terms of the services that Sinc
+searches. Don't redistribute what you download.
+
+---
+
+<p align="center">made with 💛</p>
