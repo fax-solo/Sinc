@@ -63,7 +63,9 @@ jobs:
         run: |
           if [ -n "$SINC_KEYSTORE_BASE64" ]; then
             echo "$SINC_KEYSTORE_BASE64" | base64 -d > apps/mobile/android/app/release.keystore
-            echo "SINC_KEYSTORE_FILE=apps/mobile/android/app/release.keystore" >> "$GITHUB_ENV"
+            # Absolute: gradle runs from apps/mobile/android, and a repo-root-
+            # relative storeFile would be resolved twice and doubled.
+            echo "SINC_KEYSTORE_FILE=$GITHUB_WORKSPACE/apps/mobile/android/app/release.keystore" >> "$GITHUB_ENV"
           else
             echo "::warning::SINC_KEYSTORE_BASE64 is not set — signing with the debug key."
             echo "Set the four SINC_KEYSTORE_* secrets (see scripts/generate-release-keystore.sh)."
