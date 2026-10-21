@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import type { Prisma } from '@prisma/client';
 import type { CanonicalTrack } from '@sinc/shared';
 import type { DownloadResolver } from '../../lib/download-source.js';
 import type { LyricsService } from '../../lib/lyrics.js';
@@ -165,6 +166,7 @@ export class DownloadsService {
         trackTitle: track.title,
         trackArtist: track.artists[0]?.name ?? 'Unknown Artist',
         trackArtwork: track.artworkUrl ?? null,
+        trackJson: track as unknown as Prisma.InputJsonValue,
         quality: 'high',
         status: 'downloading',
         progress: 0,

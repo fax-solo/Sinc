@@ -23,7 +23,7 @@ const MAX_PLAYLISTS = 6;
 const ON_REPEAT_MIN = 2;
 const SKIP_HEAVY_RATIO = 0.7;
 
-function toCanonicalPlaylist(p: LocalPlaylist): CanonicalPlaylist {
+export function toCanonicalPlaylist(p: LocalPlaylist): CanonicalPlaylist {
   return {
     id: p.id,
     name: p.name,

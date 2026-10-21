@@ -10,8 +10,8 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
-import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
@@ -80,6 +80,9 @@ class SincPlayerModule(reactContext: ReactApplicationContext) :
     metadata: ReadableMap?,
     promise: Promise,
   ) {
+    // Exactly one progress loop: a previous load's runnable keeps re-posting
+    // itself, so it must be removed before starting a new one.
+    mainHandler.removeCallbacks(progressRunnable)
     mainHandler.post {
       try {
         sharedTrackId = trackId
@@ -97,7 +100,17 @@ class SincPlayerModule(reactContext: ReactApplicationContext) :
             .build()
         val item = MediaItem.Builder().setUri(uri).setMediaMetadata(mediaMetadata).build()
 
-        val dataSourceFactory = DefaultDataSource.Factory(reactApplicationContext)
+        // Remote streams go through the shared disk cache (instant replays,
+        // offline-friendly repeats); local files bypass it.
+        val upstream = DefaultDataSource.Factory(reactApplicationContext)
+        val dataSourceFactory = if (uri.startsWith("http://") || uri.startsWith("https://")) {
+          CacheDataSource.Factory()
+            .setCache(StreamCache.get(reactApplicationContext))
+            .setUpstreamDataSourceFactory(upstream)
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        } else {
+          upstream
+        }
         val source: MediaSource =
           if (isHls(uri, mimeType)) {
             HlsMediaSource.Factory(dataSourceFactory).createMediaSource(item)
@@ -123,13 +136,19 @@ class SincPlayerModule(reactContext: ReactApplicationContext) :
   fun removeListeners(count: Int) {}
 
   @ReactMethod
-  fun play() {
-    mainHandler.post { PlaybackService.playerOrNull()?.playWhenReady = true }
+  fun play(promise: Promise) {
+    mainHandler.post {
+      PlaybackService.playerOrNull()?.playWhenReady = true
+      promise.resolve(null)
+    }
   }
 
   @ReactMethod
-  fun pause() {
-    mainHandler.post { PlaybackService.playerOrNull()?.playWhenReady = false }
+  fun pause(promise: Promise) {
+    mainHandler.post {
+      PlaybackService.playerOrNull()?.playWhenReady = false
+      promise.resolve(null)
+    }
   }
 
   @ReactMethod
@@ -141,29 +160,14 @@ class SincPlayerModule(reactContext: ReactApplicationContext) :
   }
 
   @ReactMethod
-  fun stop() {
+  fun stop(promise: Promise) {
+    // Stop the progress loop too — otherwise it wakes every 500ms forever.
+    mainHandler.removeCallbacks(progressRunnable)
     mainHandler.post {
       sharedTrackId = null
       PlaybackService.stop()
+      promise.resolve(null)
     }
-  }
-
-  @ReactMethod
-  fun getPosition(promise: Promise) {
-    mainHandler.post { promise.resolve(PlaybackService.playerOrNull()?.currentPosition ?: 0L) }
-  }
-
-  @ReactMethod
-  fun getDuration(promise: Promise) {
-    mainHandler.post {
-      val d = PlaybackService.playerOrNull()?.duration ?: 0L
-      promise.resolve(if (d >= 0) d else 0L)
-    }
-  }
-
-  @ReactMethod
-  fun isPlaying(promise: Promise) {
-    mainHandler.post { promise.resolve(PlaybackService.playerOrNull()?.isPlaying ?: false) }
   }
 
   @ReactMethod

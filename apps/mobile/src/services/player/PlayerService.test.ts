@@ -9,6 +9,17 @@ import type {
 import { playerService } from './PlayerService';
 import { usePlayerStore } from './playerStore';
 import { usePlayerProgressStore } from './playerProgressStore';
+import { storage, STORAGE_KEYS } from '../../utils/storage';
+
+// The native keystore is unavailable under Node; keep anything that reaches
+// for it inert.
+vi.mock('react-native-keychain', () => ({
+  ACCESSIBLE: { WHEN_UNLOCKED_THIS_DEVICE_ONLY: 'whitelist' },
+  ACCESS_CONTROL: { BIOMETRY_CURRENT_SET: 'biometryCurrentSet' },
+  setGenericPassword: vi.fn(async () => ({ service: 'default', storage: 'keychain' })),
+  getGenericPassword: vi.fn(async () => false),
+  resetGenericPassword: vi.fn(async () => true),
+}));
 
 type ProgressListener = (event: NativeProgressEvent) => void;
 type CompletionListener = (trackId: string) => void;
@@ -22,11 +33,14 @@ const {
   commandListeners,
   fakePlayer,
   fakeDownloader,
+  fakeYt,
+  resolvePlayback,
 } = vi.hoisted(() => {
   const progressListeners: ProgressListener[] = [];
   const completionListeners: CompletionListener[] = [];
   const errorListeners: ErrorListener[] = [];
   const commandListeners: CommandListener[] = [];
+  const resolvePlayback = vi.fn();
 
   const fakePlayer: NativePlayerModule = {
     available: () => true,
@@ -35,9 +49,6 @@ const {
     pause: vi.fn(async () => {}),
     seekTo: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
-    getPosition: vi.fn(async () => 0),
-    getDuration: vi.fn(async () => 0),
-    isPlaying: vi.fn(async () => true),
     addProgressListener: (listener) => {
       progressListeners.push(listener);
       return () => {};
@@ -62,10 +73,16 @@ const {
     download: async () => {
       throw new Error('unavailable');
     },
-    cancel: async () => {},
     remove: async () => {},
-    getLocalUri: async () => null,
     addProgressListener: () => () => {},
+  };
+
+  const fakeYt = {
+    available: () => true,
+    resolveStream: async () => null,
+    resolveByQuery: async () => null,
+    prefetch: vi.fn(async () => true),
+    download: async () => null,
   };
 
   return {
@@ -75,11 +92,26 @@ const {
     commandListeners,
     fakePlayer,
     fakeDownloader,
+    fakeYt,
+    resolvePlayback,
   };
 });
 
+vi.mock('../../api/music', () => ({
+  musicApi: { resolvePlaybackForTrack: resolvePlayback },
+}));
+
 vi.mock('../native', () => ({
-  nativeBridge: { player: fakePlayer, downloader: fakeDownloader },
+  nativeBridge: {
+    player: fakePlayer,
+    downloader: fakeDownloader,
+    yt: fakeYt,
+    downloads: {
+      available: () => false,
+      addActionListener: vi.fn(() => () => {}),
+      addYtProgressListener: vi.fn(() => () => {}),
+    },
+  },
 }));
 
 function track(id: string): CanonicalTrack {
@@ -102,22 +134,23 @@ function makeResponse(body: unknown, status = 200) {
   };
 }
 
-function stubFetchForPlay(tracks: CanonicalTrack[]) {
+/** Stubs the local playback resolver for the given tracks and blocks all real HTTP. */
+function stubResolvePlayback(tracks: CanonicalTrack[]) {
   vi.stubGlobal(
     'fetch',
-    vi.fn().mockImplementation(async (url: string) => {
-      const path = decodeURIComponent(new URL(url).pathname);
-      const match = tracks.find((t) => path === `/music/tracks/${t.id}/play`);
-      if (!match) return makeResponse({ message: 'not found' }, 404);
-      return makeResponse({
-        uri: `https://example.com/${match.id}.m3u8`,
-        mimeType: 'application/vnd.apple.mpegurl',
-        quality: 'high',
-        provider: 'ytdlp',
-        expiresIn: 3600,
-      });
-    })
+    vi.fn(async () => makeResponse({ message: 'not found' }, 404))
   );
+  resolvePlayback.mockReset();
+  resolvePlayback.mockImplementation(async (t: CanonicalTrack) => {
+    const match = tracks.find((c) => c.id === t.id);
+    if (!match) throw new Error('no stream');
+    return {
+      uri: `https://example.com/${match.id}.m3u8`,
+      mimeType: 'application/vnd.apple.mpegurl',
+      quality: 'high' as const,
+      provider: 'ytdlp' as const,
+    };
+  });
 }
 
 /** Simulates the native player reporting that playback actually started. */
@@ -132,6 +165,7 @@ function flush() {
 }
 
 beforeEach(() => {
+  storage.remove(STORAGE_KEYS.STREAM_CACHE);
   vi.mocked(fakePlayer.load).mockClear();
   vi.mocked(fakePlayer.play).mockClear();
   vi.mocked(fakePlayer.pause).mockClear();
@@ -154,7 +188,7 @@ describe('playerService', () => {
   });
 
   it('playQueue resolves the stream, loads and plays the native track', async () => {
-    stubFetchForPlay([track('itunes:1')]);
+    stubResolvePlayback([track('itunes:1')]);
 
     await playerService.playQueue([track('itunes:1')]);
 
@@ -174,7 +208,7 @@ describe('playerService', () => {
   });
 
   it('playTrack queues a single track and loads it', async () => {
-    stubFetchForPlay([track('itunes:1')]);
+    stubResolvePlayback([track('itunes:1')]);
 
     await playerService.playTrack(track('itunes:1'));
 
@@ -182,8 +216,16 @@ describe('playerService', () => {
     expect(vi.mocked(fakePlayer.load)).toHaveBeenCalledTimes(1);
   });
 
+  it('prefetches the next queued track so skipping starts from cache', async () => {
+    stubResolvePlayback([track('itunes:1'), track('itunes:2')]);
+
+    await playerService.playQueue([track('itunes:1'), track('itunes:2')]);
+
+    expect(vi.mocked(fakeYt.prefetch)).toHaveBeenCalledWith('Artist', 'Track itunes:2', 1000);
+  });
+
   it('progress events update the store and promote loading to playing', async () => {
-    stubFetchForPlay([track('itunes:1')]);
+    stubResolvePlayback([track('itunes:1')]);
     await playerService.playQueue([track('itunes:1')]);
     usePlayerStore.setState({ status: 'loading' });
 
@@ -196,7 +238,7 @@ describe('playerService', () => {
   });
 
   it('progress events never downgrade playing to paused', async () => {
-    stubFetchForPlay([track('itunes:1')]);
+    stubResolvePlayback([track('itunes:1')]);
     await playerService.playQueue([track('itunes:1')]);
     usePlayerStore.setState({ status: 'playing' });
 
@@ -209,7 +251,7 @@ describe('playerService', () => {
 
   it('completion advances to the next track in the queue', async () => {
     const tracks = [track('itunes:1'), track('itunes:2')];
-    stubFetchForPlay(tracks);
+    stubResolvePlayback(tracks);
     await playerService.playQueue(tracks);
     emitStartedPlaying();
 
@@ -228,7 +270,7 @@ describe('playerService', () => {
 
   it('completion with repeat one reloads the same track', async () => {
     const t1 = track('itunes:1');
-    stubFetchForPlay([t1]);
+    stubResolvePlayback([t1]);
     await playerService.playQueue([t1]);
     usePlayerStore.getState().setRepeat('one');
     emitStartedPlaying();
@@ -242,7 +284,7 @@ describe('playerService', () => {
 
   it('completion before playback started surfaces an error instead of advancing', async () => {
     const tracks = [track('itunes:1'), track('itunes:2')];
-    stubFetchForPlay(tracks);
+    stubResolvePlayback(tracks);
     await playerService.playQueue(tracks);
 
     completionListeners.forEach((l) => l('itunes:1'));
@@ -256,7 +298,7 @@ describe('playerService', () => {
 
   it('a completion for a non-current track is ignored', async () => {
     const tracks = [track('itunes:1'), track('itunes:2')];
-    stubFetchForPlay(tracks);
+    stubResolvePlayback(tracks);
     await playerService.playQueue(tracks);
     emitStartedPlaying();
 
@@ -268,7 +310,7 @@ describe('playerService', () => {
   });
 
   it('togglePlayPause pauses a playing track', async () => {
-    stubFetchForPlay([track('itunes:1')]);
+    stubResolvePlayback([track('itunes:1')]);
     await playerService.playQueue([track('itunes:1')]);
     expect(usePlayerStore.getState().status).toBe('playing');
 
@@ -279,7 +321,7 @@ describe('playerService', () => {
   });
 
   it('togglePlayPause resumes a paused track', async () => {
-    stubFetchForPlay([track('itunes:1')]);
+    stubResolvePlayback([track('itunes:1')]);
     await playerService.playQueue([track('itunes:1')]);
     await playerService.togglePlayPause();
     expect(usePlayerStore.getState().status).toBe('paused');
@@ -293,7 +335,7 @@ describe('playerService', () => {
 
   it('next advances and loads the following track', async () => {
     const tracks = [track('itunes:1'), track('itunes:2')];
-    stubFetchForPlay(tracks);
+    stubResolvePlayback(tracks);
     await playerService.playQueue(tracks);
     emitStartedPlaying();
 
@@ -305,7 +347,7 @@ describe('playerService', () => {
 
   it('a lock-screen next command advances the queue', async () => {
     const tracks = [track('itunes:1'), track('itunes:2')];
-    stubFetchForPlay(tracks);
+    stubResolvePlayback(tracks);
     await playerService.playQueue(tracks);
     emitStartedPlaying();
 
@@ -318,7 +360,7 @@ describe('playerService', () => {
 
   it('a lock-screen previous command goes back in the queue', async () => {
     const tracks = [track('itunes:1'), track('itunes:2')];
-    stubFetchForPlay(tracks);
+    stubResolvePlayback(tracks);
     await playerService.playQueue(tracks, 1);
     emitStartedPlaying();
 
@@ -331,7 +373,7 @@ describe('playerService', () => {
 
   it('previous clamps at the first track', async () => {
     const tracks = [track('itunes:1'), track('itunes:2')];
-    stubFetchForPlay(tracks);
+    stubResolvePlayback(tracks);
     await playerService.playQueue(tracks, 1);
     emitStartedPlaying();
 
@@ -342,7 +384,7 @@ describe('playerService', () => {
   });
 
   it('seekTo updates the store and the native player', async () => {
-    stubFetchForPlay([track('itunes:1')]);
+    stubResolvePlayback([track('itunes:1')]);
     await playerService.playQueue([track('itunes:1')]);
 
     await playerService.seekTo(30000);
@@ -352,16 +394,84 @@ describe('playerService', () => {
   });
 
   it('a failed stream resolve surfaces an error', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => makeResponse({ message: 'not found' }, 404))
-    );
+    stubResolvePlayback([track('itunes:1')]);
+    resolvePlayback.mockRejectedValue(new Error('no stream'));
 
     await playerService.playTrack(track('itunes:1'));
 
     expect(usePlayerStore.getState().status).toBe('error');
-    expect(usePlayerStore.getState().errorMessage).toBeTruthy();
+    expect(usePlayerStore.getState().errorMessage).toBe('no stream');
     expect(vi.mocked(fakePlayer.load)).not.toHaveBeenCalled();
+  });
+
+  it('retries a flaky resolve before playing', async () => {
+    stubResolvePlayback([track('itunes:1')]);
+    resolvePlayback
+      .mockRejectedValueOnce(new Error('flaky dns'))
+      .mockRejectedValueOnce(new Error('flaky dns'));
+
+    await playerService.playTrack(track('itunes:1'));
+
+    // Two transient failures, then the stub's success path wins.
+    expect(resolvePlayback).toHaveBeenCalledTimes(3);
+    expect(usePlayerStore.getState().status).toBe('playing');
+    expect(vi.mocked(fakePlayer.load)).toHaveBeenCalledTimes(1);
+  });
+
+  it('pauses even while a track is still resolving', async () => {
+    stubResolvePlayback([track('itunes:1')]);
+    usePlayerStore.setState({
+      status: 'loading',
+      queue: [track('itunes:1')],
+      currentIndex: 0,
+    });
+
+    await playerService.togglePlayPause();
+
+    expect(usePlayerStore.getState().status).toBe('paused');
+    expect(vi.mocked(fakePlayer.pause)).toHaveBeenCalled();
+  });
+
+  it('resets stale progress when a new track loads', async () => {
+    stubResolvePlayback([track('itunes:1')]);
+    usePlayerProgressStore.setState({ positionMs: 200000, durationMs: 300000 });
+
+    await playerService.playTrack(track('itunes:1'));
+
+    expect(usePlayerProgressStore.getState().positionMs).toBe(0);
+    expect(usePlayerProgressStore.getState().durationMs).toBe(1000);
+  });
+
+  it('plays a fresh cached stream instantly without resolving', async () => {
+    stubResolvePlayback([track('itunes:1')]);
+    storage.setObject(STORAGE_KEYS.STREAM_CACHE, {
+      'itunes:1': { uri: 'https://cdn.example/a.m4a', mimeType: 'audio/mp4', at: Date.now() },
+    });
+
+    await playerService.playTrack(track('itunes:1'));
+
+    expect(resolvePlayback).not.toHaveBeenCalled();
+    expect(vi.mocked(fakePlayer.load)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fakePlayer.load).mock.calls[0][1]).toBe('https://cdn.example/a.m4a');
+    expect(usePlayerStore.getState().status).toBe('playing');
+  });
+
+  it('drops a dead cached stream and resolves fresh', async () => {
+    stubResolvePlayback([track('itunes:1')]);
+    storage.setObject(STORAGE_KEYS.STREAM_CACHE, {
+      'itunes:1': { uri: 'https://cdn.example/dead.m4a', mimeType: 'audio/mp4', at: Date.now() },
+    });
+
+    await playerService.playTrack(track('itunes:1'));
+    expect(usePlayerStore.getState().status).toBe('playing');
+
+    playerService.initialize();
+    errorListeners.forEach((l) => l('403 Forbidden'));
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(resolvePlayback).toHaveBeenCalled();
+    const cache = storage.getObject<Record<string, { uri: string }>>(STORAGE_KEYS.STREAM_CACHE);
+    expect(cache?.['itunes:1']?.uri).toBe('https://example.com/itunes:1.m3u8');
   });
 
   it('native errors surface into the store', async () => {

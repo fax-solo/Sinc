@@ -45,6 +45,14 @@ const EnvSchema = z.object({
     .string()
     .transform((v) => v === 'true' || v === '1')
     .default('true'),
+
+  // Demo mode: when enabled, POST /auth/demo provisions a shared demo account
+  // with a starter library and returns fresh tokens (used by CI/e2e and the
+  // demo deployment). Hard-gated off in production.
+  DEMO_LOGIN_ENABLED: z
+    .string()
+    .transform((v) => v === 'true' || v === '1')
+    .default('false'),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

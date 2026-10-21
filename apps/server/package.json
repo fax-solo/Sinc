@@ -15,7 +15,11 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
+    "prisma:seed": "prisma db seed",
     "prisma:studio": "prisma studio"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
     "@fastify/compress": "^9.2.0",
@@ -26,7 +30,6 @@
     "argon2": "^0.45.1",
     "dotenv": "^16.4.7",
     "fastify": "^5.2.1",
-    "fastify-plugin": "^5.0.0",
     "ioredis": "^5.4.1",
     "jose": "^6.2.8",
     "pino": "^9.6.0",

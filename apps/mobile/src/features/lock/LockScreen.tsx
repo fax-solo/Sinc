@@ -6,6 +6,19 @@ import { AppButton } from '../../components/AppButton';
 import { useTheme } from '../../theme';
 import { useLockStore } from './lockStore';
 import { verifyBiometric, biometricSupported } from '../../services/security/biometric';
+import {
+  MAX_ATTEMPTS,
+  getFailedAttempts,
+  getLockoutRemainingMs,
+} from '../../services/security/pin';
+
+/** m:ss for the lockout countdown. */
+function mmss(ms: number): string {
+  const total = Math.ceil(ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
 
 export function LockScreen() {
   const { colors, spacing, radii } = useTheme();
@@ -16,6 +29,24 @@ export function LockScreen() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [bioAvailable, setBioAvailable] = useState<boolean | null>(null);
+  // Live lockout window so the countdown is real instead of a static warning.
+  const [lockMs, setLockMs] = useState(() => getLockoutRemainingMs());
+
+  const locked = lockMs > 0;
+
+  useEffect(() => {
+    if (!locked) return;
+    const tick = setInterval(() => {
+      const remaining = getLockoutRemainingMs();
+      setLockMs(remaining);
+      // Window expired — clear the countdown message so the next try reads clean.
+      if (remaining <= 0) {
+        setError(null);
+        clearInterval(tick);
+      }
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [locked]);
 
   // Probe for biometric availability once, lazily.
   useEffect(() => {
@@ -28,12 +59,34 @@ export function LockScreen() {
     };
   }, []);
 
-  const attemptPin = useCallback(() => {
-    setError(null);
-    if (!verifyPin(pin)) {
-      setError('Incorrect PIN. Try again.');
-      setPin('');
+  const attemptPin = useCallback(async () => {
+    if (getLockoutRemainingMs() > 0) {
+      // verifyPin refuses (and won't count) attempts during backoff — say so.
+      setLockMs(getLockoutRemainingMs());
+      setError(`Too many attempts. Try again in ${mmss(getLockoutRemainingMs())}.`);
       return;
+    }
+    setError(null);
+    setBusy(true);
+    try {
+      const ok = await verifyPin(pin);
+      if (!ok) {
+        setPin('');
+        const attempts = getFailedAttempts();
+        const remaining = getLockoutRemainingMs();
+        if (remaining > 0) {
+          setLockMs(remaining);
+          setError(`Too many attempts. Locked for ${mmss(remaining)}.`);
+        } else {
+          setError(
+            attempts > 0
+              ? `Incorrect PIN — ${attempts} of ${MAX_ATTEMPTS} before lockout.`
+              : 'Incorrect PIN.'
+          );
+        }
+      }
+    } finally {
+      setBusy(false);
     }
   }, [pin, verifyPin]);
 
@@ -86,9 +139,14 @@ export function LockScreen() {
         </AppText>
       ) : null}
 
-      <AppButton label="Unlock" onPress={attemptPin} style={{ marginTop: spacing.lg }} />
+      <AppButton
+        label={locked ? `Locked (${mmss(lockMs)})` : 'Unlock'}
+        onPress={() => void attemptPin()}
+        disabled={busy || locked}
+        style={{ marginTop: spacing.lg }}
+      />
 
-      {bioAvailable ? (
+      {bioAvailable && !locked ? (
         <Pressable
           onPress={() => void attemptBiometric()}
           disabled={busy}

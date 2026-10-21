@@ -665,12 +665,6 @@ export class PersonalizationService {
     };
   }
 
-  /** Freshly played tracks (most recent first), deduped. */
-  async buildRecentlyPlayed(userId: string): Promise<CanonicalTrack[]> {
-    const signal = await this.loadSignal(userId);
-    return signal.familiar.slice(0, 10);
-  }
-
   /** Memoized per user; both buildMixes and buildHomeFeed need it. */
   private async genreAffinityFor(
     userId: string,

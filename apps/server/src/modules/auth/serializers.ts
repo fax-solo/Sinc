@@ -12,6 +12,7 @@ const defaultSettings: UserSettings = {
   repeatDefault: 'off',
   notifications: { downloads: true, recommendations: true, account: true },
   biometricLock: false,
+  analyticsEnabled: false,
 };
 
 export function toCanonicalUser(user: User): CanonicalUser {

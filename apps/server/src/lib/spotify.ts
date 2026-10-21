@@ -62,6 +62,23 @@ export function parsePlaylistId(input: string): string | null {
   return urlMatch ? urlMatch[1] : null;
 }
 
+const NEXT_DATA_SCRIPT_RE = /<script\b[^>]*\bid=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/;
+
+/** Extracts the `__NEXT_DATA__` JSON payload, tolerant of attribute order. */
+export function extractNextDataScript(html: string): string | null {
+  const match = html.match(NEXT_DATA_SCRIPT_RE);
+  return match ? match[1] : null;
+}
+
+/** Test-only: clears the cached anonymous token so the next call re-bootstraps. */
+export function resetSpotifyCache(): void {
+  anonymousSession = null;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function fetchWithTimeout(
   url: string,
   ms = 20_000,
@@ -87,28 +104,22 @@ interface AnonymousSession {
 /** Cached short-lived anonymous token bootstrapped from a public embed page. */
 let anonymousSession: AnonymousSession | null = null;
 
-async function getAnonymousToken(): Promise<string> {
-  if (anonymousSession && Date.now() < anonymousSession.expiresAtMs - TOKEN_SKEW_MS) {
-    return anonymousSession.accessToken;
-  }
-
-  let html: string;
+async function bootstrapAnonymousToken(): Promise<AnonymousSession> {
+  let res: Response;
   try {
-    const res = await fetchWithTimeout(`${TRACK_EMBED_URL}${BOOTSTRAP_TRACK_ID}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    html = await res.text();
+    res = await fetchWithTimeout(`${TRACK_EMBED_URL}${BOOTSTRAP_TRACK_ID}`);
   } catch {
     throw new AppError('SPOTIFY_ERROR', 'Could not reach Spotify', 502);
   }
+  if (!res.ok)
+    throw new AppError('SPOTIFY_ERROR', `Spotify embed returned HTTP ${res.status}`, 502);
 
-  const match = html.match(
-    /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/
-  );
-  if (!match) throw new AppError('SPOTIFY_ERROR', 'Spotify embed returned unreadable data', 502);
+  const body = extractNextDataScript(await res.text());
+  if (!body) throw new AppError('SPOTIFY_ERROR', 'Spotify embed returned unreadable data', 502);
 
   let json: unknown;
   try {
-    json = JSON.parse(match[1]);
+    json = JSON.parse(body);
   } catch {
     throw new AppError('SPOTIFY_ERROR', 'Spotify embed returned unreadable data', 502);
   }
@@ -124,14 +135,30 @@ async function getAnonymousToken(): Promise<string> {
     throw new AppError('SPOTIFY_ERROR', 'Spotify embed returned no session token', 502);
   }
 
-  anonymousSession = {
+  return {
     accessToken: session.accessToken,
     expiresAtMs:
       typeof session.accessTokenExpirationTimestampMs === 'number'
         ? session.accessTokenExpirationTimestampMs
         : Date.now() + 60 * 60 * 1000,
   };
-  return anonymousSession.accessToken;
+}
+
+async function getAnonymousToken(): Promise<string> {
+  if (anonymousSession && Date.now() < anonymousSession.expiresAtMs - TOKEN_SKEW_MS) {
+    return anonymousSession.accessToken;
+  }
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      anonymousSession = await bootstrapAnonymousToken();
+      return anonymousSession.accessToken;
+    } catch (err) {
+      lastErr = err;
+      if (attempt === 0) await delay(250);
+    }
+  }
+  throw lastErr;
 }
 
 /** One page (≤100 tracks) of a playlist from the pathfinder GraphQL endpoint. */
@@ -151,13 +178,26 @@ async function fetchPlaylistPage(
     extensions: JSON.stringify({ persistedQuery: { version: 1, sha256Hash: FETCH_PLAYLIST_HASH } }),
   });
 
-  const res = await fetchWithTimeout(`${PATHFINDER_URL}?${params}`, 20_000, {
+  const url = `${PATHFINDER_URL}?${params}`;
+  const headers = {
     Authorization: `Bearer ${token}`,
     'app-platform': 'WebPlayer',
     Accept: 'application/json',
-  });
+  };
 
+  const requestOnce = () => fetchWithTimeout(url, 20_000, headers);
+  let res: Response;
+  try {
+    res = await requestOnce();
+  } catch {
+    await delay(250);
+    res = await requestOnce();
+  }
   if (res.status === 404) return null;
+  if (res.status >= 500) {
+    await delay(250);
+    res = await requestOnce();
+  }
   if (!res.ok) {
     throw new AppError('SPOTIFY_ERROR', `Spotify pathfinder returned ${res.status}`, 502);
   }
@@ -239,14 +279,12 @@ async function fetchPlaylistFromEmbed(id: string): Promise<SpotifyPlaylistImport
   if (!res.ok) throw new AppError('SPOTIFY_ERROR', `Spotify embed returned ${res.status}`, 502);
 
   const html = await res.text();
-  const match = html.match(
-    /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/
-  );
-  if (!match) throw new NotFoundError('Spotify playlist');
+  const body = extractNextDataScript(html);
+  if (!body) throw new NotFoundError('Spotify playlist');
 
   let json: unknown;
   try {
-    json = JSON.parse(match[1]);
+    json = JSON.parse(body);
   } catch {
     throw new AppError('SPOTIFY_ERROR', 'Spotify embed returned unreadable data', 502);
   }

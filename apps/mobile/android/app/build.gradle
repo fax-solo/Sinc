@@ -80,6 +80,21 @@ android {
     compileSdk rootProject.ext.compileSdkVersion
 
     namespace "com.sinc.app"
+    packaging {
+        jniLibs {
+            // The engine executables ship as native libs (libsincpython3.so /
+            // libsincffmpeg.so in src/main/jniLibs/<abi>/). They MUST be
+            // physically extracted to applicationInfo.nativeLibraryDir on
+            // install (exec() of files inside the APK is impossible; the
+            // caller exec()s the paths directly). useLegacyPackaging keeps the
+            // old extractNativeLibs=true behaviour instead of mmap loading.
+            useLegacyPackaging = true
+            // These are already-stripped binaries; leave them untouched.
+            doNotStrip "**/libsincpython3.so"
+            doNotStrip "**/libsincffmpeg.so"
+            doNotStrip "**/libsincqjs.so"
+        }
+    }
     defaultConfig {
         applicationId "com.sinc.app"
         minSdkVersion rootProject.ext.minSdkVersion
@@ -118,6 +133,10 @@ android {
             // see https://reactnative.dev/docs/signed-apk-android.
             signingConfig signingConfigs.findByName('release') ?: signingConfigs.debug
             minifyEnabled enableProguardInReleaseBuilds
+            // Strip unused resources too: the app has zero dynamic resource
+            // lookups (no getIdentifier), so the shrinker is safe. Combined
+            // with R8 this is the main non-asset APK size lever.
+            shrinkResources enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
     }
@@ -138,7 +157,16 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
     implementation("androidx.media3:media3-session:1.4.1")
     implementation("androidx.media3:media3-common:1.4.1")
+    // Stream disk cache (CacheDataSource + index database provider)
+    implementation("androidx.media3:media3-datasource:1.4.1")
+    implementation("androidx.media3:media3-database:1.4.1")
 
     // Downloads
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Local notifications (NotificationsCompat/NotificationManagerCompat)
+    implementation("androidx.core:core:1.13.1")
+
+    // Pure-Kotlin unit tests (SincTrackMatch gates)
+    testImplementation("junit:junit:4.13.2")
 }

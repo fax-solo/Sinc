@@ -1,120 +1,58 @@
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
 import type { CanonicalUser } from '@sinc/shared';
-import { apiClient } from '../../api/client';
-import { storage, STORAGE_KEYS } from '../../utils/storage';
-import { authApi } from './api';
-import type { LoginInput, RegisterInput } from './types';
 
 export type AuthStatus = 'loading' | 'signedIn' | 'signedOut';
 
+/**
+ * Local-only identity. There is no backend (or VPS) in the local build: the
+ * app boots into a single, always-present local profile. No tokens, no keychain
+ * session, no login screen — the PIN app-lock remains the only gate.
+ */
+export const LOCAL_USER: CanonicalUser = {
+  id: 'local',
+  email: 'local@sinc.local',
+  username: 'you',
+  role: 'user',
+  status: 'active',
+  createdAt: new Date(0).toISOString(),
+  settings: {
+    theme: 'dark',
+    playbackQuality: 'high',
+    downloadQuality: 'high',
+    downloadOverWifiOnly: true,
+    autoDownloadFavorites: false,
+    autoplay: true,
+    shuffleDefault: false,
+    repeatDefault: 'off',
+    notifications: { downloads: true, recommendations: true, account: true },
+    biometricLock: false,
+    analyticsEnabled: false,
+  },
+};
+
 interface AuthState {
-  user: CanonicalUser | null;
+  user: CanonicalUser;
   accessToken: string | null;
   refreshToken: string | null;
   status: AuthStatus;
   initialize: () => Promise<void>;
-  signIn: (input: LoginInput) => Promise<void>;
-  signUp: (input: RegisterInput) => Promise<void>;
   signOut: () => Promise<void>;
   refresh: () => Promise<string | null>;
 }
 
-function applySession(
-  set: (partial: Partial<AuthState>) => void,
-  user: CanonicalUser,
-  tokens: { accessToken: string; refreshToken: string }
-): void {
-  apiClient.setAccessToken(tokens.accessToken);
-  apiClient.setRefreshToken(tokens.refreshToken);
-  set({
-    user,
-    accessToken: tokens.accessToken,
-    refreshToken: tokens.refreshToken,
-    status: 'signedIn',
-  });
-}
+export const useAuthStore = create<AuthState>(() => ({
+  user: LOCAL_USER,
+  accessToken: null,
+  refreshToken: null,
+  status: 'signedIn',
 
-function clearSession(set: (partial: Partial<AuthState>) => void): void {
-  apiClient.setAccessToken(null);
-  apiClient.setRefreshToken(null);
-  set({ user: null, accessToken: null, refreshToken: null, status: 'signedOut' });
-}
+  initialize: async () => {
+    // Nothing to restore: the local profile is always present.
+  },
 
-export const useAuthStore = create<AuthState>()(
-  persist(
-    (set, get) => ({
-      user: null,
-      accessToken: null,
-      refreshToken: null,
-      status: 'loading',
+  signOut: async () => {
+    // Nothing to sign out of. The local library belongs to the device.
+  },
 
-      initialize: async () => {
-        const { accessToken } = get();
-        if (!accessToken) {
-          set({ status: 'signedOut' });
-          return;
-        }
-        apiClient.setAccessToken(accessToken);
-        try {
-          const user = await authApi.me();
-          set({ user, status: 'signedIn' });
-        } catch {
-          clearSession(set);
-        }
-      },
-
-      signIn: async (input) => {
-        const result = await authApi.login(input);
-        applySession(set, result.user, result.tokens);
-      },
-
-      signUp: async (input) => {
-        const result = await authApi.register(input);
-        applySession(set, result.user, result.tokens);
-      },
-
-      signOut: async () => {
-        const { refreshToken } = get();
-        if (refreshToken) {
-          await authApi.logout(refreshToken).catch(() => undefined);
-        }
-        clearSession(set);
-      },
-
-      refresh: async () => {
-        const { refreshToken } = get();
-        if (!refreshToken) return null;
-        try {
-          const result = await authApi.refresh(refreshToken);
-          applySession(set, result.user, result.tokens);
-          return result.tokens.accessToken;
-        } catch {
-          clearSession(set);
-          return null;
-        }
-      },
-    }),
-    {
-      name: STORAGE_KEYS.SESSION,
-      storage: createJSONStorage(() => ({
-        getItem: (key) => storage.getString(key),
-        setItem: (key, value) => storage.setString(key, value),
-        removeItem: (key) => storage.remove(key),
-      })),
-      partialize: (state) => ({
-        user: state.user,
-        accessToken: state.accessToken,
-        refreshToken: state.refreshToken,
-      }),
-    }
-  )
-);
-
-// Hydration is synchronous (MMKV is a sync adapter), so the persisted session
-// is already available on getState() right after create(). Wire the client
-// to the store: tokens for auth headers, and a single-flight refresh handler.
-const { accessToken, refreshToken } = useAuthStore.getState();
-apiClient.setAccessToken(accessToken);
-apiClient.setRefreshToken(refreshToken);
-apiClient.setRefreshHandler(() => useAuthStore.getState().refresh());
+  refresh: async () => null,
+}));

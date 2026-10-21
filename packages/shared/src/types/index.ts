@@ -77,6 +77,7 @@ export interface UserSettings {
     account: boolean;
   };
   biometricLock: boolean;
+  analyticsEnabled: boolean;
 }
 
 export interface PlaybackSource {

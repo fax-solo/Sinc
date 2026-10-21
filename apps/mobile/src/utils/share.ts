@@ -27,12 +27,24 @@ export interface ShareEntity {
 /**
  * Opens the native share sheet with a Sinc link for the given entity.
  * Resolves to false when the user dismisses the sheet without sharing.
+ * Never rejects: dismissing the sheet on iOS throws ("User did not share"),
+ * and every call site is `void shareEntity(...)` — without this catch every
+ * cancel would surface as an unhandled promise rejection.
  */
 export async function shareEntity(entity: ShareEntity): Promise<boolean> {
   const url = buildShareLink(entity.type, entity.id);
   const message = entity.subtitle
     ? `${entity.title} — ${entity.subtitle}\n${url}`
     : `${entity.title}\n${url}`;
-  const result = await Share.share({ message, url });
-  return result.action === Share.sharedAction;
+  try {
+    const result = await Share.share({ message, url });
+    return result.action === Share.sharedAction;
+  } catch (e) {
+    // User cancelled the sheet — not an error. Report and squelch.
+    const dismissed = e instanceof Error && /did not share|cancel/i.test(e.message || '');
+    if (!dismissed) {
+      console.warn('Share sheet failed', e);
+    }
+    return false;
+  }
 }

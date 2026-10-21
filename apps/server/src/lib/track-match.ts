@@ -38,6 +38,7 @@ const VARIANT_TAGS = [
   'edit',
   'version',
   'mix',
+  'extended',
   'official video',
   'official audio',
   'official',
@@ -77,13 +78,21 @@ const VARIANT_PENALTY: Record<string, number> = {
 
 /** Lowercases, removes diacritics and punctuation, collapses whitespace. */
 export function normalizeText(input: string): string {
-  return input
-    .normalize('NFKD')
-    .replace(/\p{M}+/gu, '')
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .trim()
-    .replace(/\s+/g, ' ');
+  return (
+    input
+      .normalize('NFKD')
+      .replace(/\p{M}+/gu, '')
+      // Arabic letter folding beyond NFKD: teh marbuta/ة and alef maqsura/ى are
+      // VISUAL variants of ه and ي — the same artist name is routinely spelled
+      // either way across platforms. Same rule as the Kotlin match engine.
+      .replace(/[\u0629\u06C0\u06C2]/g, '\u0647')
+      .replace(/[\u0649\u06CC\u06C1\u06D2]/g, '\u064A')
+      .replace(/\u0640/g, '')
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim()
+      .replace(/\s+/g, ' ')
+  );
 }
 
 /** Splits a title into its normalized core by stripping parenthetical tags. */
@@ -96,9 +105,18 @@ export function stripVariantTags(title: string): string {
     .split(/[^\p{L}\p{N}]+/gu)
     .filter(Boolean);
 
+  // Compound qualifier: "Song (Original Mix)" and the plain "Song" upload are
+  // the same stem. On its own "original" is a legitimate title word
+  // ("The Original"), so it only joins the stripped set next to a real tag.
+  const strip: readonly string[] = words.some((w) =>
+    (VARIANT_TAGS as readonly string[]).includes(w)
+  )
+    ? [...VARIANT_TAGS, 'original']
+    : VARIANT_TAGS;
+
   const kept: string[] = [];
   for (const word of words) {
-    if ((VARIANT_TAGS as readonly string[]).includes(word)) continue;
+    if (strip.includes(word)) continue;
     kept.push(word);
   }
   return kept.join(' ');

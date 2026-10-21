@@ -1,17 +1,13 @@
 /**
- * Artwork URL routing. Remote cover images are served through the backend's
- * `/music/artwork` proxy so the device HTTP cache sees one stable origin with
- * long-lived Cache-Control, and image prefetching doesn't fan out to many
- * third-party CDNs. Non-http URIs (local files, bundled assets) pass through.
+ * Artwork URL routing (local build). Artwork is loaded straight from the
+ * third-party CDNs — no backend proxy. Non-http URIs (local files, bundled
+ * assets) pass through untouched, and empty strings yield `undefined`.
  */
 import { Image } from 'react-native';
 
-import { config } from '../app/config';
-
 export function artworkUrl(url?: string | null): string | undefined {
   if (!url) return undefined;
-  if (!/^https?:\/\//i.test(url)) return url;
-  return `${config.apiBaseUrl}/music/artwork?u=${encodeURIComponent(url)}`;
+  return url;
 }
 
 /** Warms the native image cache for the first `count` artworks (no-ops on

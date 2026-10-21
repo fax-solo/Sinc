@@ -10,6 +10,11 @@ class SincPackage : ReactPackage {
     listOf(
       SincPlayerModule(reactContext),
       SincDownloaderModule(reactContext),
+      SincCryptoModule(reactContext),
+      SincNotificationsModule(reactContext),
+      SincYtModule(reactContext),
+      SincDownloadActionsModule(reactContext),
+      SincHttpModule(reactContext),
     )
 
   override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> =

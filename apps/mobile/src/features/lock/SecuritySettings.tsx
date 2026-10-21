@@ -55,14 +55,15 @@ export function SecuritySettings({ onBack }: SecuritySettingsProps) {
     }
   }, []);
 
-  const save = useCallback(() => {
+  const save = useCallback(async () => {
     setError(null);
     setMessage(null);
     if (pin !== confirm) {
       setError('PINs do not match.');
       return;
     }
-    if (setPin(pin)) {
+    const ok = await setPin(pin);
+    if (ok) {
       setPinValue('');
       setConfirm('');
       setMessage('App lock enabled.');
@@ -166,7 +167,7 @@ export function SecuritySettings({ onBack }: SecuritySettingsProps) {
               ]}
               accessibilityLabel="Confirm PIN"
             />
-            <AppButton label="Enable lock" onPress={save} />
+            <AppButton label="Enable lock" onPress={() => void save()} />
           </View>
         ) : null}
 

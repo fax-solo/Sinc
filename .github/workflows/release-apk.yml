@@ -33,6 +33,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build @sinc/shared
+        run: npm run build -w @sinc/shared
+
+      - name: Build media engine assets (python3 / ffmpeg / yt-dlp)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libarchive-tools binutils
+          scripts/build-mobile-media-binaries.sh
+
       - name: Resolve version from tag
         run: |
           VERSION_NAME="${GITHUB_REF_NAME#v}"

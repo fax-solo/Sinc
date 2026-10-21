@@ -169,6 +169,7 @@ model DownloadJob {
   localPath       String?
   provider        String?
   sourceUrl       String?
+  trackJson       Json?
   createdAt       DateTime @default(now())
   startedAt       DateTime?
   completedAt     DateTime?

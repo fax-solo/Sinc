@@ -101,23 +101,34 @@ export class AuthService {
     }
 
     const env = getEnv();
-    const rotated = await this.tokens.createRefreshToken(user.id, session.id);
-    await prisma.session.update({
-      where: { id: session.id },
-      data: {
-        refreshToken: this.hashRefreshToken(rotated),
-        expiresAt: new Date(Date.now() + parseDuration(env.JWT_REFRESH_TTL)),
-        userAgent: userAgent ?? session.userAgent,
-        ipAddress: ip ?? session.ipAddress,
-      },
-    });
-
     const accessToken = await this.tokens.createAccessToken(
       user.id,
       session.id,
       user.role as 'user' | 'admin',
       user.status as 'active' | 'suspended'
     );
+
+    // Rotate the refresh token, but degrade gracefully when the rotation
+    // write fails (transient DB error): hand back the original still-valid
+    // refresh token so the client keeps its session instead of being force
+    // logged out by a token that never reached it.
+    let rotated = refreshToken;
+    try {
+      const fresh = await this.tokens.createRefreshToken(user.id, session.id);
+      await prisma.session.update({
+        where: { id: session.id },
+        data: {
+          refreshToken: this.hashRefreshToken(fresh),
+          expiresAt: new Date(Date.now() + parseDuration(env.JWT_REFRESH_TTL)),
+          userAgent: userAgent ?? session.userAgent,
+          ipAddress: ip ?? session.ipAddress,
+        },
+      });
+      rotated = fresh;
+    } catch (err) {
+      console.error('[auth] refresh rotation failed; session kept as-is', err);
+    }
+
     return this.response(user, accessToken, rotated);
   }
   async logout(sessionId: string): Promise<void> {

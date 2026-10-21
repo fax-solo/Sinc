@@ -7,6 +7,9 @@ import {
   clearPinHash,
   getPinHash,
   isValidPin,
+  recordFailedAttempt,
+  resetFailedAttempts,
+  isLockedOut,
 } from '../../services/security/pin';
 import { clearBiometricSecret } from '../../services/security/biometric';
 
@@ -16,14 +19,14 @@ interface LockState {
   /** Unlocked for the current foreground session. Never persisted. */
   unlocked: boolean;
   /** Sets + arms a new PIN. Returns false for invalid pins. */
-  setPin: (pin: string) => boolean;
-  /** True when the entered PIN matches. */
-  verifyPin: (pin: string) => boolean;
+  setPin: (pin: string) => Promise<boolean>;
+  /** True when the entered PIN matches (and the lock is not backed off). */
+  verifyPin: (pin: string) => Promise<boolean>;
   /** Unlocks the current session (biometric success path). */
   unlock: () => void;
   /** Re-arms the lock (app backgrounded or manual lock). */
   lock: () => void;
-  /** Disarms the lock entirely and clears all secrets. */
+  /** Disarms the lock entirely and clears all secrets + attempt counters. */
   disable: () => void;
 }
 
@@ -33,18 +36,28 @@ export const useLockStore = create<LockState>()(
       enabled: false,
       unlocked: false,
 
-      setPin: (pin) => {
+      setPin: async (pin) => {
         if (!isValidPin(pin)) return false;
-        savePinHash(hashPin(pin));
+        const digest = await hashPin(pin);
+        savePinHash(digest);
+        resetFailedAttempts();
         set({ enabled: true, unlocked: true });
         return true;
       },
 
-      verifyPin: (pin) => {
+      verifyPin: async (pin) => {
         const stored = getPinHash();
-        const matches = Boolean(stored) && stored === hashPin(pin);
-        if (matches) set({ unlocked: true });
-        return matches;
+        const matches = Boolean(stored) && !isLockedOut() && stored === (await hashPin(pin));
+        if (matches) {
+          resetFailedAttempts();
+          set({ unlocked: true });
+          return true;
+        }
+        if (stored && !isLockedOut()) {
+          recordFailedAttempt();
+        }
+        set({ unlocked: false });
+        return false;
       },
 
       unlock: () => set({ unlocked: true }),
@@ -53,6 +66,7 @@ export const useLockStore = create<LockState>()(
 
       disable: () => {
         clearPinHash();
+        resetFailedAttempts();
         void clearBiometricSecret();
         set({ enabled: false, unlocked: true });
       },

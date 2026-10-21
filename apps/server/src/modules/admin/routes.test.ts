@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, describe, expect, it } from 'vitest';
+import type { Prisma } from '@prisma/client';
 import { buildApp, bootstrapAdmin } from '../../app.js';
 import { loadEnv } from '../../config/env.js';
 import { prisma } from '../../lib/prisma.js';
@@ -291,24 +292,27 @@ describe('admin module', () => {
     expect(Array.isArray(top.json().artists)).toBe(true);
   });
 
-  it('forces a password reset token', async () => {
-    const res = await app.inject({
-      method: 'POST',
-      url: `/admin/users/${userId}/reset-password`,
-      headers: authHeaders(adminToken),
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().token).toBeTruthy();
-  });
-
   it('lists download jobs, stats, retry, and cancel', async () => {
     const labeled = `j-${suffix}`;
+    const retryTrack = {
+      id: 'itunes:1',
+      title: `Failed ${labeled}`,
+      artists: [{ id: 'artist-1', name: 'Admin Test', providerIds: { itunes: 'a1' }, genres: [] }],
+      album: undefined,
+      durationMs: 184000,
+      trackNumber: 3,
+      artworkUrl: 'https://art.example/retry.jpg',
+      providerIds: { itunes: 'i1' },
+      explicit: true,
+      isrc: 'USABC1234567',
+    };
     await prisma.downloadJob.create({
       data: {
         userId,
         trackId: 'itunes:1',
         trackTitle: `Failed ${labeled}`,
         trackArtist: 'Admin Test',
+        trackJson: retryTrack as unknown as Prisma.InputJsonValue,
         quality: 'high',
         status: 'failed',
         errorCode: 'DOWNLOAD_FAILED',
@@ -350,6 +354,10 @@ describe('admin module', () => {
       headers: authHeaders(adminToken),
     });
     expect(retry.statusCode).toBe(200);
+
+    const stored = await prisma.downloadJob.findUnique({ where: { id: failedId } });
+    expect(stored).not.toBeNull();
+    expect(stored!.trackJson).toEqual(retryTrack);
 
     const cancel = await app.inject({
       method: 'POST',

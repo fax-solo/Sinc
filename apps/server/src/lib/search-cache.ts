@@ -15,11 +15,25 @@ function searchKey(...parts: string[]): string {
 
 export { searchKey };
 
-export function createSearchCache(): SearchCache {
-  const env = getEnv();
+/**
+ * How long a value stays physically readable on Redis after its TTL expires.
+ * This bounds how long `getStale` can hand out an outdated mix/generated feed
+ * while the fresh copy is being rebuilt (gradual mix refresh). After the grace
+ * window Redis evicts the key entirely and stale reads turn into misses.
+ */
+const STALE_GRACE_SECONDS = 600;
 
-  if (env.REDIS_URL) {
-    const redis = new Redis(env.REDIS_URL, {
+interface CacheEnvelope<T> {
+  value: T;
+  expiresAt: number;
+}
+
+export function createSearchCache(redisUrl?: string): SearchCache {
+  const env = getEnv();
+  const resolved = redisUrl ?? env.REDIS_URL;
+
+  if (resolved) {
+    const redis = new Redis(resolved, {
       maxRetriesPerRequest: 3,
     });
 
@@ -27,18 +41,32 @@ export function createSearchCache(): SearchCache {
       async get<T>(key: string) {
         try {
           const data = await redis.get(key);
-          return data ? (JSON.parse(data) as T) : null;
+          if (!data) return null;
+          const envelope = JSON.parse(data) as CacheEnvelope<T>;
+          return Date.now() > envelope.expiresAt ? null : envelope.value;
         } catch {
           return null;
         }
       },
       async getStale<T>(key: string) {
-        // Redis evicts expired keys on its own; an expired entry is simply gone.
-        return this.get<T>(key);
+        try {
+          const data = await redis.get(key);
+          if (!data) return null;
+          const envelope = JSON.parse(data) as CacheEnvelope<T>;
+          return envelope.value;
+        } catch {
+          return null;
+        }
       },
       async set(key: string, value: unknown, ttlSeconds: number) {
         try {
-          await redis.setex(key, ttlSeconds, JSON.stringify(value));
+          const envelope: CacheEnvelope<unknown> = {
+            value,
+            expiresAt: Date.now() + ttlSeconds * 1000,
+          };
+          // Physical TTL = value TTL + a bounded stale grace window so expired
+          // entries stay readable via getStale until the grace window closes.
+          await redis.setex(key, ttlSeconds + STALE_GRACE_SECONDS, JSON.stringify(envelope));
         } catch {
           // Ignore cache errors
         }

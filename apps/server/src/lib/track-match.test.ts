@@ -17,8 +17,20 @@ describe('normalizeText', () => {
     expect(normalizeText('Café')).toBe('cafe');
   });
 
-  it('keeps Arabic script', () => {
-    expect(normalizeText('بلو بيرى')).toContain('بلو بيرى');
+  it('keeps Arabic script (with visual twin letters folded)', () => {
+    // ى folds into ي by design now — the string stays Arabic, never latinized.
+    expect(normalizeText('بلو بيرى')).toContain('بلو بيري');
+  });
+
+  it('folds Arabic visual twin letters (ة/ى and Persian ي)', () => {
+    // The same artist name is routinely spelled with either variant letter.
+    expect(normalizeText('حمو المرشدى')).toBe(normalizeText('حمو المرشدي'));
+    // ى folds into ي, so the folded output must contain Arabic ي …
+    expect(normalizeText('چى')).toContain('\u064A');
+    // … teh marbuta folds into ه (the word's final letter changes codepoint) …
+    expect(normalizeText('مدرسة')).toBe('مدرسه');
+    // … and kashida (tatweel) decorators vanish.
+    expect(normalizeText('مورد')).toBe(normalizeText('مـــورد'));
   });
 });
 
@@ -30,6 +42,17 @@ describe('stripVariantTags', () => {
 
   it('keeps the base title', () => {
     expect(stripVariantTags('WADINI - Afroto')).toBe('wadini afroto');
+  });
+
+  it('treats "original"/"extended" compounds as variants next to a real tag', () => {
+    expect(stripVariantTags('Paragon (Original Mix)')).toBe('paragon');
+    expect(stripVariantTags('Paragon (Original Extended Mix)')).toBe('paragon');
+    expect(stripVariantTags('Stamina Origami')).toBe('stamina origami');
+  });
+
+  it('keeps a standalone "original" title', () => {
+    expect(stripVariantTags('The Original')).toBe('the original');
+    expect(stripVariantTags('Original')).toBe('original');
   });
 });
 

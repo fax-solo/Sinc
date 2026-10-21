@@ -29,7 +29,12 @@ export function createStorage(): KVStorage {
       clear: () => mmkv.clearAll(),
       getObject: <T>(key: string) => {
         const val = mmkv.getString(key);
-        return val ? (JSON.parse(val) as T) : null;
+        if (!val) return null;
+        try {
+          return JSON.parse(val) as T;
+        } catch {
+          return null;
+        }
       },
       setObject: <T>(key: string, value: T) => mmkv.set(key, JSON.stringify(value)),
     };
@@ -42,7 +47,12 @@ export function createStorage(): KVStorage {
       clear: () => memory.clear(),
       getObject: <T>(key: string) => {
         const val = memory.get(key);
-        return val ? (JSON.parse(val) as T) : null;
+        if (!val) return null;
+        try {
+          return JSON.parse(val) as T;
+        } catch {
+          return null;
+        }
       },
       setObject: <T>(key: string, value: T) => memory.set(key, JSON.stringify(value)),
     };
@@ -67,9 +77,12 @@ export const STORAGE_KEYS = {
   DOWNLOADS: 'sinc.downloads',
   LYRICS: 'sinc.lyrics',
   LYRICS_OFFSETS: 'sinc.lyricsOffsets',
+  LYRICS_MISSES: 'sinc.lyricsMisses',
   SEARCH_CACHE: 'sinc.cache.search',
   HOME_CACHE: 'sinc.cache.home',
   PERSONALIZED_HOME_CACHE: 'sinc.cache.homePersonalized',
   LOCK: 'sinc.lock',
   ANALYTICS: 'sinc.analytics',
+  UPDATES: 'sinc.updates',
+  STREAM_CACHE: 'sinc.streamCache',
 } as const;

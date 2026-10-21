@@ -31,6 +31,7 @@ export function registerHealthRoutes(app: FastifyInstance, env: Env): void {
       name: 'Sinc API',
       version: '0.1.0',
       minAppVersion: env.MIN_APP_VERSION,
+      demoEnabled: env.DEMO_LOGIN_ENABLED,
       time: new Date().toISOString(),
     };
   });

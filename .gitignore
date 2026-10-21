@@ -35,6 +35,11 @@ apps/mobile/*.jks
 apps/mobile/*.keystore
 apps/mobile/keystores/
 
+# Bundled on-device media binaries (Termux python + yt-dlp zipapp + ffmpeg).
+# Built by scripts/build-mobile-media-binaries.sh (deployed via CI release asset).
+apps/mobile/android/app/src/main/assets/bin/*
+!apps/mobile/android/app/src/main/assets/bin/.gitkeep
+
 # Server runtime data (music files, staging) — never publish
 apps/server/downloads/
 

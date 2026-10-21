@@ -2,7 +2,7 @@ import { createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { Writable } from 'node:stream';
+import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { CanonicalTrack } from '@sinc/shared';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
@@ -73,11 +73,13 @@ async function fetchToFile(
 
   const total = Number(res.headers.get('content-length') ?? 0);
   let written = 0;
-  const progress = new Writable({
-    write(chunk: Buffer, _enc, cb) {
+  // A Transform (not a plain Writable) is required as a middle pipeline stage:
+  // Node's stream.pipeline rejects a Writable in any position but the tail.
+  const progress = new Transform({
+    transform(chunk: Buffer, _enc, cb) {
       written += chunk.length;
       if (total > 0) onProgress(Math.min(99, Math.round((written / total) * 100)));
-      cb();
+      cb(null, chunk);
     },
   });
 
@@ -196,7 +198,7 @@ class YtdlpSource implements DownloadSourceImpl {
   }
 }
 
-class JamendoSource implements DownloadSourceImpl {
+export class JamendoSource implements DownloadSourceImpl {
   readonly name = 'jamendo' as const;
 
   async download(
@@ -207,7 +209,7 @@ class JamendoSource implements DownloadSourceImpl {
     onProgress: DownloadProgressFn,
     signal?: AbortSignal
   ): Promise<DownloadResult | null> {
-    const clientId = process.env.JAMENDO_CLIENT_ID;
+    const clientId = getEnv().JAMENDO_CLIENT_ID;
     if (!clientId) return null;
     try {
       const res = await fetch(
@@ -226,7 +228,7 @@ class JamendoSource implements DownloadSourceImpl {
   }
 }
 
-class InternetArchiveSource implements DownloadSourceImpl {
+export class InternetArchiveSource implements DownloadSourceImpl {
   readonly name = 'archive' as const;
 
   async download(
@@ -253,10 +255,28 @@ class InternetArchiveSource implements DownloadSourceImpl {
           const meta = (await metaRes.json()) as {
             files?: Array<{ name: string; format?: string }>;
           };
-          const file = (meta.files ?? []).find(
+          // Archive `format` values are like "VBR MP3" / "Ogg Vorbis" and never
+          // contain the word "audio" — matching on it rejected every real
+          // file. Accept audio extensions and exclude known non-audio formats.
+          const candidates = (meta.files ?? []).filter(
             (f) =>
-              /\.(mp3|ogg)$/i.test(f.name) && (f.format?.toLowerCase().includes('audio') ?? false)
+              /\.(mp3|ogg|oga|m4a|flac|opus|webm|wav)$/i.test(f.name) &&
+              !/torrent|metadata|jpeg|jpg|png|gif|text|xml|json|video|mpeg4|mp4|pdf|epub|mobi|subtitle|srt|vtt|collection|logo|sqlite/i.test(
+                f.format ?? ''
+              )
           );
+          if (candidates.length === 0) continue;
+          const score = (name: string): number => {
+            const lower = name.toLowerCase();
+            let s = 0;
+            if (lower.endsWith('.mp3')) s += 10;
+            if (/_64kb|64kb|_samples|samples|preview/.test(lower)) s -= 20;
+            if (/spectrogram|waveform|_meta|_files|_archive|cue|log|\.m3u|\.pls/.test(lower))
+              s -= 50;
+            return s;
+          };
+          candidates.sort((a, b) => score(b.name) - score(a.name));
+          const file = candidates[0];
           if (!file) continue;
           const url = `https://archive.org/download/${doc.identifier}/${encodeURIComponent(file.name)}`;
           const ext = path.extname(file.name).toLowerCase() === '.ogg' ? '.ogg' : '.mp3';
@@ -279,7 +299,7 @@ class InternetArchiveSource implements DownloadSourceImpl {
   }
 }
 
-class FmaSource implements DownloadSourceImpl {
+export class FmaSource implements DownloadSourceImpl {
   readonly name = 'fma' as const;
 
   async download(
@@ -290,7 +310,7 @@ class FmaSource implements DownloadSourceImpl {
     onProgress: DownloadProgressFn,
     signal?: AbortSignal
   ): Promise<DownloadResult | null> {
-    const apiKey = process.env.FMA_API_KEY;
+    const apiKey = getEnv().FMA_API_KEY;
     if (!apiKey) return null;
     try {
       const res = await fetch(

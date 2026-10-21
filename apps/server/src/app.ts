@@ -117,7 +117,7 @@ export async function buildApp(
 
   const tokenService = new TokenService();
   const authService = new AuthService(tokenService);
-  registerAuthRoutes(app, authService, tokenService);
+  registerAuthRoutes(app, authService, tokenService, { demoEnabled: env.DEMO_LOGIN_ENABLED });
 
   const itunes = new ItunesAdapter();
   const deezer = new DeezerAdapter();

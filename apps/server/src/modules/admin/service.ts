@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,13 +8,61 @@ import { prisma } from '../../lib/prisma.js';
 import { toCanonicalUser } from '../auth/serializers.js';
 import type { DownloadsService } from '../downloads/service.js';
 
+/**
+ * Rebuilds the canonical track for a retry from the full metadata snapshot
+ * stored at enqueue time, falling back to the scalar columns for legacy jobs.
+ */
+function trackForRetry(job: {
+  id: string;
+  userId: string;
+  trackId: string;
+  trackTitle: string;
+  trackArtist: string | null;
+  trackArtwork: string | null;
+  trackJson: Prisma.JsonValue | null;
+}): CanonicalTrack {
+  if (job.trackJson && typeof job.trackJson === 'object') {
+    const parsed = job.trackJson as Partial<CanonicalTrack>;
+    if (typeof parsed.title === 'string' && Array.isArray(parsed.artists)) {
+      return {
+        id: job.trackId,
+        title: parsed.title,
+        artists: parsed.artists,
+        album: parsed.album,
+        durationMs: typeof parsed.durationMs === 'number' ? parsed.durationMs : 0,
+        trackNumber: parsed.trackNumber,
+        artworkUrl: parsed.artworkUrl ?? job.trackArtwork ?? undefined,
+        providerIds: parsed.providerIds ?? {},
+        releaseDate: parsed.releaseDate,
+        popularityScore: parsed.popularityScore,
+        explicit: typeof parsed.explicit === 'boolean' ? parsed.explicit : false,
+        isrc: parsed.isrc,
+      };
+    }
+  }
+  return {
+    id: job.trackId,
+    title: job.trackTitle,
+    artists: [
+      {
+        id: `admin:${job.userId}`,
+        name: job.trackArtist ?? 'Unknown Artist',
+        providerIds: {},
+        genres: [],
+      },
+    ],
+    providerIds: {},
+    durationMs: 0,
+    explicit: false,
+  };
+}
+
 export type AdminAction =
   | 'user.promote'
   | 'user.demote'
   | 'user.suspend'
   | 'user.unsuspend'
   | 'user.delete'
-  | 'user.reset_password'
   | 'session.revoke'
   | 'playlist.delete'
   | 'device.revoke'
@@ -237,22 +284,6 @@ export class AdminService {
     await this.requireTarget(targetId);
     await prisma.user.delete({ where: { id: targetId } });
     await this.audit({ actorId, action: 'user.delete', targetType: 'user', targetId, ip });
-  }
-
-  /** Issues a one-time password-reset token for a user (returned to the admin). */
-  async forceReset(actorId: string, targetId: string, ip?: string): Promise<{ token: string }> {
-    await this.requireTarget(targetId);
-    const token = randomUUID();
-    await prisma.verificationToken.create({
-      data: {
-        userId: targetId,
-        token,
-        type: 'password_reset',
-        expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
-      },
-    });
-    await this.audit({ actorId, action: 'user.reset_password', targetType: 'user', targetId, ip });
-    return { token };
   }
 
   // ---- Sessions ----------------------------------------------------------
@@ -683,22 +714,7 @@ export class AdminService {
     });
 
     if (this.downloads) {
-      const track: CanonicalTrack = {
-        id: job.trackId,
-        title: job.trackTitle,
-        artists: [
-          {
-            id: `admin:${job.userId}`,
-            name: job.trackArtist ?? 'Unknown Artist',
-            providerIds: {},
-            genres: [],
-          },
-        ],
-        providerIds: {},
-        durationMs: 0,
-        explicit: false,
-      };
-      void this.downloads.startDownload(job.userId, track).catch(() => undefined);
+      void this.downloads.startDownload(job.userId, trackForRetry(job)).catch(() => undefined);
     }
     return { ok: true };
   }

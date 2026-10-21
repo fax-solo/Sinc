@@ -1,17 +1,10 @@
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import { ValidationError } from '@sinc/shared';
 import { adminGuard, type AuthenticatedRequest } from '../../plugins/guard.js';
 import type { TokenService } from '../auth/tokens.js';
 import type { AdminService } from './service.js';
 
-const DESTRUCTIVE_ACTIONS = new Set([
-  'promote',
-  'demote',
-  'suspend',
-  'unsuspend',
-  'delete',
-  'reset-password',
-]);
+const DESTRUCTIVE_ACTIONS = new Set(['promote', 'demote', 'suspend', 'unsuspend', 'delete']);
 
 function intParam(value: unknown, fallback: number, max: number): number {
   const n = Number(value);
@@ -80,7 +73,7 @@ export function registerAdminRoutes(
     const action = String(body.action ?? '');
     if (!DESTRUCTIVE_ACTIONS.has(action)) {
       throw new ValidationError(
-        'action must be one of: promote, demote, suspend, unsuspend, delete, reset-password'
+        'action must be one of: promote, demote, suspend, unsuspend, delete'
       );
     }
 
@@ -100,8 +93,6 @@ export function registerAdminRoutes(
       case 'delete':
         await admin.deleteUser(auth.userId, id);
         break;
-      case 'reset-password':
-        return admin.forceReset(auth.userId, id);
     }
     return { ok: true };
   });
@@ -111,12 +102,6 @@ export function registerAdminRoutes(
     const { id } = request.params as { id: string };
     await admin.deleteUser(auth.userId, id);
     return { ok: true };
-  });
-
-  app.post('/admin/users/:id/reset-password', { preHandler: guard }, async (request) => {
-    const auth = (request as AuthenticatedRequest).auth;
-    const { id } = request.params as { id: string };
-    return admin.forceReset(auth.userId, id);
   });
 
   app.get('/admin/users/:id/sessions', { preHandler: guard }, async (request) => {

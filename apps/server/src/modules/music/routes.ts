@@ -6,7 +6,6 @@ import type {
   CanonicalTrack,
 } from '@sinc/shared';
 import { AppError, NotFoundError, ValidationError } from '@sinc/shared';
-import { Readable } from 'node:stream';
 import type { ItunesAdapter } from '../../lib/itunes.js';
 import type { DeezerAdapter } from '../../lib/deezer.js';
 import type { YtdlpResolver } from '../../lib/ytdlp.js';
@@ -622,7 +621,6 @@ export function buildMusicRoutes(
             async (
               raw: SpotifyRawTrack
             ): Promise<{ track: CanonicalTrack; resolved: boolean } | null> => {
-              const query = [raw.artists[0], raw.title].filter(Boolean).join(' ');
               const match = await matchSpotifyTrack(raw, itunes, deezer);
               if (match) return { track: match, resolved: true };
               return { track: spotifyToTrack(raw), resolved: false };

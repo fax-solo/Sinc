@@ -64,6 +64,7 @@ export const UserSettingsSchema = z.object({
     account: z.boolean(),
   }),
   biometricLock: z.boolean(),
+  analyticsEnabled: z.boolean(),
 });
 
 export const UserSchema = z.object({

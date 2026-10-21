@@ -5,6 +5,7 @@ import type { AuthService } from './service.js';
 import type { TokenService } from './tokens.js';
 import { authGuard } from '../../plugins/guard.js';
 import type { AuthenticatedRequest } from '../../plugins/guard.js';
+import { DemoService } from './demo.js';
 
 function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
   const parsed = schema.safeParse(body);
@@ -17,7 +18,8 @@ function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
 export function registerAuthRoutes(
   app: FastifyInstance,
   authService: AuthService,
-  tokenService: TokenService
+  tokenService: TokenService,
+  opts: { demoEnabled?: boolean } = {}
 ): void {
   const guard = authGuard(tokenService);
 
@@ -26,6 +28,11 @@ export function registerAuthRoutes(
     const result = await authService.register(data, request.headers['user-agent'], request.ip);
     return reply.status(201).send(result);
   });
+
+  if (opts.demoEnabled) {
+    const demo = new DemoService(authService);
+    app.post('/auth/demo', { config: { rateLimit: { max: 20 } } }, async () => demo.login());
+  }
 
   app.post('/auth/login', { config: { rateLimit: { max: 20 } } }, async (request) => {
     const data = parseBody(LoginSchema, request.body);

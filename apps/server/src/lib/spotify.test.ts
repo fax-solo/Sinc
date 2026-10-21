@@ -1,6 +1,32 @@
-import { describe, expect, it } from 'vitest';
-import { parsePlaylistId, fetchPlaylistTracks } from './spotify.js';
+import { describe, expect, it, beforeEach } from 'vitest';
+import {
+  parsePlaylistId,
+  fetchPlaylistTracks,
+  extractNextDataScript,
+  resetSpotifyCache,
+} from './spotify.js';
 import { AppError } from '@sinc/shared';
+
+describe('spotify extractNextDataScript', () => {
+  it('extracts the JSON payload in the canonical layout', () => {
+    const html = `<html><script id="__NEXT_DATA__" type="application/json">{"a":1}</script></html>`;
+    expect(extractNextDataScript(html)).toBe('{"a":1}');
+  });
+
+  it('tolerates attribute order and extra attributes', () => {
+    const html = `<html><script type="application/json" id="__NEXT_DATA__" data-testid="next">{"b":2}</script></html>`;
+    expect(extractNextDataScript(html)).toBe('{"b":2}');
+  });
+
+  it('tolerates multi-line documents where the script tag is terminated before the JSON ends', () => {
+    const html = `<html>\n<script id="__NEXT_DATA__" type="application/json">\n{"c":"\\u003C/script>"}\n</script>\n</html>`;
+    expect(extractNextDataScript(html)).toBe('\n{"c":"\\u003C/script>"}\n');
+  });
+
+  it('returns null when the script tag is absent', () => {
+    expect(extractNextDataScript('<html>no next data</html>')).toBeNull();
+  });
+});
 
 describe('spotify parsePlaylistId', () => {
   const ID = '37i9dQZF1DWXRqgorJj26U';
@@ -26,6 +52,138 @@ describe('spotify parsePlaylistId', () => {
 });
 
 describe('spotify fetchPlaylistTracks', () => {
+  beforeEach(() => {
+    resetSpotifyCache();
+  });
+  it('retries a transient 5xx pathfinder response once before succeeding', async () => {
+    const originalFetch = globalThis.fetch;
+    let pathfinderCalls = 0;
+
+    const trackItem = (i: number) => ({
+      itemV2: {
+        data: {
+          __typename: 'Track',
+          uri: `spotify:track:track${i}`,
+          name: `Song ${i}`,
+          trackDuration: { totalMilliseconds: 200000 + i },
+          artists: { items: [{ profile: { name: 'Artist' } }] },
+        },
+      },
+    });
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/embed/track/')) {
+        return new Response(
+          `<html><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+            props: {
+              pageProps: {
+                state: {
+                  settings: {
+                    session: {
+                      accessToken: 'anon-token-123',
+                      accessTokenExpirationTimestampMs: Date.now() + 3_600_000,
+                    },
+                  },
+                },
+              },
+            },
+          })}</script></html>`,
+          { status: 200 }
+        );
+      }
+      pathfinderCalls += 1;
+      if (pathfinderCalls === 1) {
+        return new Response('server exploded', { status: 500 });
+      }
+      return new Response(
+        JSON.stringify({
+          data: {
+            playlistV2: {
+              name: 'Retried Playlist',
+              ownerV2: { data: { name: 'Spotify' } },
+              images: { items: [{ sources: [{ url: 'https://art.example/r.jpg' }] }] },
+              content: { totalCount: 1, items: [trackItem(1)] },
+            },
+          },
+        }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+
+    try {
+      const playlist = await fetchPlaylistTracks('37i9dQZF1DWXRqgorjJ26U');
+      expect(pathfinderCalls).toBe(2);
+      expect(playlist.name).toBe('Retried Playlist');
+      expect(playlist.tracks).toHaveLength(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('re-bootstraps after a transient bootstrap network failure', async () => {
+    const originalFetch = globalThis.fetch;
+    let bootstrapCalls = 0;
+
+    const trackItem = (i: number) => ({
+      itemV2: {
+        data: {
+          __typename: 'Track',
+          uri: `spotify:track:track${i}`,
+          name: `Song ${i}`,
+          trackDuration: { totalMilliseconds: 200000 + i },
+          artists: { items: [{ profile: { name: 'Artist' } }] },
+        },
+      },
+    });
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/embed/track/')) {
+        bootstrapCalls += 1;
+        if (bootstrapCalls === 1) throw new Error('network blip');
+        return new Response(
+          `<html><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+            props: {
+              pageProps: {
+                state: {
+                  settings: {
+                    session: {
+                      accessToken: 'anon-token-999',
+                      accessTokenExpirationTimestampMs: Date.now() + 3_600_000,
+                    },
+                  },
+                },
+              },
+            },
+          })}</script></html>`,
+          { status: 200 }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          data: {
+            playlistV2: {
+              name: 'Recovered Playlist',
+              ownerV2: { data: { name: 'Spotify' } },
+              images: { items: [{ sources: [{ url: 'https://art.example/r.jpg' }] }] },
+              content: { totalCount: 1, items: [trackItem(1)] },
+            },
+          },
+        }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+
+    try {
+      const playlist = await fetchPlaylistTracks('37i9dQZF1DWXRqgorjJ26U');
+      expect(bootstrapCalls).toBe(2);
+      expect(playlist.name).toBe('Recovered Playlist');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('throws AppError when the embed page is unreachable', async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => {
