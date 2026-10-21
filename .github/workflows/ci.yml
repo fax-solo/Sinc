@@ -24,6 +24,46 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/sinc_test
+      # Test-only RS256 keypair (committed intentionally, not a production secret).
+      JWT_PRIVATE_KEY: |
+        -----BEGIN PRIVATE KEY-----
+        MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDJlB0LTNOXRjni
+        sEyt48deD17gys1j6dkqrFOD4tKrsFyZmwcp+EeG6DYb7PaIqbofNcH9aPfpq+Mu
+        xGc+LblI6m28xnoxZPRBC+jj66EDKFWgRzn11wiW653UBHA8J6BKtsuLmXmMWOmT
+        e1dDaweQrVTU+CHo9cbc9od46VeRBezhAIRY2Y7u9TPgFuB7JMBctXl34srHTmj9
+        RloD75n+q+E4QR8rvWr29rygPSxbKJ1xJ5etCzGwjhX3b/5YR53OXce+78eZH7gZ
+        ns4m3WcAoGTthzwAktZ2JdI4zJ1cQMLvWtxO8MwG5GtNgNUr0bfv4d9y+WRqyEjO
+        xqoH/sKbAgMBAAECggEAAJiZ8PZLk+NiBLYvgyL6cCX/J4rPkEjZER4C4viMNqqU
+        nqxVOFFbI/HLCASvctxIqRaSp3uY4HJ2RR2yBjiy+BmMpUD6RliLCQjQVIonnUTS
+        T8I5EmXfd6zYqpdHfxTUy83yjIn/XC+44bYGpe4aM7NXCK85KZl8ds3gAsY0yOsy
+        FjCKihqd2xeiQlPXy4la1PBF4odlZnomeXvchfx1V7JAFoon4hBj2bsPWVWT0S4+
+        SgDkw2Dz4EBzbBhMWPNJaTkB65ZVfF62oJBCDPPb+LJ7yDvse6XixmcN3hrfsJN8
+        n62Z6yUo8JHhmuPX1onvFLwG47f3dtt/OI1WmQYQAQKBgQDouFBdKxA63Hy4MVDW
+        GHaH0rK8HEBh+Bgc+yxqMwkC0ajHQ4aGyw0W+r16R+JD+YZQBcoaPhZcuEriv89s
+        RDCHXUhyzYvW3xh+2y1JUmidFGq0h6XK7FwTzcNhGcsYbaV6A87SAztOJgu/70WG
+        roHvdIlR7Y2p6HRsVK8hA1EwAQKBgQDdvk32LD1DUxb4gGLjmOadQz4dTpMINXUL
+        dz1+BGaqqlZsthpdU3V/4HE7vXagnDxFSbNMXASlli6dq/U/CC9EhYuWFWuRuxDk
+        5ixCcfxnhNtAsTOnKYrC1lKDmqJdApZq6AHvfdxTtJJPIAlPd0725GW36Cj67TbB
+        5LqScnaymwKBgQCkJMTCQkqLSdNKU7ZxnAWWnX1mAwNCVqwjXOIh8edMLrc9/RnY
+        30VXTPnyUtt8GHas4LiBNAOv2GkxcBsMgTg9cgVUvDgDEY6Eg3F4wwB4strkhLzi
+        2T3E1iAV0AyZKVVLL35kUNU2tM0aztiaO2H4lJj6yXRfQE9FzaFMxrswAQKBgQC/
+        L+gUSsx/kdKKbFfXGOwtx950clz/hOfn/OV+E9lZaQifLtvIf78dhKzc71yq2kp1
+        CziWq/gttTF4LN2FfU8T63kQ7GMVAY9tbK/YkmMn9jr8qkx44q6LkzMN2XQIccSz
+        ZFrW3VPssBI+OscMRzhEU2UIjhlXUNQXlVjwD9Ub5QKBgAwMWL07NP2a2jMrn5L0
+        lcZluW69xJ0IF0pTQSH5h6Y8JQItciHOWUbHKuimDD2w/Q45sA57VjlJ2Em7IJYe
+        AoNhoM5/ygiXD1huD2Jjix2GyjUMNJ8Jj45DqcyHLiLkfFWzJl6dSTzCsbdG9MF3
+        CCe/6Uf9yx784aRckl44Ejqa
+        -----END PRIVATE KEY-----
+      JWT_PUBLIC_KEY: |
+        -----BEGIN PUBLIC KEY-----
+        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyZQdC0zTl0Y54rBMrePH
+        Xg9e4MrNY+nZKqxTg+LSq7BcmZsHKfhHhug2G+z2iKm6HzXB/Wj36avjLsRnPi25
+        SOptvMZ6MWT0QQvo4+uhAyhVoEc59dcIluud1ARwPCegSrbLi5l5jFjpk3tXQ2sH
+        kK1U1Pgh6PXG3PaHeOlXkQXs4QCEWNmO7vUz4BbgeyTAXLV5d+LKx05o/UZaA++Z
+        /qvhOEEfK71q9va8oD0sWyidcSeXrQsxsI4V92/+WEedzl3Hvu/HmR+4GZ7OJt1n
+        AKBk7Yc8AJLWdiXSOMydXEDC71rcTvDMBuRrTYDVK9G37+HfcvlkashIzsaqB/7C
+        mwIDAQAB
+        -----END PUBLIC KEY-----
     steps:
       - uses: actions/checkout@v4
 

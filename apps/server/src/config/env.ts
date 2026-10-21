@@ -64,7 +64,10 @@ export function loadEnv(): Env {
   const parsed = EnvSchema.safeParse(process.env);
   if (!parsed.success) {
     console.error('Invalid environment variables:', parsed.error.flatten().fieldErrors);
-    process.exit(1);
+    // Throwing (not process.exit) lets test runners like vitest report the
+    // failure per-suite instead of killing the worker; server.ts's main catch
+    // still exits non-zero at startup.
+    throw new Error('Invalid environment variables');
   }
   cachedEnv = parsed.data;
   return cachedEnv;

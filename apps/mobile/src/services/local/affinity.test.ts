@@ -210,10 +210,18 @@ describe('deterministic randomness', () => {
   });
 
   it('localDayKey is YYYY-MM-DD local', () => {
-    // 2026-10-17T00:30 local on a UTC+2 machine → 2026-10-17
+    // 22:30Z is already Oct 17 on a UTC+2 clock — the exact-day assertion is
+    // only made when a runtime TZ override actually applies (POSIX runners;
+    // Windows ignores runtime TZ changes, so those fall back to the format check).
     const ts = new Date('2026-10-16T22:30:00Z').getTime();
     expect(localDayKey(ts)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(localDayKey(ts)).toBe('2026-10-17');
+
+    const prevTz = process.env.TZ;
+    process.env.TZ = 'Etc/GMT-2'; // POSIX-named UTC+2
+    const applied = new Date(ts).getTimezoneOffset() === -120;
+    const key = localDayKey(ts);
+    process.env.TZ = prevTz;
+    if (applied) expect(key).toBe('2026-10-17');
   });
 
   it('shuffled keeps elements and is deterministic with the same rand', () => {
