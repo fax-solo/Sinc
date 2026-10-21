@@ -39,7 +39,7 @@ jobs:
       - name: Build media engine assets (python3 / ffmpeg / yt-dlp)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libarchive-tools binutils
+          sudo apt-get install -y --no-install-recommends libarchive-tools binutils patchelf
           scripts/build-mobile-media-binaries.sh
 
       - name: Resolve version from tag

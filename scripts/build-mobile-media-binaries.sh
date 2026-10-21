@@ -374,6 +374,20 @@ PY
     echo "error: libLLVM leaked into the $abi bundle (closure roots regressed?)" >&2
     exit 1
   fi
+
+  # Bionic matches verneed references by DT_SONAME, not by the requested file
+  # name: any dependency whose ELF lacks (or mismatches) its SONAME makes the
+  # linker fail with "cannot find X from verneed[..]" the moment a platform
+  # lib with versioned deps (libhwui -> libmediandk) lands in the closure.
+  # Termux builds ship several such libs; mirror each file name onto itself.
+  echo "==> [$abi] ensuring every bundle lib carries its own DT_SONAME"
+  while IFS= read -r so; do
+    base="$(basename "$so")"
+    if [[ "$(readelf -d "$so" 2>/dev/null)" != *"SONAME"*"[$base]"* ]]; then
+      patchelf --set-soname "$base" "$so" ||
+        { echo "error: failed to set SONAME on $so" >&2; exit 1; }
+    fi
+  done < <(find "$libs" -type f -name '*.so*' -print0)
   echo "    bundle libs: $(du -sm "$libs" | cut -f1) MB"
 
   echo "==> [$abi] rewriting DT_RUNPATH to \$ORIGIN-relative (bionic ignores LD_LIBRARY_PATH)"
