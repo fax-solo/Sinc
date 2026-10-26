@@ -1,19 +1,24 @@
 # Releasing the Android app (maintainers)
 
 The `v*` tag push workflow (`.github/workflows/release-apk.yml`) builds a release APK,
-publishes it as a GitHub release named `sinc-<major>.<minor>.<patch>-<code>.apk`, and the
-app's "About & updates" screen tells users when a newer build exists.
+publishes it as a GitHub release with the asset
+`sinc-<major>.<minor>.<patch>-<code>.apk`, and the app's "About & updates" screen tells
+users when a newer build exists.
 
 ## One-time setup
 
-1. Generate the release keystore and add the four secrets it prints to
+1. Generate the release keystore and add the three secrets it prints to
    **Settings > Secrets and variables > Actions**:
 
    ```bash
    bash scripts/generate-release-keystore.sh
    ```
 
-2. The release signing key must never change, or existing installs cannot update.
+2. The keystore is PKCS12, so the store and private key share one password
+   (`SINC_KEYSTORE_PASSWORD`). A separate key password is not used; setting one
+   makes the build fail at signing with "Given final block not properly padded".
+
+3. The release signing key must never change, or existing installs cannot update.
 
 ## Cutting a release
 

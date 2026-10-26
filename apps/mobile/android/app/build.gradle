@@ -114,13 +114,18 @@ android {
         // the environment (set by the release workflow). Local builds fall back to
         // the debug key. Every release MUST be signed with the SAME keystore or
         // users cannot update over an existing install.
+        //
+        // The release keystore is PKCS12, which has a single password for both the
+        // store and the private key. Do not add a separate key password here:
+        // keytool silently ignores -keypass for PKCS12, which makes Gradle fail
+        // with "Given final block not properly padded" at packageRelease.
         def releaseStorePassword = System.getenv('SINC_KEYSTORE_PASSWORD')
         if (releaseStorePassword != null && !releaseStorePassword.isEmpty()) {
             release {
                 storeFile file(System.getenv('SINC_KEYSTORE_FILE') ?: 'release.keystore')
                 storePassword releaseStorePassword
                 keyAlias System.getenv('SINC_KEY_ALIAS') ?: 'sinc'
-                keyPassword System.getenv('SINC_KEY_PASSWORD')
+                keyPassword releaseStorePassword
             }
         }
     }

@@ -23,29 +23,31 @@ if [ ! -d "$KEYSTORE_DIR" ]; then
   mkdir -p "$KEYSTORE_DIR"
 fi
 
-store_password="$(openssl rand -hex 16)"
-key_password="$(openssl rand -hex 16)"
+# PKCS12 keystores only support one password for the store and the private key.
+# Keep a single password: passing a different -keypass is silently ignored by
+# keytool and would make the release build fail at signing time.
+password="$(openssl rand -hex 16)"
 alias="sinc"
 
 keytool -genkeypair \
   -keystore "$KEYSTORE" \
+  -storetype PKCS12 \
   -alias "$alias" \
   -keyalg RSA \
   -keysize 2048 \
   -validity 10000 \
-  -storepass "$store_password" \
-  -keypass "$key_password" \
+  -storepass "$password" \
+  -keypass "$password" \
   -dname "CN=Sinc, OU=Sinc, O=Sinc, L=Internet, ST=Internet, C=US"
 
 base64="$(base64 "$KEYSTORE" | tr -d '\n')"
 
 cat <<EOF
 
-=== Add these four secrets to GitHub (Settings > Secrets and variables > Actions) ===
+=== Add these three secrets to GitHub (Settings > Secrets and variables > Actions) ===
 SINC_KEYSTORE_BASE64=$base64
-SINC_KEYSTORE_PASSWORD=$store_password
+SINC_KEYSTORE_PASSWORD=$password
 SINC_KEY_ALIAS=$alias
-SINC_KEY_PASSWORD=$key_password
 
 Keystore saved to: $KEYSTORE
 Keep the file and passwords safe (e.g. in a password manager). Once the secrets

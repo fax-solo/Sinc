@@ -11,7 +11,6 @@ env:
   SINC_KEYSTORE_BASE64: ${{ secrets.SINC_KEYSTORE_BASE64 }}
   SINC_KEYSTORE_PASSWORD: ${{ secrets.SINC_KEYSTORE_PASSWORD }}
   SINC_KEY_ALIAS: ${{ secrets.SINC_KEY_ALIAS }}
-  SINC_KEY_PASSWORD: ${{ secrets.SINC_KEY_PASSWORD }}
 
 jobs:
   build:
@@ -61,15 +60,24 @@ jobs:
 
       - name: Decode release keystore
         run: |
-          if [ -n "$SINC_KEYSTORE_BASE64" ]; then
-            echo "$SINC_KEYSTORE_BASE64" | base64 -d > apps/mobile/android/app/release.keystore
-            # Absolute: gradle runs from apps/mobile/android, and a repo-root-
-            # relative storeFile would be resolved twice and doubled.
-            echo "SINC_KEYSTORE_FILE=$GITHUB_WORKSPACE/apps/mobile/android/app/release.keystore" >> "$GITHUB_ENV"
-          else
-            echo "::warning::SINC_KEYSTORE_BASE64 is not set — signing with the debug key."
-            echo "Set the four SINC_KEYSTORE_* secrets (see scripts/generate-release-keystore.sh)."
+          if [ -z "$SINC_KEYSTORE_BASE64" ]; then
+            echo "::error::SINC_KEYSTORE_BASE64 is not set. Refusing to publish a debug-signed release."
+            echo "Set the SINC_KEYSTORE_* secrets (see scripts/generate-release-keystore.sh)."
+            exit 1
           fi
+
+          echo "$SINC_KEYSTORE_BASE64" | base64 -d > apps/mobile/android/app/release.keystore
+          # PKCS12 keystores use one password for the store and the private key.
+          # keytool ignores a separate -keypass, so SINC_KEYSTORE_PASSWORD is also
+          # the key password (build.gradle applies it that way).
+          keytool -list \
+            -keystore apps/mobile/android/app/release.keystore \
+            -storepass "$SINC_KEYSTORE_PASSWORD" \
+            -alias "$SINC_KEY_ALIAS" > /dev/null
+
+          # Absolute: gradle runs from apps/mobile/android, and a repo-root-
+          # relative storeFile would be resolved twice and doubled.
+          echo "SINC_KEYSTORE_FILE=$GITHUB_WORKSPACE/apps/mobile/android/app/release.keystore" >> "$GITHUB_ENV"
 
       - name: Build release APK
         working-directory: apps/mobile/android
