@@ -39,6 +39,18 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
 
   init {
     SincDownloads.attach(reactContext)
+    // The direct path must be able to tag/publish even when JS never touched
+    // the yt-dlp module (which owns the usual extraction/config entry point).
+    val mediaAbiDir = File(reactContext.filesDir, "sinc_bin/yt")
+    SincFfmpeg.configure(
+      File(reactContext.applicationInfo.nativeLibraryDir, "libsincffmpeg.so"),
+      File(mediaAbiDir, "lib"),
+      mediaAbiDir,
+    )
+    SincAudioProbe.configure(
+      File(reactContext.applicationInfo.nativeLibraryDir, "libsincffmpeg.so"),
+      File(mediaAbiDir, "lib"),
+    )
   }
 
   private val client = OkHttpClient.Builder()
@@ -67,9 +79,9 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
     }
 
   /**
-   * Publishes a finished MP3 into the phone's public Music/Sinc folder via
-   * MediaStore, tagged with track metadata so it shows up complete in music
-   * apps. Best-effort: playback always uses the app-private copy, so a
+   * Publishes a finished audio file into the phone's public Music/Sinc folder
+   * via MediaStore, tagged with track metadata so it shows up complete in
+   * music apps. Best-effort: playback always uses the app-private copy, so a
    * failure here never fails the download.
    */
   private fun publishToPublicStorage(
@@ -78,6 +90,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
     title: String?,
     artist: String?,
     album: String?,
+    mimeType: String,
   ) {
     SincDownloads.publishAudioFile(
       reactApplicationContext,
@@ -87,6 +100,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
       title,
       artist,
       album,
+      mimeType,
     )
   }
 
@@ -94,6 +108,15 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
   private fun removeFromPublicStorage(fileName: String) {
     SincDownloads.removePublished(fileName)
   }
+
+  private fun publicNameWithExtension(publicName: String, extension: String): String {
+    val base = publicName.substringBeforeLast('.', publicName).ifBlank { "song" }
+    return "$base.$extension"
+  }
+
+  /** Kept as a thin wrapper so the direct module path reads clearly. */
+  private fun retargetExtension(file: File, extension: String): File =
+    SincAudioContainer.retarget(file, extension)
 
   /**
    * A paused or cancelled job must not publish audio after the transfer. The
@@ -142,6 +165,10 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
         ?.getString("previewUrl")
         ?.trim()
         ?.takeIf { it.isNotEmpty() }
+      val metaArtworkUrl = metadata
+        ?.getString("artworkUrl")
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
 
       // A resume continues from an existing `.part` with an HTTP Range request;
       // a fresh start drops stale partials (their server-side source may have
@@ -158,6 +185,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
         metaTitle,
         metaArtist,
         metaAlbum,
+        metaArtworkUrl,
         expectedMs,
         previewUrl,
         resumePart,
@@ -186,6 +214,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
     metaTitle: String?,
     metaArtist: String?,
     metaAlbum: String?,
+    metaArtworkUrl: String?,
     expectedMs: Long?,
     previewUrl: String?,
     allowResume: Boolean,
@@ -255,6 +284,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
           metaTitle,
           metaArtist,
           metaAlbum,
+          metaArtworkUrl,
           expectedMs,
           previewUrl,
           false,
@@ -337,19 +367,50 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
               promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
               return
             }
+            // A provider URL can be `.mp3` while the bytes are Ogg/FLAC. The
+            // private name, public name and MIME must all follow the bytes.
+            // Sniff BEFORE tagging so the tagger uses the real container.
+            var finalFile = target
+            val detected = SincAudioContainer.detectExtension(finalFile)
+            if (detected != null) finalFile = retargetExtension(finalFile, detected)
+            // Direct providers send raw files. Write metadata/artwork before
+            // probing/publishing, using a lossless remux (never libmp3lame).
+            SincMediaTagger.tagInPlace(
+              finalFile,
+              metaTitle,
+              metaArtist,
+              metaAlbum,
+              metaArtworkUrl,
+            )
+            if (isStopped(jobId)) {
+              finalFile.delete()
+              SincDownloads.end(jobId)
+              promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
+              return
+            }
+            val extension = SincAudioContainer.normalizeExtension(finalFile.extension)
+            val mimeType = SincAudioContainer.mimeForExtension(extension)
+            val displayName = publicNameWithExtension(publicName, extension)
             // Real duration of the saved file. Reject a preview/compilation
             // segment BEFORE it is published to Music/Sinc or recorded as a
             // completed download. An unreadable probe is not allowed to pass
             // when the catalog length is known — the engine tier can still
             // fetch a verifiable copy. JS keeps a backstop for callers that
             // bypass this module.
-            val durationMs = SincAudioProbe.probeDuration(target)
+            val durationMs = SincAudioProbe.probeDuration(finalFile)
+            if (durationMs <= 0L) {
+              finalFile.delete()
+              SincDownloads.end(jobId)
+              Log.w(LOG_TAG, "download rejected: unreadable audio for jobId=$jobId")
+              promise.reject("DOWNLOAD_UNVERIFIED", "Downloaded file is not readable audio")
+              return
+            }
             if (
               expectedMs != null &&
               expectedMs > 0L &&
               !SincDownloadRules.isDurationAcceptable(durationMs, expectedMs)
             ) {
-              target.delete()
+              finalFile.delete()
               SincDownloads.end(jobId)
               Log.w(
                 LOG_TAG,
@@ -367,7 +428,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
             // trusted catalog preview before publishing. No preview means there
             // is no reference to compare against; every other failure is closed.
             if (!previewUrl.isNullOrBlank()) {
-              val fingerprint = SincAudioFingerprint.verify(target, previewUrl)
+              val fingerprint = SincAudioFingerprint.verify(finalFile, previewUrl)
               when (fingerprint.status) {
                 SincAudioFingerprint.Status.MATCH ->
                   Log.i(
@@ -376,7 +437,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
                       "${fingerprint.referenceHashes}"
                   )
                 SincAudioFingerprint.Status.MISMATCH -> {
-                  target.delete()
+                  finalFile.delete()
                   SincDownloads.end(jobId)
                   Log.w(
                     LOG_TAG,
@@ -390,7 +451,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
                   return
                 }
                 SincAudioFingerprint.Status.UNAVAILABLE -> {
-                  target.delete()
+                  finalFile.delete()
                   SincDownloads.end(jobId)
                   Log.w(
                     LOG_TAG,
@@ -413,18 +474,27 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
             // The verification can take seconds; a pause/cancel during it must
             // still win over publishing.
             if (isStopped(jobId)) {
-              target.delete()
+              finalFile.delete()
               SincDownloads.end(jobId)
               promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
               return
             }
-            publishToPublicStorage(target, publicName, metaTitle, metaArtist, metaAlbum)
+            publishToPublicStorage(
+              finalFile,
+              displayName,
+              metaTitle,
+              metaArtist,
+              metaAlbum,
+              mimeType,
+            )
             SincDownloads.end(jobId)
             promise.resolve(
               Arguments.createMap().apply {
-                putString("localUri", "file://${target.absolutePath}")
-                putDouble("sizeBytes", written.toDouble())
+                putString("localUri", "file://${finalFile.absolutePath}")
+                putDouble("sizeBytes", finalFile.length().toDouble())
                 putDouble("durationMs", durationMs.toDouble())
+                putString("mimeType", mimeType)
+                putString("publishedName", displayName)
               },
             )
           } catch (e: Exception) {
@@ -446,12 +516,19 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
 
   @ReactMethod
   fun cancel(jobId: String, promise: Promise) {
-    active.remove(jobId)?.cancel()
+    if (SincDownloads.isActive(jobId) || SincDownloads.isPaused(jobId)) {
+      SincDownloads.cancel(jobId)
+    } else {
+      active.remove(jobId)?.cancel()
+    }
     promise.resolve(null)
   }
 
   @ReactMethod
   fun remove(jobId: String, fileName: String?, publicFileName: String?, promise: Promise) {
+    // Internal cleanup (duration reject, user delete) must not emit a
+    // "cancelled" action: JS uses that signal to stop its own fallback chain.
+    SincDownloads.discard(jobId)
     active.remove(jobId)?.cancel()
     val dir = File(reactApplicationContext.filesDir, "sinc_downloads")
     if (!fileName.isNullOrBlank()) {
@@ -459,10 +536,18 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
       val target = File(dir, fileName)
       try {
         if (target.canonicalPath.startsWith(dir.canonicalPath + File.separator)) {
-          target.delete()
-          // The partial from an interrupted transfer must go too, or the next
-          // resume for this track would append a removed song's bytes.
-          File(dir, "$fileName.part").delete()
+          // The finished file may have been renamed to the real container
+          // extension after transfer (e.g. `.mp3` URL → `.ogg` bytes). Delete
+          // the whole hash-scoped stem, plus the `.part` from an interrupted
+          // transfer, or the next resume would append a removed song's bytes.
+          val stem = fileName.substringBeforeLast('.', fileName)
+          dir.listFiles()
+            ?.filter {
+              it.name == fileName ||
+                it.name.startsWith("$stem.") ||
+                it.name.startsWith("$stem-")
+            }
+            ?.forEach { it.delete() }
           removeFromPublicStorage(fileName)
           // The public copy may have been published under the song title.
           if (!publicFileName.isNullOrBlank() && publicFileName != fileName) {

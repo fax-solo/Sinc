@@ -63,6 +63,10 @@ export interface NativeDownloadResult {
    * track length before accepting a direct-source download.
    */
   durationMs?: number;
+  /** Actual container MIME after native sniffing/tagging. */
+  mimeType?: string;
+  /** Actual published name after native container-extension correction. */
+  publishedName?: string;
 }
 
 /** Track metadata written into the published Music/Sinc MediaStore entry. */
@@ -70,6 +74,8 @@ export interface NativeDownloadMetadata {
   title?: string;
   artist?: string;
   album?: string;
+  /** Cover URL embedded by the native tagger (lossless remux). */
+  artworkUrl?: string;
   /** Clean display name (song title only) for the published copy. */
   publicFileName?: string;
   /** Expected track duration (ms) so the probe result can be validated. */

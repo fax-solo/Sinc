@@ -16,6 +16,58 @@ export interface LocalDownloadSource {
   expectedDurationMs?: number;
 }
 
+const AUDIO_EXTENSIONS = new Set([
+  'mp3',
+  'm4a',
+  'm4b',
+  'mp4',
+  'ogg',
+  'oga',
+  'opus',
+  'flac',
+  'wav',
+  'webm',
+  'aac',
+]);
+
+/**
+ * The extension the direct download should be saved under. Prefer the URL's
+ * own audio extension; fall back to the provider MIME. Native re-sniffs the
+ * bytes after transfer and corrects this if the server lied, but getting it
+ * right up front keeps partial/resume names stable.
+ */
+export function extensionForDownloadSource(
+  source: Pick<LocalDownloadSource, 'url' | 'mimeType'>
+): string {
+  const path = source.url.split('?')[0].toLowerCase();
+  const match = /\.([a-z0-9]{2,5})$/.exec(path);
+  if (match && AUDIO_EXTENSIONS.has(match[1])) {
+    return match[1] === 'mp4' ? 'm4a' : match[1];
+  }
+  const mime = source.mimeType.toLowerCase().split(';')[0].trim();
+  switch (mime) {
+    case 'audio/mp4':
+    case 'audio/x-m4a':
+      return 'm4a';
+    case 'audio/ogg':
+      return 'ogg';
+    case 'audio/opus':
+      return 'opus';
+    case 'audio/flac':
+    case 'audio/x-flac':
+      return 'flac';
+    case 'audio/wav':
+    case 'audio/x-wav':
+      return 'wav';
+    case 'audio/webm':
+      return 'webm';
+    case 'audio/aac':
+      return 'aac';
+    default:
+      return 'mp3';
+  }
+}
+
 export function searchQuery(track: CanonicalTrack): string {
   return `${track.artists[0]?.name ?? 'Unknown'} - ${searchTitle(track.title)}`;
 }

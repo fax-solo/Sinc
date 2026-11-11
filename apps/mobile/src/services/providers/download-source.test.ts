@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CanonicalTrack } from '@sinc/shared';
 import {
+  extensionForDownloadSource,
   hasForbiddenVariant,
   parseArchiveLength,
   pickArchiveFile,
@@ -20,6 +21,50 @@ function track(title: string, artist: string, durationMs: number): CanonicalTrac
     explicit: false,
   };
 }
+
+describe('extensionForDownloadSource', () => {
+  it('preserves the audio container served by the provider', () => {
+    expect(
+      extensionForDownloadSource({
+        url: 'https://archive.org/download/item/song.ogg',
+        mimeType: 'audio/ogg',
+      })
+    ).toBe('ogg');
+    expect(
+      extensionForDownloadSource({
+        url: 'https://archive.org/download/item/song.flac?download=1',
+        mimeType: 'audio/flac',
+      })
+    ).toBe('flac');
+    expect(
+      extensionForDownloadSource({
+        url: 'https://archive.org/download/item/song.m4a',
+        mimeType: 'audio/mp4',
+      })
+    ).toBe('m4a');
+  });
+
+  it('falls back to MIME and canonicalizes audio-only mp4 names', () => {
+    expect(
+      extensionForDownloadSource({
+        url: 'https://example.test/download/123',
+        mimeType: 'audio/ogg; codecs=opus',
+      })
+    ).toBe('ogg');
+    expect(
+      extensionForDownloadSource({
+        url: 'https://example.test/download/clip.mp4',
+        mimeType: 'audio/mp4',
+      })
+    ).toBe('m4a');
+    expect(
+      extensionForDownloadSource({
+        url: 'https://example.test/download/unknown',
+        mimeType: 'application/octet-stream',
+      })
+    ).toBe('mp3');
+  });
+});
 
 describe('pickArchiveFile', () => {
   it('accepts real Archive audio files (format "VBR MP3")', () => {

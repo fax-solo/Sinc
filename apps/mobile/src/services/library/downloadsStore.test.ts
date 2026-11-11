@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CanonicalTrack } from '@sinc/shared';
+import type { NativeDownloadResult } from '../native/types';
 import {
   useDownloadsStore,
   safeFileName,
@@ -20,7 +21,7 @@ const { findArchive, findJamendo, findFma, previewMock, downloaderMock, ytMock, 
     findFma: vi.fn(),
     previewMock: vi.fn(),
     downloaderMock: {
-      download: vi.fn((..._args: unknown[]) =>
+      download: vi.fn((..._args: unknown[]): Promise<NativeDownloadResult> =>
         Promise.resolve({
           localUri: 'file:///sdcard/Sinc/song.mp3',
           sizeBytes: 1234,
@@ -47,6 +48,10 @@ vi.mock('../providers/download-source', () => ({
   findJamendoSource: findJamendo,
   findFmaSource: findFma,
   searchTitle: (title: string) => title,
+  extensionForDownloadSource: (source: { url: string }) => {
+    const match = /\.([a-z0-9]{2,5})(?:\?|$)/i.exec(source.url);
+    return match?.[1] ?? 'mp3';
+  },
 }));
 
 vi.mock('../providers/preview', () => ({
@@ -109,6 +114,15 @@ beforeEach(() => {
   trackAnalytics.mockClear();
 });
 
+describe('download file names', () => {
+  it('keeps the source container instead of forcing .mp3', () => {
+    const t = track('itunes:names');
+    expect(safeFileName(t, 'ogg')).toMatch(/\.ogg$/);
+    expect(publicFileName(t, 'flac')).toBe('Track itunes names.flac');
+    expect(safeFileName(t, 'mp4')).toMatch(/\.mp4$/);
+  });
+});
+
 describe('downloadsStore (local)', () => {
   it('downloads through a direct Archive source via the native downloader', async () => {
     findArchive.mockResolvedValueOnce({
@@ -125,6 +139,42 @@ describe('downloadsStore (local)', () => {
     expect(downloaderMock.download).toHaveBeenCalledTimes(1);
     expect(useDownloadsStore.getState().isDownloaded('itunes:1')).toBe(true);
     expect(trackAnalytics).toHaveBeenCalledWith('download:complete', 'itunes:1', expect.anything());
+  });
+
+  it('names and tags a direct download with its real container', async () => {
+    const t = {
+      ...track('itunes:ogg'),
+      artworkUrl: 'https://images.test/cover.jpg',
+    };
+    findArchive.mockResolvedValueOnce({
+      url: 'https://archive.org/download/x/song.ogg',
+      provider: 'archive',
+      mimeType: 'audio/ogg',
+    });
+    downloaderMock.download.mockResolvedValueOnce({
+      localUri: 'file:///data/sinc_downloads/song.ogg',
+      sizeBytes: 4321,
+      durationMs: 180_000,
+      mimeType: 'audio/ogg',
+      publishedName: 'Track itunes:ogg.ogg',
+    });
+
+    await useDownloadsStore.getState().downloadTrack(t);
+
+    const call = downloaderMock.download.mock.calls[0] as unknown as [
+      string,
+      string,
+      unknown,
+      string,
+      { publicFileName?: string; artworkUrl?: string },
+      boolean,
+    ];
+    expect(call[3]).toBe(safeFileName(t, 'ogg'));
+    expect(call[4].publicFileName).toBe(publicFileName(t, 'ogg'));
+    expect(call[4].artworkUrl).toBe('https://images.test/cover.jpg');
+    expect(useDownloadsStore.getState().getDownload(t.id)?.publishedName).toBe(
+      'Track itunes:ogg.ogg'
+    );
   });
 
   it('falls back to the on-device yt-dlp engine without any direct source', async () => {

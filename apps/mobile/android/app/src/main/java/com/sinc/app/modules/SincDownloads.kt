@@ -143,6 +143,27 @@ object SincDownloads {
     refresh()
   }
 
+  /**
+   * Stops a job and deletes its artifacts without emitting a user action.
+   * Used for internal fallbacks (e.g. a rejected direct match) where the JS
+   * orchestration must continue to the next tier instead of treating the job
+   * as user-cancelled.
+   */
+  fun discard(jobId: String) {
+    val job = active.remove(jobId) ?: paused.remove(jobId) ?: return
+    progress.remove(jobId)
+    indeterminate.remove(jobId)
+    try {
+      job.kill()
+    } catch (_: Exception) {
+    }
+    try {
+      job.cleanup()
+    } catch (_: Exception) {
+    }
+    refresh()
+  }
+
   fun resume(jobId: String) {
     val job = paused.remove(jobId) ?: return
     progress[jobId] = progress[jobId] ?: 0
@@ -242,17 +263,8 @@ object SincDownloads {
     }
   }
 
-  private fun mimeForFileName(name: String): String {
-    val lower = name.lowercase()
-    return when {
-      lower.endsWith(".ogg") || lower.endsWith(".oga") || lower.endsWith(".opus") -> "audio/ogg"
-      lower.endsWith(".m4a") || lower.endsWith(".mp4") -> "audio/mp4"
-      lower.endsWith(".webm") -> "audio/webm"
-      lower.endsWith(".flac") -> "audio/flac"
-      lower.endsWith(".wav") -> "audio/wav"
-      else -> "audio/mpeg"
-    }
-  }
+  private fun mimeForFileName(name: String): String =
+    SincAudioContainer.mimeForExtension(File(name).extension)
 
   /**
    * Deletes a previously published Music/Sinc (or legacy Downloads/Sinc)

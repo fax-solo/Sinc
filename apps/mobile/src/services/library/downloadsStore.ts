@@ -22,6 +22,7 @@ import { storage, STORAGE_KEYS } from '../../utils/storage';
 import { useDownloadProgressStore } from './downloadProgressStore';
 import {
   findArchiveSource,
+  extensionForDownloadSource,
   findFmaSource,
   findJamendoSource,
   searchTitle,
@@ -149,23 +150,25 @@ export function mimeForLocalUri(uri: string): string {
   return 'audio/mpeg';
 }
 
-export function safeFileName(track: CanonicalTrack): string {
+export function safeFileName(track: CanonicalTrack, extension = 'mp3'): string {
   const raw = `${track.artists[0]?.name ?? 'unknown'}-${track.title}`
     .replace(/[^\p{L}\p{N}._-]+/gu, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 80);
-  return `${raw || 'track'}-${shortHash(track.id)}.mp3`;
+  const ext = extension.replace(/[^a-z0-9]/gi, '').toLowerCase() || 'mp3';
+  return `${raw || 'track'}-${shortHash(track.id)}.${ext}`;
 }
 
 /** Display name for the published copy in Music/Sinc: just the song title. */
-export function publicFileName(track: CanonicalTrack): string {
+export function publicFileName(track: CanonicalTrack, extension = 'mp3'): string {
   const raw = track.title
     .replace(/[/\\:*?"<>|]+/gu, ' ')
     .replace(/\s+/gu, ' ')
     .trim()
     .replace(/[. ]+$/g, '')
     .slice(0, 100);
-  return `${raw || 'song'}.mp3`;
+  const ext = extension.replace(/[^a-z0-9]/gi, '').toLowerCase() || 'mp3';
+  return `${raw || 'song'}.${ext}`;
 }
 
 function idsOf(items: Array<{ id?: string; track?: { id: string } }>): Set<string> {
@@ -569,6 +572,9 @@ export const useDownloadsStore = create<DownloadsState>()(
             if (direct && !cachedDirect) directJobSources.set(jobId, direct);
             if (direct) {
               const resumeDirect = Boolean(cachedDirect && cachedDirect.url === direct.url);
+              const extension = extensionForDownloadSource(direct);
+              const privateName = safeFileName(track, extension);
+              const publicName = publicFileName(track, extension);
               upsert(jobId, { phase: 'transfer', progress: 5, provider: direct.provider });
               useDownloadProgressStore.getState().setIndeterminate(jobId, true);
               let result: Awaited<ReturnType<typeof nativeBridge.downloader.download>> | null =
@@ -578,12 +584,13 @@ export const useDownloadsStore = create<DownloadsState>()(
                   jobId,
                   direct.url,
                   undefined,
-                  safeFileName(track),
+                  privateName,
                   {
                     title: track.title,
                     artist: track.artists[0]?.name ?? 'Unknown Artist',
                     album: track.album?.title,
-                    publicFileName: publicFileName(track),
+                    artworkUrl: track.artworkUrl,
+                    publicFileName: publicName,
                     expectedDurationMs: direct.expectedDurationMs,
                     previewUrl: previewUrl ?? undefined,
                   },
@@ -625,11 +632,7 @@ export const useDownloadsStore = create<DownloadsState>()(
                 // compilation segment must fall through to the yt-dlp path
                 // instead of being saved as the song.
                 if (isBadDownloadDuration(result.durationMs ?? 0, direct.expectedDurationMs)) {
-                  await nativeBridge.downloader.remove(
-                    jobId,
-                    safeFileName(track),
-                    publicFileName(track)
-                  );
+                  await nativeBridge.downloader.remove(jobId, privateName, publicName);
                   directJobSources.delete(jobId);
                   // fall through to the yt-dlp tier below
                 } else {
@@ -643,6 +646,7 @@ export const useDownloadsStore = create<DownloadsState>()(
                     sizeBytes: result.sizeBytes,
                     provider: direct.provider,
                     completedAt: Date.now(),
+                    publishedName: result.publishedName ?? publicName,
                   });
                   return;
                 }

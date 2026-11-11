@@ -58,6 +58,10 @@ class SincYtModule(reactContext: ReactApplicationContext) :
 
   init {
     SincDownloads.attach(reactContext)
+    // One ffmpeg launcher for both the yt-dlp post-processor and the direct
+    // tagger; the direct module is constructed independently and must not
+    // guess the library path.
+    SincFfmpeg.configure(ffmpegBinary(), libDir(), abiDir())
     // The probe needs the bundled ffmpeg's location (owned here) before any
     // downloader (OkHttp path) can length-check what it saved.
     SincAudioProbe.configure(ffmpegBinary(), libDir())
@@ -2363,9 +2367,11 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         tmp.copyTo(file, overwrite = true)
         tmp.delete()
       }
-      finishTaggedFile(file, title, artist, album, artworkUrl)
-      val duration = probeAudioDuration(file)
-      return DownloadResult(file, mimeTypeForExt(file.extension), duration)
+      val detected = SincAudioContainer.detectExtension(file)
+      val finalFile = if (detected != null) SincAudioContainer.retarget(file, detected) else file
+      finishTaggedFile(finalFile, title, artist, album, artworkUrl)
+      val duration = probeAudioDuration(finalFile)
+      return DownloadResult(finalFile, mimeTypeForExt(finalFile.extension), duration)
     } catch (e: Exception) {
       tmp.delete()
       throw e
@@ -2391,9 +2397,12 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           tagMp3InPlace(file, title, artist, album)
         } else if (file.extension.lowercase() == "mp3" && cover != null && cover.isFile) {
           val tagged = File(file.parentFile, "${file.nameWithoutExtension}.tagged.mp3")
-          if (transcodeToMp3(file, tagged, title, artist, album, cover)) {
+          if (SincMediaTagger.remuxMp3WithCover(file, tagged, title, artist, album, cover)) {
             file.delete()
-            tagged.renameTo(file)
+            if (!tagged.renameTo(file)) {
+              tagged.copyTo(file, overwrite = true)
+              tagged.delete()
+            }
           } else {
             tagged.delete()
             tagMp3InPlace(file, title, artist, album)
@@ -2523,10 +2532,11 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       val final: File = when (raw.extension.lowercase(Locale.ROOT)) {
         "mp3" -> if (cover != null) {
           val tagged = File(raw.parentFile, "$stem.tagged.mp3")
-          if (transcodeToMp3(raw, tagged, title, artist, album, cover)) {
+          if (SincMediaTagger.remuxMp3WithCover(raw, tagged, title, artist, album, cover)) {
             raw.delete()
             tagged
           } else {
+            tagged.delete()
             tagMp3InPlace(raw, title, artist, album)
             raw
           }
@@ -2591,17 +2601,8 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       ?.maxByOrNull { it.length() }
 
   /** Container mime for the extensions yt-dlp hands back. */
-  private fun mimeTypeForExt(ext: String): String = when (ext.lowercase()) {
-    "mp3" -> "audio/mpeg"
-    "m4a", "mp4", "m4b" -> "audio/mp4"
-    "opus" -> "audio/opus"
-    "ogg", "oga" -> "audio/ogg"
-    "webm" -> "audio/webm"
-    "aac" -> "audio/aac"
-    "flac" -> "audio/flac"
-    "wav" -> "audio/wav"
-    else -> "audio/mpeg"
-  }
+  private fun mimeTypeForExt(ext: String): String =
+    SincAudioContainer.mimeForExtension(ext)
 
   /**
    * Fetches the track artwork for embedding. Best-effort: null when offline,
@@ -2828,74 +2829,10 @@ class SincYtModule(reactContext: ReactApplicationContext) :
   /** Frustration cap: even a slow mobile link finishes a song in this budget. */
   private val downloadTimeoutMs = 900_000L
 
-  /**
-   * Runs the bundled ffmpeg directly (ffmpeg is not a python zipapp, so the
-   * generic run() helper — which always execs python3 + yt-dlp.zipapp — cannot
-   * be used here).
-   */
+  /** Shared runner; the direct downloader uses the same binary/libs. */
   private fun runFfmpeg(args: List<String>, timeoutMs: Long, gate: Semaphore): RunResult {
-    val first = runFfmpegOnce(args, timeoutMs, gate, preloadShim = false)
-    val stderr = first.stderr.trim()
-    if (first.code != 0 && stderr.contains("CANNOT LINK")) {
-      // Vendor libs pulled transitively (e.g. libhwui → libmediandk) match
-      // needed children by DT_SONAME under bionic. Preload the platform
-      // namespace shim first so the forwarding stubs bind before anything
-      // scans them.
-      Log.w(LOG_TAG, "ffmpeg link partial; retrying with platform-ns shim: ${stderr.take(300)}")
-      val second = runFfmpegOnce(args, timeoutMs, gate, preloadShim = true)
-      if (second.code == 0) {
-        return second
-      }
-      // Last resort: the pre-fix environment (app lib dir only), which is the
-      // configuration the stub set was originally laid out for.
-      Log.w(LOG_TAG, "shim retry failed; retrying with app-libdir-only LD_LIBRARY_PATH")
-      return runFfmpegOnce(args, timeoutMs, gate, preloadShim = false, appLibDirOnly = true)
-    }
-    return first
-  }
-
-  private fun runFfmpegOnce(
-    args: List<String>,
-    timeoutMs: Long,
-    gate: Semaphore,
-    preloadShim: Boolean,
-    appLibDirOnly: Boolean = false,
-  ): RunResult {
-    gate.acquire()
-    return try {
-      val pb = ProcessBuilder(listOf(ffmpegBinary().absolutePath) + args)
-      pb.redirectErrorStream(false)
-      pb.environment().apply {
-        // The bundled termux-style libs resolve their siblings from the app
-        // lib dir; system paths only satisfy leaf platform expects. App libs
-        // stay FIRST so the forwarding stubs (libmediandk.so etc.) are what
-        // the linker binds — the real platform copies live in a namespace
-        // the exec cannot reach.
-        put(
-          "LD_LIBRARY_PATH",
-          if (appLibDirOnly) libDir().absolutePath else
-            "${libDir().absolutePath}:/system/lib64:/system_ext/lib64:/vendor/lib64",
-        )
-        if (preloadShim) {
-          put("LD_PRELOAD", File(libDir(), "libtermux-platform-ns.so").absolutePath)
-        }
-        put("PATH", "${abiDir().absolutePath}:/system/bin:/system/xbin")
-      }
-      val process = pb.start()
-      val stdout = ProcessStreamReader(process.inputStream)
-      val stderr = ProcessStreamReader(process.errorStream)
-      val finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
-      if (!finished) {
-        process.destroyForcibly()
-        throw IllegalStateException("ffmpeg timed out")
-      }
-      RunResult(stdout.read(), stderr.read(), process.exitValue())
-    } catch (e: InterruptedException) {
-      Thread.currentThread().interrupt()
-      throw IllegalStateException("ffmpeg interrupted")
-    } finally {
-      gate.release()
-    }
+    val result = SincFfmpeg.run(args, timeoutMs, gate)
+    return RunResult(result.stdout, result.stderr, result.code)
   }
 
   private fun onDownloadProgress(jobId: String?, line: String) {
