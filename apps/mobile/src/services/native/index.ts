@@ -208,7 +208,8 @@ function createHttp(): NativeHttpModule {
   }
   return {
     available: () => true,
-    get: (url, userAgent, accept) => module.get(url, userAgent, accept ?? null),
+    get: (url, userAgent, accept, timeoutMs) =>
+      module.get(url, userAgent, accept ?? null, timeoutMs ?? 10_000),
   };
 }
 

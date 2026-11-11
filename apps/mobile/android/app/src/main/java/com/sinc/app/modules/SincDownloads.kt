@@ -46,7 +46,11 @@ object SincDownloads {
   const val CHANNEL_ID = "sinc_downloads"
   const val NOTIF_ID = 94000
 
-  private data class Job(val title: String, val kill: () -> Unit)
+  private data class Job(
+    val title: String,
+    val kill: () -> Unit,
+    val cleanup: () -> Unit,
+  )
 
   /** Transferring jobs. */
   private val active = ConcurrentHashMap<String, Job>()
@@ -65,8 +69,24 @@ object SincDownloads {
     react = ctx
   }
 
-  fun begin(jobId: String, title: String, kill: () -> Unit) {
-    active[jobId] = Job(title, kill)
+  fun begin(
+    jobId: String,
+    title: String,
+    kill: () -> Unit,
+    cleanup: () -> Unit = {},
+  ) {
+    // A re-entrant start for the same job must stop the old transfer before it
+    // replaces the handle; otherwise the old process can keep writing/publish
+    // after the new attempt has taken over the job id.
+    active.put(jobId, Job(title, kill, cleanup))?.let { previous ->
+      try {
+        previous.kill()
+      } catch (_: Exception) {
+      }
+    }
+    // A resume replaces the paused handle with the new attempt; leaving the
+    // old entry behind made a later cancel hit only one of the two maps.
+    paused.remove(jobId)
     progress[jobId] = 0
     indeterminate.remove(jobId)
     ensureServiceRunning()
@@ -93,6 +113,13 @@ object SincDownloads {
     if (paused.containsKey(jobId)) paused[jobId] = job.copy(kill = kill)
   }
 
+  /** Attaches a best-effort cleanup for files created after the job began. */
+  fun attachCleanup(jobId: String, cleanup: () -> Unit) {
+    val job = active[jobId] ?: paused[jobId] ?: return
+    if (active.containsKey(jobId)) active[jobId] = job.copy(cleanup = cleanup)
+    if (paused.containsKey(jobId)) paused[jobId] = job.copy(cleanup = cleanup)
+  }
+
   fun pause(jobId: String) {
     val job = active.remove(jobId) ?: return
     paused[jobId] = job
@@ -106,6 +133,12 @@ object SincDownloads {
     progress.remove(jobId)
     indeterminate.remove(jobId)
     job.kill()
+    // Cancel means "remove the partial too". Pause deliberately does not run
+    // this: its `.part` is what the resume request continues from.
+    try {
+      job.cleanup()
+    } catch (_: Exception) {
+    }
     postAction(jobId, "cancelled")
     refresh()
   }

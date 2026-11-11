@@ -101,6 +101,34 @@ function recordByJobId(jobId: string): DownloadRecord | undefined {
   return useDownloadsStore.getState().downloads.find((d) => d.jobId === jobId);
 }
 
+/**
+ * Removes a job's private artifacts even when the transfer never completed and
+ * therefore has no `localUri`. Cancelling only the native process left `.part`
+ * files (and, for the engine, eventually a tagged file) on disk forever.
+ */
+async function removeNativeArtifacts(record: DownloadRecord): Promise<void> {
+  const fileName = record.localUri?.split('/').pop() ?? safeFileName(record.track);
+  const published = record.publishedName ?? publicFileName(record.track);
+  const engineSource =
+    record.localUri?.includes('/sinc_yt/') ||
+    record.provider === 'youtube' ||
+    record.provider === 'soundcloud';
+  try {
+    if (engineSource) {
+      await nativeBridge.yt.remove?.(fileName, published);
+    } else if (record.localUri) {
+      await nativeBridge.downloader.remove(record.jobId, fileName, published);
+    } else {
+      // The job was cancelled before it recorded a provider. Try both
+      // module-owned directories; each cleanup is confined to its own dir.
+      await nativeBridge.yt.remove?.(fileName, published);
+      await nativeBridge.downloader.remove(record.jobId, fileName, published);
+    }
+  } catch {
+    // Local cleanup is best-effort; the store record is what matters.
+  }
+}
+
 function shortHash(input: string): string {
   let hash = 0;
   for (let i = 0; i < input.length; i += 1) {
@@ -786,6 +814,7 @@ export const useDownloadsStore = create<DownloadsState>()(
         },
 
         cancelDownload: async (jobId) => {
+          const record = recordByJobId(jobId);
           activeJobs.delete(jobId);
           directJobSources.delete(jobId);
           launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
@@ -802,6 +831,7 @@ export const useDownloadsStore = create<DownloadsState>()(
           } catch {
             // Native already gone; state is what matters here.
           }
+          if (record) await removeNativeArtifacts(record);
         },
 
         retryDownload: async (jobId) => {
@@ -875,28 +905,10 @@ export const useDownloadsStore = create<DownloadsState>()(
               // Native job already gone; state is what matters here.
             }
           }
-          if (record.localUri) {
-            const fileName = record.localUri.split('/').pop();
-            try {
-              // yt-dlp downloads live in the yt module's `sinc_yt` dir, which
-              // the generic downloader module never touches — route cleanup to
-              // the module that owns the file (feature-detected for old builds).
-              if (
-                fileName &&
-                record.localUri.includes('/sinc_yt/') &&
-                typeof nativeBridge.yt.remove === 'function'
-              ) {
-                await nativeBridge.yt.remove(
-                  fileName,
-                  record.publishedName ?? publicFileName(record.track)
-                );
-              } else {
-                await nativeBridge.downloader.remove(jobId, fileName, publicFileName(record.track));
-              }
-            } catch {
-              // Local cleanup is best-effort.
-            }
-          }
+          // yt-dlp downloads live in the yt module's `sinc_yt` dir, which the
+          // generic downloader module never touches — route cleanup to the
+          // module that owns the file (feature-detected for old builds).
+          await removeNativeArtifacts(record);
           const downloads = get().downloads.filter((d) => d.jobId !== jobId);
           set({ downloads, downloadedIds: deriveDownloadedIds(downloads) });
           useDownloadProgressStore.getState().clearProgress(jobId);

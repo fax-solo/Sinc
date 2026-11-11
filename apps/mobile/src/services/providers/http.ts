@@ -56,14 +56,23 @@ function headerValue(init: RequestInit | undefined, name: string): string | unde
 
 const DEFAULT_USER_AGENT = 'Sinc/1.0 (music player)';
 
-async function nativeFetch(url: string, init?: RequestInit): Promise<Response | null> {
+async function nativeFetch(
+  url: string,
+  init?: RequestInit,
+  timeoutMs: number = TIMEOUT_MS
+): Promise<Response | null> {
   if (!nativeBridge.http?.available()) return null;
   // Route every provider request through the native bridge when linked, even
   // when the caller passed no User-Agent (iTunes/Deezer). Falling back to RN's
   // fetch stamps `okhttp/4.x`, which Cloudflare-fronted APIs answer with 520.
   const userAgent = headerValue(init, 'User-Agent') ?? DEFAULT_USER_AGENT;
   try {
-    const result = await nativeBridge.http.get(url, userAgent, headerValue(init, 'Accept'));
+    const result = await nativeBridge.http.get(
+      url,
+      userAgent,
+      headerValue(init, 'Accept'),
+      timeoutMs
+    );
     return {
       ok: result.status >= 200 && result.status < 300,
       status: result.status,
@@ -80,7 +89,7 @@ async function providerFetch(
   init?: RequestInit,
   timeoutMs: number = TIMEOUT_MS
 ): Promise<Response> {
-  const native = await nativeFetch(url, init);
+  const native = await nativeFetch(url, init, timeoutMs);
   if (native) {
     if (!native.ok) {
       throw new ProviderError(`Provider request failed (${native.status})`, native.status);

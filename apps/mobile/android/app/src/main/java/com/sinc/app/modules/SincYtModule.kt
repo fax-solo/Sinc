@@ -533,12 +533,20 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     previewUrl: String?,
     promise: Promise,
   ) {
+    val outDir = File(reactApplicationContext.filesDir, "sinc_yt")
+    outDir.mkdirs()
+    // Register on the bridge thread, before the executor queue. Downloads are
+    // queued behind a 2-thread pool; registering only inside the worker made
+    // pause/cancel silently do nothing until that job eventually started.
+    SincDownloads.begin(
+      jobId,
+      title ?: destinationFileName,
+      kill = {},
+      cleanup = { deleteJobFiles(outDir, destinationFileName) },
+    )
     downloadExecutor.execute {
       try {
         Log.i(LOG_TAG, "download entry jobId=$jobId mediaUrl=${mediaUrl?.take(60) ?: "<none>"} resume=$resumePart")
-        // Register before resolving so pause/cancel works even while the query
-        // is still being searched. The real process kill is attached later.
-        SincDownloads.begin(jobId, title ?: destinationFileName) {}
         if (!ensureReady()) throw IllegalStateException("The on-device yt-dlp module is unavailable")
         val expectedMs = if (expectedDurationMs > 0) expectedDurationMs.toLong() else null
         // `mediaUrl` is a direct URL when the catalog knew one; otherwise `query`
@@ -563,8 +571,6 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           rawTarget
         }
         if (isStopped(jobId)) throw DownloadCancelledException("Download cancelled")
-        val outDir = File(reactApplicationContext.filesDir, "sinc_yt")
-        outDir.mkdirs()
         Log.d(LOG_TAG, "download start jobId=$jobId resumePart=$resumePart target=$targetUrl")
         // Tell the JS store the transfer began — the row flips from
         // "resolving" to a ticking bar NOW, not at the first stderr % line.
@@ -775,17 +781,36 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       val outDir = File(reactApplicationContext.filesDir, "sinc_yt")
       val target = File(outDir, fileName)
       if (target.canonicalPath.startsWith(outDir.canonicalPath + File.separator)) {
-        target.delete()
-        // Drop stale partials for the same stem, if any linger.
-        outDir.listFiles()
-          ?.filter { it.name.startsWith(fileName) && (it.name.endsWith(".part") || it.name.endsWith(".ytdl")) }
-          ?.forEach { it.delete() }
+        deleteJobFiles(outDir, fileName)
       }
       SincDownloads.removePublished(publicFileName)
       promise.resolve(null)
     } catch (e: Exception) {
       Log.w(LOG_TAG, "remove failed for $fileName: ${e.message}")
       promise.resolve(null)
+    }
+  }
+
+  /**
+   * Deletes every artifact belonging to one job stem: the final container
+   * (which may not match the legacy `.mp3` template extension), `.part`,
+   * `.ytdl` and temporary tag files. Used by both cancel cleanup and remove.
+   */
+  private fun deleteJobFiles(outDir: File, fileName: String) {
+    val safeName = File(fileName).name
+    if (safeName.isBlank() || safeName == "." || safeName == "..") return
+    val stem = safeName.substringBeforeLast('.', safeName)
+    outDir.listFiles()?.forEach { file ->
+      val name = file.name
+      if (
+        name == safeName ||
+        name.startsWith("$stem.") ||
+        name.startsWith("$stem.part") ||
+        name.startsWith("$stem.ytdl") ||
+        name.startsWith("$stem-")
+      ) {
+        file.delete()
+      }
     }
   }
 
@@ -2279,6 +2304,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       throw IllegalStateException("Direct download failed (HTTP ${conn.responseCode})")
     }
     val total = conn.contentLengthLong
+    val deadline = System.currentTimeMillis() + downloadTimeoutMs
     val tmp = File(outDir, "${template.name}.part")
     try {
       var written = 0L
@@ -2315,6 +2341,9 @@ class SincYtModule(reactContext: ReactApplicationContext) :
                   true,
                 )
               }
+            }
+            if (System.currentTimeMillis() > deadline) {
+              throw IllegalStateException("Direct download timed out")
             }
             if (jobId != null && !SincDownloads.isActive(jobId)) {
               throw InterruptedException("Direct download cancelled")

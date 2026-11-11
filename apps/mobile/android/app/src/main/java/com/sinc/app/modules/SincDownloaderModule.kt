@@ -21,6 +21,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.OkHttpClient
@@ -40,7 +41,14 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
     SincDownloads.attach(reactContext)
   }
 
-  private val client = OkHttpClient.Builder().build()
+  private val client = OkHttpClient.Builder()
+    .connectTimeout(15, TimeUnit.SECONDS)
+    .readTimeout(30, TimeUnit.SECONDS)
+    .writeTimeout(30, TimeUnit.SECONDS)
+    // A stalled body must eventually fail instead of leaving a non-cancelled
+    // job and a growing `.part` forever. This is a total call deadline.
+    .callTimeout(30, TimeUnit.MINUTES)
+    .build()
   private val active = ConcurrentHashMap<String, Call>()
   private val mainHandler = Handler(Looper.getMainLooper())
   private val lastEmitAt = ConcurrentHashMap<String, Long>()
@@ -199,7 +207,12 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
     // otherwise leave two transfers writing one file).
     active.remove(jobId)?.cancel()
     active[jobId] = call
-    SincDownloads.begin(jobId, metaTitle ?: target.nameWithoutExtension, call::cancel)
+    SincDownloads.begin(
+      jobId,
+      metaTitle ?: target.nameWithoutExtension,
+      kill = call::cancel,
+      cleanup = { part.delete() },
+    )
 
     call.enqueue(object : Callback {
       /** Only this call may deregister itself — a superseding retry reuses the jobId. */

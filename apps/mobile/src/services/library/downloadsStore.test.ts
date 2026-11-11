@@ -3,6 +3,7 @@ import type { CanonicalTrack } from '@sinc/shared';
 import {
   useDownloadsStore,
   safeFileName,
+  publicFileName,
   jobIdForTrack,
   formatSpeed,
   formatYtSpeed,
@@ -465,6 +466,46 @@ describe('downloadsStore (local)', () => {
     await expect(
       useDownloadsStore.getState().removeDownload('missing-job')
     ).resolves.toBeUndefined();
+  });
+
+  it('cancelDownload cleans up a job that never produced a localUri', async () => {
+    const t = track('itunes:cancel-partial');
+    let rejectDownload: ((error: Error) => void) | undefined;
+    downloaderMock.download.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectDownload = reject;
+        })
+    );
+    findArchive.mockResolvedValueOnce({
+      url: 'https://archive.org/download/x/song.mp3',
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+    });
+
+    const pending = useDownloadsStore.getState().downloadTrack(t);
+    await vi.waitFor(() => {
+      expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('transfer');
+    });
+    const record = useDownloadsStore.getState().getDownload(t.id);
+    expect(record?.localUri).toBeUndefined();
+
+    await useDownloadsStore.getState().cancelDownload(record!.jobId);
+
+    // Cancelling only killed the native process before; the .part and the
+    // never-published private file were left behind with no record pointing
+    // at them.
+    expect(downloaderMock.remove).toHaveBeenCalledWith(
+      record!.jobId,
+      safeFileName(t),
+      publicFileName(t)
+    );
+    expect(useDownloadsStore.getState().getDownload(t.id)).toBeUndefined();
+
+    rejectDownload?.(
+      Object.assign(new Error('Download cancelled'), { code: 'DOWNLOAD_CANCELLED' })
+    );
+    await pending;
   });
 
   it('does not mark a native user-cancel as a failed download', async () => {
