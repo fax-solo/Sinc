@@ -174,4 +174,7 @@ dependencies {
 
     // Pure-Kotlin unit tests (SincTrackMatch gates)
     testImplementation("junit:junit:4.13.2")
+    // Android's org.json is a stub in local unit tests; use the real JVM
+    // implementation so the progress parser can be tested off-device.
+    testImplementation("org.json:json:20240303")
 }

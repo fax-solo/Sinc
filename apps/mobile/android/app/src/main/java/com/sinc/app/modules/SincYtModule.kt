@@ -1029,6 +1029,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     timeoutMs: Long,
     gate: Semaphore,
     jobId: String? = null,
+    onStdoutLine: ((String) -> Unit)? = null,
     onStderrLine: ((String) -> Unit)? = null,
   ): RunResult {
     gate.acquire()
@@ -1070,7 +1071,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         }
       }
       val proc = process!!
-      val stdout = ProcessStreamReader(proc.inputStream)
+      val stdout = ProcessStreamReader(proc.inputStream, onStdoutLine)
       val stderr = ProcessStreamReader(proc.errorStream, onStderrLine)
       val finished = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
       if (!finished) {
@@ -2303,6 +2304,16 @@ class SincYtModule(reactContext: ReactApplicationContext) :
                 val pct = ((written.toDouble() / total) * 100).toInt().coerceIn(0, 99)
                 SincDownloads.update(jobId, pct)
                 SincDownloads.emitYtProgress(jobId, pct, formatSpeedText(speed))
+              } else {
+                SincDownloads.updateUnknown(jobId)
+                SincDownloads.emitYtProgress(
+                  jobId,
+                  null,
+                  formatSpeedText(speed),
+                  written,
+                  null,
+                  true,
+                )
               }
             }
             if (jobId != null && !SincDownloads.isActive(jobId)) {
@@ -2427,6 +2438,13 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       "--socket-timeout",
       "30",
       "--newline",
+      // Structured progress is emitted on stdout. The old code only parsed
+      // human `[download] %` lines from stderr, where yt-dlp does not write
+      // them, so the UI bar stayed at 0% for the whole transfer.
+      "--progress-template",
+      "SINC_PROGRESS %(progress)j",
+      "--progress-delta",
+      "0.5",
       "-o",
       "${template.parentFile?.absolutePath.orEmpty()}/${template.name}.%(ext)s",
       urlOrQuery,
@@ -2440,6 +2458,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         downloadTimeoutMs,
         downloadGate,
         jobId,
+        onStdoutLine = { line -> onDownloadProgress(jobId, line) },
         onStderrLine = { line -> onDownloadProgress(jobId, line) },
       )
       if (completed.code != 0) {
@@ -2852,14 +2871,29 @@ class SincYtModule(reactContext: ReactApplicationContext) :
 
   private fun onDownloadProgress(jobId: String?, line: String) {
     if (jobId == null) return
-    val match = Regex("\\[download\\]\\s+([0-9.]+)%").find(line)
-    val pct = match?.groupValues?.getOrNull(1)?.toDoubleOrNull()?.toInt() ?: return
-    // yt-dlp --newline lines look like:
-    // `[download] 12.4% of 8.32MiB at 214.55KiB/s ETA 00:34`
-    val speed = Regex("at\\s+([0-9.]+\\s*[KMGT]?i?B/s)").find(line)?.groupValues?.getOrNull(1)
-    Log.d(LOG_TAG, "yt progress jobId=$jobId pct=$pct speed=$speed")
-    SincDownloads.update(jobId, pct)
-    SincDownloads.emitYtProgress(jobId, pct, speed?.replace("\\s+".toRegex(), " "))
+    val update = SincProgressParser.parse(line) ?: return
+    val speedText = update.speedText
+      ?: update.speedBytesPerSec?.let { formatSpeedText(it) }
+    if (update.percent == null) {
+      // The server never sent a length. Keep the row/notification honest
+      // instead of treating "unknown" as 1 byte and jumping to 99%.
+      SincDownloads.updateUnknown(jobId)
+    } else {
+      SincDownloads.update(jobId, update.percent)
+    }
+    Log.d(
+      LOG_TAG,
+      "yt progress jobId=$jobId pct=${update.percent ?: "unknown"} speed=$speedText " +
+        "bytes=${update.bytesDownloaded ?: "?"}/${update.bytesTotal ?: "?"}",
+    )
+    SincDownloads.emitYtProgress(
+      jobId,
+      update.percent,
+      speedText,
+      update.bytesDownloaded,
+      update.bytesTotal,
+      update.percent == null,
+    )
   }
 
   // ---------------------------------------------------------------------

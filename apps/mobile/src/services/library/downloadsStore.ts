@@ -463,12 +463,17 @@ export const useDownloadsStore = create<DownloadsState>()(
           lastProgressAt.set(e.jobId, now);
           const record = get().downloads.find((d) => d.jobId === e.jobId);
           if (record && record.phase === 'transfer') {
-            const total = e.bytesTotal > 0 ? e.bytesTotal : 1;
             const progressStore = useDownloadProgressStore.getState();
-            progressStore.setProgress(
-              e.jobId,
-              Math.min(99, Math.round((e.bytesDownloaded / total) * 100))
-            );
+            if (e.bytesTotal > 0) {
+              progressStore.setProgress(
+                e.jobId,
+                Math.min(99, Math.round((e.bytesDownloaded / e.bytesTotal) * 100))
+              );
+            } else {
+              // Unknown length is not 99% complete. Keep the row indeterminate
+              // and only show the measured transfer rate.
+              progressStore.setIndeterminate(e.jobId, true);
+            }
             progressStore.setSpeed(e.jobId, formatSpeed(e.speedBytesPerSec));
           }
         });
@@ -537,6 +542,7 @@ export const useDownloadsStore = create<DownloadsState>()(
             if (direct) {
               const resumeDirect = Boolean(cachedDirect && cachedDirect.url === direct.url);
               upsert(jobId, { phase: 'transfer', progress: 5, provider: direct.provider });
+              useDownloadProgressStore.getState().setIndeterminate(jobId, true);
               let result: Awaited<ReturnType<typeof nativeBridge.downloader.download>> | null =
                 null;
               try {
@@ -811,6 +817,9 @@ export const useDownloadsStore = create<DownloadsState>()(
           const record = recordByJobId(jobId);
           if (!record || record.phase !== 'source') return;
           upsert(jobId, { phase: 'transfer', provider: record.provider ?? 'youtube' });
+          // No progress sample yet: show "Downloading…" rather than a stale
+          // 0%/source percentage until the first measured byte arrives.
+          useDownloadProgressStore.getState().setIndeterminate(jobId, true);
         },
 
         resumeInFlight: async () => {
@@ -951,16 +960,24 @@ if (nativeBridge.downloads.available()) {
     }
   });
 
-  nativeBridge.downloads.addYtProgressListener(({ jobId, percent, speed }) => {
+  nativeBridge.downloads.addYtProgressListener((event) => {
+    const { jobId, percent, speed } = event;
     const store = useDownloadsStore.getState();
     const record = recordByJobId(jobId);
     if (!record || (record.phase !== 'source' && record.phase !== 'transfer')) return;
+    const known = percent != null && Number.isFinite(percent) && !event.indeterminate;
     if (__DEV__) {
-      console.log(`Sinc yt progress ${jobId} ${Math.round(percent)}% ${speed ?? ''}`);
+      console.log(
+        `Sinc yt progress ${jobId} ${known && percent != null ? `${Math.round(percent)}%` : 'unknown'} ${speed ?? ''}`
+      );
     }
     if (record.phase === 'source') store.setPhaseTransfer(jobId);
     const progressStore = useDownloadProgressStore.getState();
-    progressStore.setProgress(jobId, Math.min(99, percent));
+    if (known && percent != null) {
+      progressStore.setProgress(jobId, Math.min(99, percent));
+    } else {
+      progressStore.setIndeterminate(jobId, true);
+    }
     progressStore.setSpeed(jobId, formatYtSpeed(speed));
   });
 }

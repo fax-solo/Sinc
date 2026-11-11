@@ -25,6 +25,7 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.sinc.app.R
 import java.io.File
 import java.io.IOException
+import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -52,6 +53,8 @@ object SincDownloads {
   /** Paused (yt-dlp) jobs kept around so resume finds them. */
   private val paused = ConcurrentHashMap<String, Job>()
   private val progress = ConcurrentHashMap<String, Int>()
+  /** Jobs whose total byte count is unknown; never render these as a percent. */
+  private val indeterminate = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
   private val serviceStarted = AtomicBoolean(false)
 
   @Volatile
@@ -65,13 +68,22 @@ object SincDownloads {
   fun begin(jobId: String, title: String, kill: () -> Unit) {
     active[jobId] = Job(title, kill)
     progress[jobId] = 0
+    indeterminate.remove(jobId)
     ensureServiceRunning()
     refresh()
   }
 
   fun update(jobId: String, percent: Int) {
     if (!active.containsKey(jobId)) return
+    indeterminate.remove(jobId)
     progress[jobId] = percent.coerceIn(0, 99)
+    refresh()
+  }
+
+  /** The transfer is running but the server did not provide a total size. */
+  fun updateUnknown(jobId: String) {
+    if (!active.containsKey(jobId)) return
+    indeterminate.add(jobId)
     refresh()
   }
 
@@ -92,6 +104,7 @@ object SincDownloads {
   fun cancel(jobId: String) {
     val job = active.remove(jobId) ?: paused.remove(jobId) ?: return
     progress.remove(jobId)
+    indeterminate.remove(jobId)
     job.kill()
     postAction(jobId, "cancelled")
     refresh()
@@ -110,6 +123,7 @@ object SincDownloads {
     active.remove(jobId)
     paused.remove(jobId)
     progress.remove(jobId)
+    indeterminate.remove(jobId)
     refresh()
   }
 
@@ -256,13 +270,23 @@ object SincDownloads {
     )
   }
 
-  fun emitYtProgress(jobId: String, percent: Int, speedText: String? = null) {
+  fun emitYtProgress(
+    jobId: String,
+    percent: Int?,
+    speedText: String? = null,
+    bytesDownloaded: Long? = null,
+    bytesTotal: Long? = null,
+    indeterminate: Boolean = percent == null,
+  ) {
     emit(
       "SincYtProgress",
       Arguments.createMap().apply {
         putString("jobId", jobId)
-        putDouble("percent", percent.toDouble())
+        if (percent != null) putDouble("percent", percent.toDouble())
+        putBoolean("indeterminate", indeterminate)
         if (!speedText.isNullOrBlank()) putString("speed", speedText)
+        if (bytesDownloaded != null) putDouble("bytesDownloaded", bytesDownloaded.toDouble())
+        if (bytesTotal != null && bytesTotal > 0L) putDouble("bytesTotal", bytesTotal.toDouble())
       },
     )
   }
@@ -334,15 +358,27 @@ object SincDownloads {
   // Foreground notification
   // ---------------------------------------------------------------------
 
-  private data class NotifInfo(val title: String, val jobId: String?, val pct: Int, val paused: Boolean)
+  private data class NotifInfo(
+    val title: String,
+    val jobId: String?,
+    val pct: Int,
+    val paused: Boolean,
+    val indeterminate: Boolean,
+  )
 
   private fun describe(): NotifInfo {
-    if (count() == 0) return NotifInfo("Downloads", null, 0, false)
+    if (count() == 0) return NotifInfo("Downloads", null, 0, false, false)
     val ids = active.keys + paused.keys
     val jobId = ids.last()
     val isPaused = paused.containsKey(jobId)
     val label = if (isPaused) paused[jobId]?.title else active[jobId]?.title
-    return NotifInfo(label ?: "Downloading", jobId, progress[jobId] ?: 0, isPaused)
+    return NotifInfo(
+      label ?: "Downloading",
+      jobId,
+      progress[jobId] ?: 0,
+      isPaused,
+      indeterminate.contains(jobId),
+    )
   }
 
   fun ensureChannel(context: Context) {
@@ -376,16 +412,23 @@ object SincDownloads {
 
   private fun build(context: Context, info: NotifInfo): Notification {
     ensureChannel(context)
+    val text = when {
+      info.paused -> "Paused ${info.pct}% — tap Resume"
+      info.indeterminate -> "Downloading…"
+      else -> "Downloading ${info.pct}%"
+    }
     val builder = NotificationCompat.Builder(context, CHANNEL_ID)
       .setContentTitle(info.title)
-      .setContentText(
-        if (info.paused) "Paused ${info.pct}% — tap Resume" else "Downloading ${info.pct}%"
-      )
+      .setContentText(text)
       .setOngoing(true)
       .setSmallIcon(R.mipmap.ic_launcher)
       .setCategory(NotificationCompat.CATEGORY_PROGRESS)
       .setOnlyAlertOnce(true)
-      .setProgress(100, if (info.paused) 0 else info.pct, info.paused)
+      .setProgress(
+        100,
+        if (info.paused) 0 else info.pct,
+        info.paused || info.indeterminate,
+      )
       .setContentIntent(openAppIntent(context))
       .setPriority(NotificationCompat.PRIORITY_LOW)
     info.jobId?.let { addActions(builder, it) }

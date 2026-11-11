@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { FlatList, View } from 'react-native';
+import { ActivityIndicator, FlatList, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useNavigation } from '@react-navigation/native';
@@ -30,6 +30,7 @@ export function DownloadsScreen() {
   const retryDownload = useDownloadsStore((state) => state.retryDownload);
   const removeDownload = useDownloadsStore((state) => state.removeDownload);
   const liveProgress = useDownloadProgressStore((state) => state.progress);
+  const liveIndeterminate = useDownloadProgressStore((state) => state.indeterminate);
   const liveSpeeds = useDownloadProgressStore((state) => state.speeds);
   const currentTrack = usePlayerStore(selectCurrentTrack);
   const playing = usePlayerStore((state) => state.status === 'playing');
@@ -119,11 +120,14 @@ export function DownloadsScreen() {
             const paused = pausedIds.has(record.jobId);
             const percent = Math.max(0, liveProgress[record.jobId] ?? record.progress);
             const speed = liveSpeeds[record.jobId];
+            const indeterminate = liveIndeterminate[record.jobId] === true;
             const status = paused
               ? 'Paused'
               : record.phase === 'source'
                 ? 'Finding source'
-                : `${Math.round(percent)}%${speed ? ` · ${speed}` : ''}`;
+                : indeterminate
+                  ? `Downloading…${speed ? ` · ${speed}` : ''}`
+                  : `${Math.round(percent)}%${speed ? ` · ${speed}` : ''}`;
             return (
               <View
                 key={record.jobId}
@@ -161,16 +165,22 @@ export function DownloadsScreen() {
                     onPress={() => setPendingRemove(record)}
                   />
                 </View>
-                <View style={{ height: 4, borderRadius: 2, backgroundColor: colors.border }}>
-                  <View
-                    style={{
-                      width: `${Math.min(100, Math.max(2, percent))}%`,
-                      height: 4,
-                      borderRadius: 2,
-                      backgroundColor: paused ? colors.textMuted : colors.accent,
-                    }}
-                  />
-                </View>
+                {indeterminate && !paused ? (
+                  <View style={{ height: 14, justifyContent: 'center' }}>
+                    <ActivityIndicator size="small" color={colors.accent} />
+                  </View>
+                ) : (
+                  <View style={{ height: 4, borderRadius: 2, backgroundColor: colors.border }}>
+                    <View
+                      style={{
+                        width: `${Math.min(100, Math.max(2, percent))}%`,
+                        height: 4,
+                        borderRadius: 2,
+                        backgroundColor: paused ? colors.textMuted : colors.accent,
+                      }}
+                    />
+                  </View>
+                )}
               </View>
             );
           })}

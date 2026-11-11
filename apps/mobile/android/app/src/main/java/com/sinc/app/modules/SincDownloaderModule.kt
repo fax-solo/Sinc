@@ -287,6 +287,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
             contentLen > 0 -> contentLen
             else -> -1L
           }
+          if (total <= 0L) SincDownloads.updateUnknown(jobId)
           var written = if (appended) part.length() else 0L
           try {
             resp.body!!.byteStream().use { input ->
@@ -502,6 +503,11 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
     }
     if (bytesTotal > 0) {
       SincDownloads.update(jobId, (bytesDownloaded.toDouble() / bytesTotal * 100).toInt())
+    } else {
+      // No Content-Length and no Content-Range total. Reporting 99% (the old
+      // `total = 1` JS fallback) is a lie; keep the notification/UI
+      // indeterminate until the transfer actually completes.
+      SincDownloads.updateUnknown(jobId)
     }
     mainHandler.post {
       try {
@@ -513,6 +519,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
               putString("jobId", jobId)
               putDouble("bytesDownloaded", bytesDownloaded.toDouble())
               putDouble("bytesTotal", if (bytesTotal > 0) bytesTotal.toDouble() else 0.0)
+              putBoolean("indeterminate", bytesTotal <= 0L)
               putDouble("speedBytesPerSec", speedBytesPerSec.coerceAtLeast(0.0))
             },
           )

@@ -46,7 +46,10 @@ export interface NativePlayerModule {
 export interface NativeDownloadProgress {
   jobId: string;
   bytesDownloaded: number;
+  /** 0 when the server did not send a length. */
   bytesTotal: number;
+  /** True when the total size is unknown and no percentage is meaningful. */
+  indeterminate?: boolean;
   /** Instantaneous transfer rate; 0/absent on the first sample. */
   speedBytesPerSec?: number | null;
 }
@@ -144,10 +147,15 @@ export interface NativeYtModule {
   remove?(fileName: string, publicFileName?: string): Promise<void>;
 }
 
-/** Live percent for an engine (yt-dlp) download. */
+/** Live progress for an engine (yt-dlp) download. */
 export interface NativeYtProgressEvent {
   jobId: string;
-  percent: number;
+  /** Absent when the total size is unknown (indeterminate). */
+  percent?: number | null;
+  /** True when no percentage is meaningful (unknown total size). */
+  indeterminate?: boolean;
+  bytesDownloaded?: number;
+  bytesTotal?: number;
   /** Raw yt-dlp rate token, e.g. "214.55KiB/s". Absent when unknown. */
   speed?: string | null;
 }
@@ -182,7 +190,12 @@ export interface NativeHttpResult {
 export interface NativeHttpModule {
   /** True when the native module is linked and usable. */
   available(): boolean;
-  get(url: string, userAgent: string, accept?: string | null): Promise<NativeHttpResult>;
+  get(
+    url: string,
+    userAgent: string,
+    accept?: string | null,
+    timeoutMs?: number
+  ): Promise<NativeHttpResult>;
 }
 
 export interface NativeBridge {
