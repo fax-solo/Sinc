@@ -10,12 +10,12 @@
  *   2. artist-level play counts           × 1.0
  *   3. track starts (playCounts)          × 0.7
  *   4. thumbs up / thumbs down            ± 2.0
- *   5. follows / favorites                + 1.0 / + 1.2 (mark "familiar")
+ *   5. follows / favorites / downloads    + 1.0 / + 1.2 / + 0.8 ("familiar")
  *   6. recency of the evidence            decays with a 14-day half-life
  *   7. skips                              − 0.5 each
  *
- * Hidden artists are excluded outright; hidden and heavily-skipped tracks
- * are filtered from candidate pools via blacklistedTrackIds().
+ * Hidden artists are excluded outright; hidden, thumbs-down, and heavily-skipped
+ * tracks are filtered from candidate pools via blacklistedTrackIds().
  */
 import type { CanonicalTrack } from '@sinc/shared';
 import type { LibrarySignals } from './musicApi';
@@ -29,6 +29,7 @@ const WEIGHT_COMPLETION = 0.9;
 const WEIGHT_THUMB = 2.0;
 const WEIGHT_FOLLOW = 1.0;
 const WEIGHT_FAVORITE = 1.2;
+const WEIGHT_DOWNLOAD = 0.8;
 const WEIGHT_RECENT = 0.4;
 const WEIGHT_SKIP = 0.5;
 /** Neutral recency for evidence with no timestamp (follows, artist counts). */
@@ -41,6 +42,8 @@ export interface AffinityEvidence {
   familiarArtistNames: string[];
   /** artists appearing in the listener's favorites (stronger than follows). */
   favoriteArtistNames?: string[];
+  /** artists the listener downloaded — intent even before the first play. */
+  downloadedArtistNames?: string[];
   /** tracks from the session's recent plays (fresh, recency-dated evidence). */
   recentTracks?: CanonicalTrack[];
   /** track objects seen on device, for resolving thumb targets. */
@@ -136,6 +139,9 @@ export function computeArtistAffinity(
   for (const name of evidence.favoriteArtistNames ?? []) {
     bump(buckets, name, WEIGHT_FAVORITE, 0, true);
   }
+  for (const name of evidence.downloadedArtistNames ?? []) {
+    bump(buckets, name, WEIGHT_DOWNLOAD, 0, true);
+  }
   // 6) Session recency: threads of today's plays count as fresh evidence
   //    (they may be absent from playCounts until the next store flush).
   for (const t of evidence.recentTracks ?? []) {
@@ -168,11 +174,17 @@ export function hasUsefulAffinity(affinity: ArtistAffinity[] | undefined): boole
   return (affinity ?? []).some((a) => a.score > 0.08);
 }
 
-/** Track ids excluded from recommendation pools: hidden + heavily skipped. */
+/** Track ids excluded from recommendation pools: hidden, thumbs-down, and
+ *  heavily skipped tracks. Artist/mix feedback targets are not tracks. */
 export function blacklistedTrackIds(signals: LibrarySignals | undefined): Set<string> {
   const blocked = new Set<string>(signals?.hiddenTrackIds ?? []);
   for (const s of signals?.skipCounts ?? []) {
     if (s.count >= SKIP_BLACKLIST_THRESHOLD) blocked.add(s.trackId);
+  }
+  for (const thumb of signals?.thumbs ?? []) {
+    if (thumb.value !== 'down') continue;
+    if (thumb.targetId.startsWith('artist:') || thumb.targetId.startsWith('mix:')) continue;
+    blocked.add(thumb.targetId);
   }
   return blocked;
 }

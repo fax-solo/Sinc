@@ -27,6 +27,7 @@ import {
   searchTitle,
   type LocalDownloadSource,
 } from '../providers/download-source';
+import { resolvePreviewUrl } from '../providers/preview';
 
 export type DownloadPhase = 'source' | 'transfer' | 'completed' | 'failed';
 
@@ -171,6 +172,15 @@ const DIRECT_MISS_TTL_MS = 20 * 60 * 1000;
 /** trackId → when the direct-tier probes last came up empty. */
 const directMissAt = new Map<string, number>();
 
+/**
+ * jobId → the direct source chosen for the current attempt. A paused/retried
+ * direct transfer must resume the SAME URL: re-running the provider search can
+ * return a different file, and appending its bytes to the old `.part` would
+ * produce a corrupt/mixed song. In-memory only: after an app restart the part
+ * is discarded and the source is re-selected.
+ */
+const directJobSources = new Map<string, LocalDownloadSource>();
+
 /** Cache-aware miss wrapper: a track with no direct source must not re-probe
  * for 20 minutes — retries and re-taps go straight to the yt-dlp engine. */
 export async function findDirectSource(track: CanonicalTrack): Promise<LocalDownloadSource | null> {
@@ -182,13 +192,10 @@ export async function findDirectSource(track: CanonicalTrack): Promise<LocalDown
   return source;
 }
 
-/** Clears the direct-tier miss cache (test isolation; module state by design). */
+/** Clears the direct-tier caches (test isolation; module state by design). */
 export function resetDirectSourceMissCache(): void {
   directMissAt.clear();
-}
-
-function providerForMediaUrl(url: string): string {
-  return url.includes('soundcloud.com') ? 'soundcloud' : 'youtube';
+  directJobSources.clear();
 }
 
 /** Human-readable transfer rate: "512 B/s", "214 KiB/s", "3.2 MiB/s". */
@@ -289,25 +296,31 @@ async function isDeviceOnline(): Promise<boolean> {
 /** Post-transfer length guards shared by both transfer paths. */
 const MIN_FULL_TRACK_MS = 45_000;
 const MAX_UNKNOWN_TRACK_MS = 20 * 60 * 1000;
-const MIN_TRACK_RATIO = 0.8;
-const MAX_TRACK_RATIO = 1.25;
+const MIN_DURATION_TOLERANCE_MS = 5_000;
+const DURATION_TOLERANCE_RATIO = 0.03;
 
 /**
  * A finished direct-source file whose probed length is this far off the
- * expected track is a preview/compilation segment or the wrong song: reject
- * (0 = probe unavailable, always accepted).
+ * expected track is a preview/compilation segment or the wrong song: reject.
+ * The old 0.8-1.25x window accepted a 3:35 cover as a 2:55 song; this gate is
+ * tight enough to catch a different recording while allowing a few seconds of
+ * intro/outro silence.
+ *
+ * An unreadable probe (0) fails closed when the catalog length is known: an
+ * unverified file is not saved as the song.
  */
 export function isBadDownloadDuration(
   durationMs: number,
   expectedDurationMs: number | null | undefined
 ): boolean {
-  if (!durationMs || durationMs <= 0) return false;
+  if (!durationMs || durationMs <= 0) return Boolean(expectedDurationMs && expectedDurationMs > 0);
   if (durationMs < MIN_FULL_TRACK_MS) return true;
   if (!expectedDurationMs || expectedDurationMs <= 0) return durationMs > MAX_UNKNOWN_TRACK_MS;
-  return (
-    durationMs < expectedDurationMs * MIN_TRACK_RATIO ||
-    durationMs > expectedDurationMs * MAX_TRACK_RATIO
+  const tolerance = Math.max(
+    MIN_DURATION_TOLERANCE_MS,
+    expectedDurationMs * DURATION_TOLERANCE_RATIO
   );
+  return Math.abs(durationMs - expectedDurationMs) > tolerance;
 }
 
 /**
@@ -332,6 +345,35 @@ export function isTransientDownloadError(err: unknown): boolean {
   return /timed out|timeout|temporary|temporarily|network|connection|connect\b|socket|econn|eai_again|reset by peer|unexpected end|connection closed|broken pipe/i.test(
     message
   );
+}
+
+/**
+ * Content verification failures are not network failures: the file was
+ * fetched, but it was the wrong recording (or the preview reference could not
+ * be fetched). Retry once with a freshly resolved source instead of parking or
+ * surfacing the first candidate's mismatch.
+ */
+export function isFingerprintError(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code ?? '';
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return /^DOWNLOAD_FINGERPRINT_/.test(code) || /DOWNLOAD_FINGERPRINT_/.test(message);
+}
+
+/** A code-only bridge rejection still needs a useful message for the user. */
+function fingerprintFailureMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message.trim() : '';
+  if (message) return message;
+  const code = (err as { code?: string } | null)?.code ?? '';
+  return /UNAVAILABLE/.test(code)
+    ? 'Could not verify the downloaded audio against the catalog preview. Please try again.'
+    : 'The downloaded audio did not match the selected song. Please try again.';
+}
+
+/** A pause/cancel can beat the native action event to JS; never mark it failed. */
+export function isCancelledDownloadError(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code ?? '';
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return code === 'DOWNLOAD_CANCELLED' || /DOWNLOAD_CANCELLED/.test(message);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -450,6 +492,10 @@ export const useDownloadsStore = create<DownloadsState>()(
           // Retries and resumes continue from any surviving `.part` rather
           // than trashing bytes the first attempt already transferred.
           let resumeNext = Boolean(opts?.resumePart);
+          // After content verification rejects the audio, do not retry the
+          // same direct source on the next attempt; go straight to the engine,
+          // which re-searches with a fresh candidate.
+          let skipDirectAfterFingerprint = false;
 
           const downloads = [
             { jobId, track, phase: 'source' as DownloadPhase, progress: 0, createdAt: Date.now() },
@@ -465,12 +511,31 @@ export const useDownloadsStore = create<DownloadsState>()(
           waitingForConnection.delete(jobId);
           const token = (launchToken.get(jobId) ?? 0) + 1;
           launchToken.set(jobId, token);
+          const stopped = () => launchToken.get(jobId) !== token || get().pausedIds.has(jobId);
+
+          // Resolved below, once per job, before the first attempt. Catalogue
+          // rows already carry it; legacy rows are looked up by provider id or
+          // strict text search. A missing preview is not fatal here, but the
+          // downloader then has no content-level reference and falls back to its
+          // metadata/length gates.
+          let previewUrl: string | null = null;
 
           /** Runs one full attempt: direct tier first, then yt-dlp. */
           const attempt = async (): Promise<void> => {
-            // Fast path: a direct, downloadable file URL.
-            const direct = await findDirectSource(track);
+            // A pause/cancel during a slow provider search must not start a
+            // fresh native transfer afterwards.
+            if (stopped()) throw new Error('Download stopped');
+            // Fast path: a direct, downloadable file URL. On a resume/retry,
+            // reuse the exact URL that produced the surviving `.part`; only a
+            // fresh attempt may run the provider search again.
+            const cachedDirect = resumeNext ? directJobSources.get(jobId) : undefined;
+            const direct = skipDirectAfterFingerprint
+              ? null
+              : (cachedDirect ?? (await findDirectSource(track)));
+            if (stopped()) throw new Error('Download stopped');
+            if (direct && !cachedDirect) directJobSources.set(jobId, direct);
             if (direct) {
+              const resumeDirect = Boolean(cachedDirect && cachedDirect.url === direct.url);
               upsert(jobId, { phase: 'transfer', progress: 5, provider: direct.provider });
               let result: Awaited<ReturnType<typeof nativeBridge.downloader.download>> | null =
                 null;
@@ -486,8 +551,9 @@ export const useDownloadsStore = create<DownloadsState>()(
                     album: track.album?.title,
                     publicFileName: publicFileName(track),
                     expectedDurationMs: direct.expectedDurationMs,
+                    previewUrl: previewUrl ?? undefined,
                   },
-                  resumeNext
+                  resumeDirect
                 );
               } catch (directErr) {
                 if (launchToken.get(jobId) !== token) return;
@@ -498,11 +564,24 @@ export const useDownloadsStore = create<DownloadsState>()(
                 const message = (
                   directErr instanceof Error ? directErr.message : String(directErr ?? '')
                 ).trim();
-                if (!/^HTTP_/.test(code) && !/^HTTP_/.test(message)) throw directErr; // network errors: retry/park loop keeps the resume
+                const fingerprintRejected = isFingerprintError(directErr);
+                const rejectedSource =
+                  /^HTTP_/.test(code) ||
+                  /^HTTP_/.test(message) ||
+                  code === 'DOWNLOAD_UNVERIFIED' ||
+                  /^DOWNLOAD_UNVERIFIED/.test(message) ||
+                  fingerprintRejected;
+                if (!rejectedSource) throw directErr; // network errors: retry/park loop keeps the resume
                 // A `HTTP_<code>` means the file host rejected THIS url
-                // (401/403 auth, 404 taken-down, 5xx): the track may still be
-                // engine-fetchable, so degrade to the yt-dlp tier instead of
-                // failing the whole job.
+                // (401/403 auth, 404 taken-down, 5xx). `DOWNLOAD_UNVERIFIED`
+                // means the native layer probed the finished file and its
+                // length did not match the chosen track (it deletes the file
+                // before publishing). `DOWNLOAD_FINGERPRINT_*` means it fetched
+                // audio but the bytes did not match the catalog preview, or the
+                // preview could not be checked. In every case the track may
+                // still be engine-fetchable, so degrade to the yt-dlp tier.
+                if (fingerprintRejected) skipDirectAfterFingerprint = true;
+                directJobSources.delete(jobId);
                 console.warn('Sinc direct source rejected, falling back:', jobId, code || message);
               }
               if (result) {
@@ -517,8 +596,10 @@ export const useDownloadsStore = create<DownloadsState>()(
                     safeFileName(track),
                     publicFileName(track)
                   );
+                  directJobSources.delete(jobId);
                   // fall through to the yt-dlp tier below
                 } else {
+                  directJobSources.delete(jobId);
                   waitingForConnection.delete(jobId);
                   useDownloadProgressStore.getState().clearProgress(jobId);
                   upsert(jobId, {
@@ -533,28 +614,30 @@ export const useDownloadsStore = create<DownloadsState>()(
                 }
               }
             }
-            // yt-dlp path: reuse a known soundcloud/youtube result, else search
-            // (also the fallback when a direct source downloaded garbage).
+            // yt-dlp path: always resolve through the strict artist+title
+            // search. Provider IDs are not trusted as download sources: a
+            // catalog id can point at a cover, a re-upload or a stale video,
+            // and the native URL path cannot compare it to the chosen track.
+            // Searching lets the engine apply the title/artist/duration gates.
+            if (stopped()) throw new Error('Download stopped');
             if (!nativeBridge.yt.available()) {
               throw new Error('The on-device media engine is not linked (yt-dlp).');
             }
             upsert(jobId, { phase: 'source', progress: 10 });
-            const mediaUrl = track.providerIds.soundcloud ?? track.providerIds.youtube ?? null;
-            const query = mediaUrl
-              ? mediaUrl
-              : `${track.artists[0]?.name ?? 'unknown'} - ${searchTitle(track.title)}`;
+            const query = `${track.artists[0]?.name ?? 'unknown'} - ${searchTitle(track.title)}`;
             const result = await nativeBridge.yt.download(
               jobId,
-              mediaUrl ? '' : query,
+              query,
               safeFileName(track),
               track.durationMs > 0 ? track.durationMs : null,
-              mediaUrl,
+              null,
               track.title,
               resumeNext,
               track.artists[0]?.name ?? null,
               track.album?.title ?? null,
               track.artworkUrl ?? null,
-              publicFileName(track)
+              publicFileName(track),
+              previewUrl
             );
             if (launchToken.get(jobId) !== token) return;
             if (!result) {
@@ -567,15 +650,16 @@ export const useDownloadsStore = create<DownloadsState>()(
               progress: 100,
               localUri: result.localUri,
               sizeBytes: 0,
-              provider: mediaUrl
-                ? providerForMediaUrl(mediaUrl)
-                : (recordByJobId(jobId)?.provider ?? 'youtube'),
+              provider: recordByJobId(jobId)?.provider ?? 'youtube',
               completedAt: Date.now(),
               publishedName: result.publishedName ?? publicFileName(track),
             });
           };
 
           try {
+            previewUrl = await resolvePreviewUrl(track).catch(() => null);
+            if (launchToken.get(jobId) !== token) return;
+            if (get().pausedIds.has(jobId)) return;
             for (let attemptIndex = 0; ; attemptIndex += 1) {
               try {
                 await attempt();
@@ -590,6 +674,21 @@ export const useDownloadsStore = create<DownloadsState>()(
                 // failed (or burn retries on it).
                 if (launchToken.get(jobId) !== token) return;
                 if (get().pausedIds.has(jobId)) return;
+                // A native notification pause/cancel can reject before its
+                // action event reaches this store. Leave the row resumable
+                // instead of surfacing a user-initiated stop as a failure.
+                if (isCancelledDownloadError(err)) return;
+                // The source downloaded successfully but its bytes are not the
+                // selected recording (or the preview reference was
+                // unavailable). The direct tier already fell through to the
+                // engine; give the engine one fresh candidate, skipping the
+                // rejected direct source entirely.
+                if (attemptIndex < 1 && isFingerprintError(err)) {
+                  skipDirectAfterFingerprint = true;
+                  resumeNext = false;
+                  upsert(jobId, { phase: 'source', error: 'Trying a different source…' });
+                  continue;
+                }
                 // Connection loss or a degraded link is not a failure: park
                 // the job in `source` so it never shows "failed" and
                 // auto-resumes when the link is back (reconnect event, the
@@ -619,8 +718,13 @@ export const useDownloadsStore = create<DownloadsState>()(
                   continue;
                 }
                 waitingForConnection.delete(jobId);
+                directJobSources.delete(jobId);
                 useDownloadProgressStore.getState().clearProgress(jobId);
-                const message = err instanceof Error ? err.message : 'Download failed';
+                const message = isFingerprintError(err)
+                  ? fingerprintFailureMessage(err)
+                  : err instanceof Error
+                    ? err.message
+                    : 'Download failed';
                 upsert(jobId, {
                   phase: 'failed',
                   progress: 0,
@@ -677,6 +781,7 @@ export const useDownloadsStore = create<DownloadsState>()(
 
         cancelDownload: async (jobId) => {
           activeJobs.delete(jobId);
+          directJobSources.delete(jobId);
           launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
           const pausedIds = new Set(get().pausedIds);
           pausedIds.delete(jobId);
@@ -744,6 +849,7 @@ export const useDownloadsStore = create<DownloadsState>()(
         removeDownload: async (jobId) => {
           const record = get().downloads.find((d) => d.jobId === jobId);
           if (!record) return;
+          directJobSources.delete(jobId);
           // Stop any in-flight transfer or park loop FIRST. The old code only
           // cleaned up completed files — an in-flight job kept transferring,
           // and on finish published the "deleted" song into Music/Sinc. After

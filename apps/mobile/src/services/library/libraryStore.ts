@@ -6,6 +6,9 @@ import { storage, STORAGE_KEYS } from '../../utils/storage';
 export interface LocalPlaylist {
   id: string;
   name: string;
+  description?: string;
+  /** Explicit user-selected cover. Falls back to the first track artwork. */
+  coverArtworkUrl?: string;
   tracks: CanonicalTrack[];
   createdAt: number;
   updatedAt: number;
@@ -43,14 +46,24 @@ interface LibraryState {
   isFavorite: (trackId: string) => boolean;
   toggleFavorite: (track: CanonicalTrack) => void;
   recordPlayed: (track: CanonicalTrack) => void;
+  removeFromHistory: (trackId: string) => void;
+  clearHistory: () => void;
   isFollowedArtist: (artistId: string) => boolean;
   toggleFollowArtist: (artist: CanonicalArtist) => void;
   isFollowedAlbum: (albumId: string) => boolean;
   toggleFollowAlbum: (album: CanonicalAlbum) => void;
-  addPlaylist: (name: string, tracks?: CanonicalTrack[]) => string;
+  addPlaylist: (name: string, tracks?: CanonicalTrack[], description?: string) => string;
+  updatePlaylist: (
+    id: string,
+    patch: { name?: string; description?: string; coverArtworkUrl?: string }
+  ) => void;
   renamePlaylist: (id: string, name: string) => void;
+  duplicatePlaylist: (id: string) => string | null;
+  setPlaylistCover: (id: string, artworkUrl?: string) => void;
+  reorderPlaylistTracks: (id: string, fromIndex: number, toIndex: number) => boolean;
   deletePlaylist: (id: string) => void;
   addToPlaylist: (id: string, track: CanonicalTrack) => void;
+  addTracksToPlaylist: (id: string, tracks: CanonicalTrack[]) => number;
   removeFromPlaylist: (id: string, trackId: string) => void;
   recordPlaylistPlayed: (id: string) => void;
 
@@ -63,6 +76,8 @@ interface LibraryState {
   hideArtist: (name: string) => void;
   unhideTrack: (trackId: string) => void;
   unhideArtist: (name: string) => void;
+  /** Clears thumbs and hidden items, not listening history. */
+  clearRecommendationFeedback: () => void;
   setDiscoveryPreference: (value: number) => void;
 }
 
@@ -166,6 +181,11 @@ export const useLibraryStore = create<LibraryState>()(
         set({ recentlyPlayed: prependUnique(get().recentlyPlayed, track, MAX_RECENT) });
       },
 
+      removeFromHistory: (trackId) =>
+        set({ recentlyPlayed: get().recentlyPlayed.filter((track) => track.id !== trackId) }),
+
+      clearHistory: () => set({ recentlyPlayed: [] }),
+
       isFollowedArtist: (artistId) => get().followedArtistIds.has(artistId),
 
       toggleFollowArtist: (artist) => {
@@ -188,21 +208,108 @@ export const useLibraryStore = create<LibraryState>()(
         set({ followedAlbums: next, followedAlbumIds: idsOf(next) });
       },
 
-      addPlaylist: (name, tracks = []) => {
+      addPlaylist: (name, tracks = [], description) => {
         const now = Date.now();
         const id = `playlist-${now}-${Math.random().toString(36).slice(2, 8)}`;
         set({
-          playlists: [...get().playlists, { id, name, tracks, createdAt: now, updatedAt: now }],
+          playlists: [
+            ...get().playlists,
+            {
+              id,
+              name: name.trim() || 'New playlist',
+              description: description?.trim() || undefined,
+              tracks,
+              createdAt: now,
+              updatedAt: now,
+            },
+          ],
         });
         return id;
+      },
+
+      updatePlaylist: (id, patch) => {
+        set({
+          playlists: get().playlists.map((p) => {
+            if (p.id !== id) return p;
+            const nextName = patch.name === undefined ? p.name : patch.name.trim() || p.name;
+            return {
+              ...p,
+              name: nextName,
+              description:
+                patch.description === undefined
+                  ? p.description
+                  : patch.description.trim() || undefined,
+              coverArtworkUrl:
+                patch.coverArtworkUrl === undefined
+                  ? p.coverArtworkUrl
+                  : patch.coverArtworkUrl,
+              updatedAt: Date.now(),
+            };
+          }),
+        });
       },
 
       renamePlaylist: (id, name) => {
         set({
           playlists: get().playlists.map((p) =>
-            p.id === id ? { ...p, name, updatedAt: Date.now() } : p
+            p.id === id ? { ...p, name: name.trim() || p.name, updatedAt: Date.now() } : p
           ),
         });
+      },
+
+      duplicatePlaylist: (id) => {
+        const source = get().playlists.find((p) => p.id === id);
+        if (!source) return null;
+        const now = Date.now();
+        const nextId = `playlist-${now}-${Math.random().toString(36).slice(2, 8)}`;
+        set({
+          playlists: [
+            ...get().playlists,
+            {
+              ...source,
+              id: nextId,
+              name: `${source.name} copy`,
+              tracks: [...source.tracks],
+              createdAt: now,
+              updatedAt: now,
+            },
+          ],
+        });
+        return nextId;
+      },
+
+      setPlaylistCover: (id, artworkUrl) => {
+        set({
+          playlists: get().playlists.map((p) =>
+            p.id === id
+              ? { ...p, coverArtworkUrl: artworkUrl || undefined, updatedAt: Date.now() }
+              : p
+          ),
+        });
+      },
+
+      reorderPlaylistTracks: (id, fromIndex, toIndex) => {
+        const playlist = get().playlists.find((p) => p.id === id);
+        if (!playlist) return false;
+        if (
+          fromIndex < 0 ||
+          toIndex < 0 ||
+          fromIndex >= playlist.tracks.length ||
+          toIndex >= playlist.tracks.length ||
+          fromIndex === toIndex
+        ) {
+          return false;
+        }
+        const tracks = [...playlist.tracks];
+        const [moved] = tracks.splice(fromIndex, 1);
+        if (!moved) return false;
+        tracks.splice(toIndex, 0, moved);
+        set({
+          playlists: get().playlists.map((p) =>
+            p.id === id ? { ...p, tracks, updatedAt: Date.now() } : p
+          ),
+        });
+        return true;
       },
 
       deletePlaylist: (id) => {
@@ -220,6 +327,26 @@ export const useLibraryStore = create<LibraryState>()(
               : p
           ),
         });
+      },
+
+      addTracksToPlaylist: (id, tracks) => {
+        const playlist = get().playlists.find((p) => p.id === id);
+        if (!playlist) return 0;
+        const seen = new Set(playlist.tracks.map((t) => t.id));
+        const additions = tracks.filter((t) => {
+          if (seen.has(t.id)) return false;
+          seen.add(t.id);
+          return true;
+        });
+        if (additions.length === 0) return 0;
+        set({
+          playlists: get().playlists.map((p) =>
+            p.id === id
+              ? { ...p, tracks: [...p.tracks, ...additions], updatedAt: Date.now() }
+              : p
+          ),
+        });
+        return additions.length;
       },
 
       removeFromPlaylist: (id, trackId) => {
@@ -315,14 +442,29 @@ export const useLibraryStore = create<LibraryState>()(
         })),
 
       unhideTrack: (trackId) =>
-        set((state) => ({
-          hiddenTrackIds: state.hiddenTrackIds.filter((id) => id !== trackId),
-        })),
+        set((state) => {
+          // Leaving a stale thumbs-down would keep the song filtered even
+          // after the listener explicitly asks to see it again.
+          const thumbsDown = { ...state.thumbsDown };
+          delete thumbsDown[trackId];
+          return {
+            hiddenTrackIds: state.hiddenTrackIds.filter((id) => id !== trackId),
+            thumbsDown,
+          };
+        }),
 
       unhideArtist: (name) =>
         set((state) => ({
           hiddenArtistNames: state.hiddenArtistNames.filter((n) => n !== name),
         })),
+
+      clearRecommendationFeedback: () =>
+        set({
+          thumbsUp: {},
+          thumbsDown: {},
+          hiddenTrackIds: [],
+          hiddenArtistNames: [],
+        }),
 
       setDiscoveryPreference: (value) => set({ discoveryPreference: clamp(value, 0, 1) }),
     }),
@@ -333,7 +475,7 @@ export const useLibraryStore = create<LibraryState>()(
         setItem: (key, value) => storage.setString(key, value),
         removeItem: (key) => storage.remove(key),
       })),
-      version: 3,
+      version: 4,
       partialize: (state) => ({
         favoriteTracks: state.favoriteTracks,
         recentlyPlayed: state.recentlyPlayed,
@@ -362,12 +504,19 @@ export const useLibraryStore = create<LibraryState>()(
         const oldPlaylists = (
           persisted as { playlists?: Array<LocalPlaylist & { trackIds?: string[] }> }
         ).playlists;
+        const now = Date.now();
         return {
           ...emptyState(),
           ...state,
-          playlists: (oldPlaylists ?? []).map((p) =>
-            Array.isArray(p.tracks) ? p : { ...p, tracks: [] }
-          ),
+          playlists: (oldPlaylists ?? []).map((p) => ({
+            ...p,
+            tracks: Array.isArray(p.tracks) ? p.tracks : [],
+            description: typeof p.description === 'string' ? p.description : undefined,
+            coverArtworkUrl:
+              typeof p.coverArtworkUrl === 'string' ? p.coverArtworkUrl : undefined,
+            createdAt: typeof p.createdAt === 'number' ? p.createdAt : now,
+            updatedAt: typeof p.updatedAt === 'number' ? p.updatedAt : now,
+          })),
         };
       },
     }

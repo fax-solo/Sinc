@@ -9,6 +9,7 @@ import type {
 import { playerService } from './PlayerService';
 import { usePlayerStore } from './playerStore';
 import { usePlayerProgressStore } from './playerProgressStore';
+import { useLibraryStore } from '../library/libraryStore';
 import { storage, STORAGE_KEYS } from '../../utils/storage';
 
 // The native keystore is unavailable under Node; keep anything that reaches
@@ -343,6 +344,21 @@ describe('playerService', () => {
 
     expect(usePlayerStore.getState().currentIndex).toBe(1);
     expect(vi.mocked(fakePlayer.load)).toHaveBeenCalledTimes(2);
+  });
+
+  it('only records manual skips near the beginning of a track', async () => {
+    useLibraryStore.setState({ skipStats: {} });
+    const tracks = [track('itunes:1'), track('itunes:2')];
+    stubResolvePlayback(tracks);
+    await playerService.playQueue(tracks);
+
+    usePlayerProgressStore.setState({ positionMs: 500, durationMs: 200_000 });
+    await playerService.next();
+    expect(useLibraryStore.getState().skipStats['itunes:1']).toBe(1);
+
+    usePlayerProgressStore.setState({ positionMs: 190_000, durationMs: 200_000 });
+    await playerService.next();
+    expect(useLibraryStore.getState().skipStats['itunes:2']).toBeUndefined();
   });
 
   it('a lock-screen next command advances the queue', async () => {

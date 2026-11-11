@@ -27,6 +27,12 @@ export interface CanonicalTrack {
   durationMs: number;
   trackNumber?: number;
   artworkUrl?: string;
+  /**
+   * Short, provider-hosted preview of the selected recording. Downloads
+   * fingerprint this clip and require the finished file to contain the same
+   * audio before it is saved.
+   */
+  previewUrl?: string;
   providerIds: Record<string, string>;
   releaseDate?: string;
   popularityScore?: number;

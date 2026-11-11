@@ -108,11 +108,20 @@ object SincTrackMatch {
     "sped up", "spedup", "sped-up", "slowed", "slow + reverb", "slowed + reverb",
     "reverb", "nightcore", "daycore", "8d audio", "8d", "loop", "1 hour",
     "10 hour", "hour loop", "hour version", "karaoke", "instrumental", "cover",
+    "tribute", "in the style of", "made famous by",
     "mashup", "bootleg", "tiktok version", "tiktok remix",
     // Live recordings (crowd noise, different timing) break lyrics sync and
     // are never what "the song" means unless explicitly requested.
     "live", "unplugged", "in concert",
   )
+
+  /**
+   * Alternate arrangements that playback may use as a last resort, but a
+   * download must not save unless the selected title names that arrangement.
+   * "Album Version"/"Original Mix"/"Remaster" are deliberately absent: those
+   * are normally the same recording/master, not a different song.
+   */
+  private val downloadOnlyVariantTags = listOf("remix", "acoustic", "demo", "rework")
 
   /** True when the result is a labeled variant the query did not ask for. */
   fun hasForbiddenVariant(query: String, resultTitle: String): Boolean {
@@ -303,13 +312,35 @@ object SincTrackMatch {
     // for.
     val noLive = (if (noVariants.isNotEmpty() || strict) noVariants else eligible)
       .filterNot { c -> isUnwantedLive(queryText, c.title) }
+    val qTitleNorm = normalizeText(title)
+    // A remix/acoustic/demo is a different recording/arrangement. If the
+    // selected title names one, the file must actually be that version; if it
+    // does not, the file must not be one. Playback keeps its lenient fallback.
+    val requestedAlternate = downloadOnlyVariantTags.filter { hasTag(qTitleNorm, it) }
+    val noWrongAlternate = if (strict && requestedAlternate.isNotEmpty()) {
+      noLive.filter { c ->
+        val rTitle = normalizeText(c.title)
+        requestedAlternate.all { tag -> hasTag(rTitle, tag) }
+      }
+    } else {
+      noLive
+    }
+    val noUnrequestedAlternate = if (strict) {
+      noWrongAlternate.filterNot { c ->
+        val rTitle = normalizeText(c.title)
+        downloadOnlyVariantTags.any { tag -> hasTag(rTitle, tag) && !hasTag(qTitleNorm, tag) }
+      }
+    } else {
+      noWrongAlternate
+    }
     val pool = when {
+      noUnrequestedAlternate.isNotEmpty() -> noUnrequestedAlternate
+      // Strict (downloads): refuse instead of saving an alteration.
+      strict -> return null
       noLive.isNotEmpty() -> noLive
       noVariants.isNotEmpty() -> noVariants
-      // Strict (downloads): refuse instead of saving an alteration.
-      else -> if (strict) return null else eligible
+      else -> eligible
     }
-    val qTitleNorm = normalizeText(title)
     val qTitleBase = baseTitle(title)
     val qArtistCompact = compactText(artist)
     val coCredit = Regex("\\+|&|\\bx\\b|,|\\bfeat\\b|\\bft\\.?\\b|\\bwith\\b|\\bduet\\b", RegexOption.IGNORE_CASE)

@@ -76,13 +76,14 @@ describe('buildLocalSections', () => {
     expect(onRepeat?.kind === 'tracks' && onRepeat.tracks.map((t) => t.id)).toEqual(['top', 'mid']);
   });
 
-  it('builds Saved for you from completed downloads only', () => {
+  it('builds Saved for you from completed downloads only and respects thumbs-down', () => {
     const sections = buildLocalSections({
       ...base(),
       downloadedTracks: [track('d1'), track('d2'), track('d3')],
+      thumbsDown: { d1: 1 },
     });
     const saved = sections.find((s) => s.title === 'Saved for you');
-    expect(saved?.kind === 'tracks' && saved.tracks.map((t) => t.id)).toEqual(['d1', 'd2', 'd3']);
+    expect(saved?.kind === 'tracks' && saved.tracks.map((t) => t.id)).toEqual(['d2', 'd3']);
   });
 
   it('orders playlists with recent-first then updatedAt, capped at 6', () => {

@@ -143,7 +143,8 @@ function createYt(): NativeYtModule {
       artist?: string | null,
       album?: string | null,
       artworkUrl?: string | null,
-      publicFileName?: string | null
+      publicFileName?: string | null,
+      previewUrl?: string | null
     ) =>
       module.download(
         jobId,
@@ -156,7 +157,8 @@ function createYt(): NativeYtModule {
         artist ?? null,
         album ?? null,
         artworkUrl ?? null,
-        publicFileName ?? null
+        publicFileName ?? null,
+        previewUrl ?? null
       ),
     // Older native builds lack `remove`; JS feature-detects before calling.
     remove:

@@ -4,6 +4,7 @@ import { AppProviders } from './providers';
 import { RootNavigator } from './navigation/RootNavigator';
 import { useLockStore } from '../features/lock/lockStore';
 import { useUpdateStore } from '../features/updates/updateStore';
+import { initNotificationCenter } from '../features/notifications/notificationCenter';
 
 /**
  * Root component. The app boots into the local profile immediately; the only
@@ -14,6 +15,7 @@ export default function App() {
   // Check for a newer release on cold start, then again whenever the app
   // returns to the foreground (bounded by the store's check cooldown).
   useEffect(() => {
+    initNotificationCenter();
     void useUpdateStore.getState().check();
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') {

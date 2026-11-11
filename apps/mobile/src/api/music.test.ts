@@ -156,6 +156,132 @@ describe('musicApi (local)', () => {
     expect(results.tracks?.data ?? []).toHaveLength(0);
   });
 
+  it('returns iTunes artist songs, albums and artwork', async () => {
+    stubFetch((url) => {
+      if (url.includes('/lookup?id=369257875') && url.includes('entity=album')) {
+        return {
+          payload: {
+            results: [
+              {
+                wrapperType: 'artist',
+                artistId: 369257875,
+                artistName: 'JadaL',
+                primaryGenreName: 'Rock',
+              },
+              {
+                wrapperType: 'collection',
+                collectionId: 42,
+                collectionName: 'Arabic Rocks',
+                artistId: 369257875,
+                artistName: 'JadaL',
+                artworkUrl100: 'https://cdn/100x100bb.jpg',
+                trackCount: 14,
+              },
+            ],
+          },
+        };
+      }
+      if (url.includes('/lookup?id=369257875') && url.includes('entity=song')) {
+        return {
+          payload: {
+            results: [
+              itunesTrack(1, 'Al Tobah', 'JadaL'),
+              // Same recording re-listed on a deluxe edition — must not repeat.
+              itunesTrack(2, 'Al Tobah', 'JadaL'),
+              itunesTrack(3, 'Ess', 'JadaL'),
+            ],
+          },
+        };
+      }
+      return undefined;
+    });
+
+    const result = await musicApi.getArtist('itunes:369257875');
+    expect(result.artist.name).toBe('JadaL');
+    expect(result.artist.artworkUrl).toBe('https://cdn/300x300bb.jpg');
+    expect(result.albums.map((album) => album.title)).toEqual(['Arabic Rocks']);
+    expect(result.topTracks.map((track) => track.title)).toEqual(['Al Tobah', 'Ess']);
+  });
+
+  it('still returns artist albums when the song lookup fails', async () => {
+    stubFetch((url) => {
+      if (url.includes('/lookup?id=7') && url.includes('entity=album')) {
+        return {
+          payload: {
+            results: [
+              {
+                wrapperType: 'artist',
+                artistId: 7,
+                artistName: 'JadaL',
+                primaryGenreName: 'Rock',
+              },
+              {
+                wrapperType: 'collection',
+                collectionId: 42,
+                collectionName: 'Arabic Rocks',
+                artistId: 7,
+                artistName: 'JadaL',
+                artworkUrl100: 'https://cdn/100x100bb.jpg',
+                trackCount: 14,
+              },
+            ],
+          },
+        };
+      }
+      return undefined;
+    });
+
+    const result = await musicApi.getArtist('itunes:7');
+    expect(result.albums[0].title).toBe('Arabic Rocks');
+    expect(result.topTracks).toEqual([]);
+  });
+
+  it('searches playlists from iTunes and Deezer', async () => {
+    stubFetch((url) => {
+      if (url.startsWith('https://itunes.apple.com/search') && url.includes('entity=album')) {
+        return {
+          payload: {
+            results: Array.from({ length: 30 }, (_, index) => ({
+              wrapperType: 'collection',
+              collectionId: 10 + index,
+              collectionName: index === 0 ? 'Jadal Essentials' : `Jadal Album ${index}`,
+              artistId: 1,
+              artistName: 'JadaL',
+              artworkUrl100: 'https://cdn/100x100bb.jpg',
+              trackCount: 14,
+            })),
+          },
+        };
+      }
+      if (url.startsWith('https://api.deezer.com/search/playlist')) {
+        return {
+          payload: {
+            data: [
+              {
+                id: 20,
+                title: 'Jadal Mix',
+                nb_tracks: 30,
+                picture_medium: 'https://cdn/med.jpg',
+                creator: { id: 2, name: 'Sinc' },
+              },
+            ],
+          },
+        };
+      }
+      return undefined;
+    });
+
+    const results = await musicApi.search('jadal', 'playlists');
+    const playlists = results.playlists?.data ?? [];
+    expect(playlists).toHaveLength(25);
+    expect(playlists.find((playlist) => playlist.providerIds.itunes)?.name).toBe(
+      'Jadal Essentials'
+    );
+    // The iTunes response alone is larger than the result cap; Deezer still has
+    // to survive the merge instead of being pushed off the end.
+    expect(playlists.find((playlist) => playlist.providerIds.deezer)?.name).toBe('Jadal Mix');
+  });
+
   it('builds the home feed from Deezer charts', async () => {
     stubFetch((url) => {
       if (url.startsWith('https://api.deezer.com/chart/0/tracks'))

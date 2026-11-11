@@ -10,6 +10,8 @@ export interface DigestInput {
   favoriteTracks: CanonicalTrack[];
   playStats: Record<string, PlayStat>;
   skipStats: Record<string, number>;
+  /** Thumbs-down track ids are excluded from recommendation rails. */
+  thumbsDown?: Record<string, number>;
   hiddenTrackIds: string[];
   hiddenArtistNames: string[];
   playlists: LocalPlaylist[];
@@ -59,6 +61,7 @@ export function buildLocalSections(input: DigestInput): HomeSection[] {
   }
 
   const hiddenArtists = new Set(input.hiddenArtistNames);
+  const thumbsDownIds = new Set(Object.keys(input.thumbsDown ?? {}));
   const repeat = Object.entries(input.playStats)
     .filter(([, stat]) => stat.count >= ON_REPEAT_MIN)
     .sort((a, b) => b[1].count - a[1].count || b[1].lastPlayedAt - a[1].lastPlayedAt)
@@ -66,6 +69,7 @@ export function buildLocalSections(input: DigestInput): HomeSection[] {
     .filter((track): track is CanonicalTrack => {
       if (!track) return false;
       if (input.hiddenTrackIds.includes(track.id)) return false;
+      if (thumbsDownIds.has(track.id)) return false;
       if (track.artists[0]?.name && hiddenArtists.has(track.artists[0].name)) return false;
       const total = input.playStats[track.id]?.count ?? 0;
       if (total > 0 && (input.skipStats[track.id] ?? 0) / total > SKIP_HEAVY_RATIO) return false;
@@ -79,7 +83,10 @@ export function buildLocalSections(input: DigestInput): HomeSection[] {
   const saved = input.downloadedTracks
     .filter((track) => {
       if (input.hiddenTrackIds.includes(track.id)) return false;
+      if (thumbsDownIds.has(track.id)) return false;
       if (track.artists[0]?.name && hiddenArtists.has(track.artists[0].name)) return false;
+      const total = input.playStats[track.id]?.count ?? 0;
+      if (total > 0 && (input.skipStats[track.id] ?? 0) / total > SKIP_HEAVY_RATIO) return false;
       return true;
     })
     .slice(0, MAX_RAIL);
@@ -115,6 +122,7 @@ export function useLocalDigest(): HomeSection[] {
   const skipStats = useLibraryStore((s) => s.skipStats);
   const hiddenTrackIds = useLibraryStore((s) => s.hiddenTrackIds);
   const hiddenArtistNames = useLibraryStore((s) => s.hiddenArtistNames);
+  const thumbsDown = useLibraryStore((s) => s.thumbsDown);
   const playlists = useLibraryStore((s) => s.playlists);
   const recentlyPlayedPlaylistIds = useLibraryStore((s) => s.recentlyPlayedPlaylistIds);
   const downloads = useDownloadsStore((s) => s.downloads);
@@ -129,6 +137,7 @@ export function useLocalDigest(): HomeSection[] {
       favoriteTracks,
       playStats,
       skipStats,
+      thumbsDown,
       hiddenTrackIds,
       hiddenArtistNames,
       playlists,
@@ -140,6 +149,7 @@ export function useLocalDigest(): HomeSection[] {
     favoriteTracks,
     playStats,
     skipStats,
+    thumbsDown,
     hiddenTrackIds,
     hiddenArtistNames,
     playlists,

@@ -15,6 +15,7 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
+import com.facebook.react.bridge.ReadableType
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import java.io.File
 import java.io.FileOutputStream
@@ -86,6 +87,14 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
     SincDownloads.removePublished(fileName)
   }
 
+  /**
+   * A paused or cancelled job must not publish audio after the transfer. The
+   * job intentionally stays registered through duration probing and
+   * fingerprint verification so these actions can stop it.
+   */
+  private fun isStopped(jobId: String): Boolean =
+    SincDownloads.isPaused(jobId) || !SincDownloads.isActive(jobId)
+
   @ReactMethod
   fun download(
     jobId: String,
@@ -109,15 +118,45 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
       // The published copy in Music/ shows just the song name; the app-private
       // file keeps its collision-safe name.
       val publicName = metadata?.getString("publicFileName")?.takeIf { it.isNotBlank() } ?: fileName
-      val expectedMs = metadata?.getDouble("expectedDurationMs")?.takeIf { it > 0 }?.toLong()
+      // Optional: getDouble throws on a missing/null key, and most short-track
+      // sources omit an expected length. Read the type first, then default null.
+      val expectedMs = metadata
+        ?.takeIf {
+          it.hasKey("expectedDurationMs") &&
+            it.getType("expectedDurationMs") == ReadableType.Number
+        }
+        ?.getDouble("expectedDurationMs")
+        ?.takeIf { it > 0 }
+        ?.toLong()
+      // Trusted catalog preview for content-level verification. Optional so
+      // legacy/offline callers still get the metadata + duration gates.
+      val previewUrl = metadata
+        ?.getString("previewUrl")
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
 
       // A resume continues from an existing `.part` with an HTTP Range request;
       // a fresh start drops stale partials (their server-side source may have
       // changed, which otherwise fails with HTTP 416 forever).
       val part = File(dir, "$fileName.part")
       if (!resumePart) part.delete()
-      enqueue(jobId, url, headers, target, part, publicName, metaTitle, metaArtist, metaAlbum, resumePart, promise)
+      enqueue(
+        jobId,
+        url,
+        headers,
+        target,
+        part,
+        publicName,
+        metaTitle,
+        metaArtist,
+        metaAlbum,
+        expectedMs,
+        previewUrl,
+        resumePart,
+        promise,
+      )
     } catch (e: Exception) {
+      SincDownloads.end(jobId)
       Log.w("SincDownloader", "download config rejected for $jobId: ${e.message}")
       promise.reject("DOWNLOAD_BAD_CONFIG", e.message ?: "Malformed download request", e)
     }
@@ -139,6 +178,8 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
     metaTitle: String?,
     metaArtist: String?,
     metaAlbum: String?,
+    expectedMs: Long?,
+    previewUrl: String?,
     allowResume: Boolean,
     promise: Promise,
   ) {
@@ -167,26 +208,59 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
       }
 
       private fun fail(code: String, message: String?) {
+        val stopped = isStopped(jobId)
         releaseSelf()
         SincDownloads.end(jobId)
         clearSpeedSample(jobId)
+        if (stopped) {
+          Log.i(LOG_TAG, "download cancelled jobId=$jobId")
+          promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
+          return
+        }
         Log.w(LOG_TAG, "download failed jobId=$jobId: $code $message")
         promise.reject(code, message ?: "Download failed")
       }
 
       /** Range refused or the part is corrupt: start over exactly once. */
       private fun restartFromZero() {
+        if (isStopped(jobId)) {
+          releaseSelf()
+          SincDownloads.end(jobId)
+          clearSpeedSample(jobId)
+          promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
+          return
+        }
         releaseSelf()
         part.delete()
-        enqueue(jobId, url, headers, target, part, publicName, metaTitle, metaArtist, metaAlbum, false, promise)
+        enqueue(
+          jobId,
+          url,
+          headers,
+          target,
+          part,
+          publicName,
+          metaTitle,
+          metaArtist,
+          metaAlbum,
+          expectedMs,
+          previewUrl,
+          false,
+          promise,
+        )
       }
 
       override fun onFailure(call: Call, e: IOException) {
         // The `.part` survives so a resume/retry continues from the same
         // offset instead of restarting the whole transfer.
+        val stopped = isStopped(jobId)
         releaseSelf()
         SincDownloads.end(jobId)
         clearSpeedSample(jobId)
+        if (stopped) {
+          Log.i(LOG_TAG, "download cancelled jobId=$jobId: ${e.message}")
+          promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
+          return
+        }
         Log.w(LOG_TAG, "download failed jobId=$jobId: ${e.message}")
         promise.reject("DOWNLOAD_ERROR", e.message ?: "Download failed")
       }
@@ -233,7 +307,6 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
               throw IOException("Truncated download ($written of $total bytes)")
             }
             releaseSelf()
-            SincDownloads.end(jobId)
             clearSpeedSample(jobId)
             val drained = target.exists() && target.delete()
             if (!part.renameTo(target)) {
@@ -241,11 +314,98 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
               part.delete()
             }
             if (drained) Log.d(LOG_TAG, "overwrote existing target for jobId=$jobId")
-            // Real duration of the saved file: JS validates it against the
-            // expected track length and falls back to the yt-dlp path when a
-            // provider handed over a preview/compilation segment.
+            // The transfer is done, but the user can still pause/cancel while
+            // the probe and fingerprint verification run. Never publish a file
+            // for a job the user has already stopped.
+            if (isStopped(jobId)) {
+              target.delete()
+              SincDownloads.end(jobId)
+              promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
+              return
+            }
+            // Real duration of the saved file. Reject a preview/compilation
+            // segment BEFORE it is published to Music/Sinc or recorded as a
+            // completed download. An unreadable probe is not allowed to pass
+            // when the catalog length is known — the engine tier can still
+            // fetch a verifiable copy. JS keeps a backstop for callers that
+            // bypass this module.
             val durationMs = SincAudioProbe.probeDuration(target)
+            if (
+              expectedMs != null &&
+              expectedMs > 0L &&
+              !SincDownloadRules.isDurationAcceptable(durationMs, expectedMs)
+            ) {
+              target.delete()
+              SincDownloads.end(jobId)
+              Log.w(
+                LOG_TAG,
+                "download rejected: duration ${durationMs}ms != expected ${expectedMs}ms " +
+                  "for jobId=$jobId"
+              )
+              promise.reject(
+                "DOWNLOAD_UNVERIFIED",
+                "Downloaded file does not match the requested track length"
+              )
+              return
+            }
+            // Length + metadata can still describe the wrong audio (covers,
+            // tributes, same-length edits). Match the finished bytes against the
+            // trusted catalog preview before publishing. No preview means there
+            // is no reference to compare against; every other failure is closed.
+            if (!previewUrl.isNullOrBlank()) {
+              val fingerprint = SincAudioFingerprint.verify(target, previewUrl)
+              when (fingerprint.status) {
+                SincAudioFingerprint.Status.MATCH ->
+                  Log.i(
+                    LOG_TAG,
+                    "fingerprint accepted jobId=$jobId score=${fingerprint.matches}/" +
+                      "${fingerprint.referenceHashes}"
+                  )
+                SincAudioFingerprint.Status.MISMATCH -> {
+                  target.delete()
+                  SincDownloads.end(jobId)
+                  Log.w(
+                    LOG_TAG,
+                    "download rejected: fingerprint ${fingerprint.matches}/" +
+                      "${fingerprint.referenceHashes} for jobId=$jobId"
+                  )
+                  promise.reject(
+                    "DOWNLOAD_FINGERPRINT_MISMATCH",
+                    "Downloaded audio does not match the selected recording"
+                  )
+                  return
+                }
+                SincAudioFingerprint.Status.UNAVAILABLE -> {
+                  target.delete()
+                  SincDownloads.end(jobId)
+                  Log.w(
+                    LOG_TAG,
+                    "download rejected: fingerprint unavailable (${fingerprint.reason}) " +
+                      "for jobId=$jobId"
+                  )
+                  promise.reject(
+                    "DOWNLOAD_FINGERPRINT_UNAVAILABLE",
+                    "Could not verify the downloaded audio against the catalog preview"
+                  )
+                  return
+                }
+                SincAudioFingerprint.Status.NO_REFERENCE ->
+                  Log.w(
+                    LOG_TAG,
+                    "fingerprint skipped jobId=$jobId reason=${fingerprint.reason}"
+                  )
+              }
+            }
+            // The verification can take seconds; a pause/cancel during it must
+            // still win over publishing.
+            if (isStopped(jobId)) {
+              target.delete()
+              SincDownloads.end(jobId)
+              promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
+              return
+            }
             publishToPublicStorage(target, publicName, metaTitle, metaArtist, metaAlbum)
+            SincDownloads.end(jobId)
             promise.resolve(
               Arguments.createMap().apply {
                 putString("localUri", "file://${target.absolutePath}")
@@ -254,10 +414,16 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
               },
             )
           } catch (e: Exception) {
+            val stopped = isStopped(jobId)
             releaseSelf()
             SincDownloads.end(jobId)
             clearSpeedSample(jobId)
-            promise.reject("DOWNLOAD_ERROR", e.message ?: "Download failed")
+            if (stopped) {
+              Log.i(LOG_TAG, "download cancelled jobId=$jobId: ${e.message}")
+              promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
+            } else {
+              promise.reject("DOWNLOAD_ERROR", e.message ?: "Download failed")
+            }
           }
         }
       }

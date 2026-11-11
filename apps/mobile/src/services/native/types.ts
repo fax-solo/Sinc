@@ -71,6 +71,8 @@ export interface NativeDownloadMetadata {
   publicFileName?: string;
   /** Expected track duration (ms) so the probe result can be validated. */
   expectedDurationMs?: number;
+  /** Trusted catalog preview used for content-level fingerprint verification. */
+  previewUrl?: string;
 }
 
 export interface NativeDownloaderModule {
@@ -134,7 +136,9 @@ export interface NativeYtModule {
     artist?: string | null,
     album?: string | null,
     artworkUrl?: string | null,
-    publicFileName?: string | null
+    publicFileName?: string | null,
+    /** Trusted catalog preview used for content-level fingerprint verification. */
+    previewUrl?: string | null
   ): Promise<NativeYtDownload | null>;
   /** Deletes a finished download from the yt output dir; optional on old builds. */
   remove?(fileName: string, publicFileName?: string): Promise<void>;

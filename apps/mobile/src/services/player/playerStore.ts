@@ -18,11 +18,24 @@ interface PlayerState {
 
   playQueue: (tracks: CanonicalTrack[], startIndex?: number) => void;
   playTrack: (track: CanonicalTrack) => void;
+  /** Appends one track. Duplicate ids already in the queue are ignored. */
+  addToQueue: (track: CanonicalTrack) => boolean;
+  /** Appends a collection, de-duplicating against the queue. Returns count added. */
+  addTracksToQueue: (tracks: CanonicalTrack[]) => number;
+  /** Inserts immediately after the current track. */
+  playNext: (track: CanonicalTrack) => boolean;
+  /** Jumps to an absolute queue index without replacing the queue. */
+  jumpTo: (index: number) => boolean;
+  /** Removes an upcoming track. The current track can never be removed. */
+  removeFromQueue: (index: number) => boolean;
+  /** Reorders two upcoming tracks. The current track never moves. */
+  reorderQueue: (fromIndex: number, toIndex: number) => boolean;
   setStatus: (status: PlaybackStatus) => void;
   setError: (message: string | null) => void;
   next: () => void;
   previous: () => void;
   toggleShuffle: () => void;
+  setShuffle: (shuffle: ShuffleMode) => void;
   setRepeat: (repeat: RepeatMode) => void;
   clearQueue: () => void;
 }
@@ -48,6 +61,18 @@ function emptyState(): Pick<
   };
 }
 
+/**
+ * Absolute indices visited in the current shuffle cycle. Kept outside the
+ * persisted store because it is playback-session state; losing it only means
+ * a fresh shuffle cycle after a restart. Tracking it makes repeat=off stop
+ * after every track has played instead of shuffling forever.
+ */
+let shuffleHistory: number[] = [];
+
+function resetShuffleHistory(currentIndex: number): void {
+  shuffleHistory = currentIndex >= 0 ? [currentIndex] : [];
+}
+
 export const usePlayerStore = create<PlayerState>()(
   persist(
     (set, get) => ({
@@ -65,6 +90,7 @@ export const usePlayerStore = create<PlayerState>()(
           return;
         }
         const safeIndex = Math.min(Math.max(0, startIndex), tracks.length - 1);
+        resetShuffleHistory(safeIndex);
         usePlayerProgressStore.getState().reset();
         set({
           queue: tracks,
@@ -75,6 +101,7 @@ export const usePlayerStore = create<PlayerState>()(
       },
 
       playTrack: (track) => {
+        resetShuffleHistory(0);
         usePlayerProgressStore.getState().reset();
         set({
           queue: [track],
@@ -82,6 +109,112 @@ export const usePlayerStore = create<PlayerState>()(
           status: 'loading',
           errorMessage: null,
         });
+      },
+
+      addToQueue: (track) => {
+        const { queue, currentIndex } = get();
+        if (queue.some((t) => t.id === track.id)) return false;
+        if (queue.length === 0) {
+          usePlayerProgressStore.getState().reset();
+          set({
+            queue: [track],
+            currentIndex: 0,
+            status: 'loading',
+            errorMessage: null,
+          });
+          return true;
+        }
+        set({
+          queue: [...queue, track],
+          currentIndex: currentIndex < 0 ? 0 : currentIndex,
+        });
+        return true;
+      },
+
+      addTracksToQueue: (tracks) => {
+        const { queue, currentIndex } = get();
+        const seen = new Set(queue.map((t) => t.id));
+        const additions: CanonicalTrack[] = [];
+        for (const track of tracks) {
+          if (seen.has(track.id)) continue;
+          seen.add(track.id);
+          additions.push(track);
+        }
+        if (additions.length === 0) return 0;
+        if (queue.length === 0) {
+          usePlayerProgressStore.getState().reset();
+          set({
+            queue: additions,
+            currentIndex: 0,
+            status: 'loading',
+            errorMessage: null,
+          });
+          return additions.length;
+        }
+        set({
+          queue: [...queue, ...additions],
+          currentIndex: currentIndex < 0 ? 0 : currentIndex,
+        });
+        return additions.length;
+      },
+
+      playNext: (track) => {
+        const { queue, currentIndex } = get();
+        if (queue.length === 0) {
+          usePlayerProgressStore.getState().reset();
+          set({
+            queue: [track],
+            currentIndex: 0,
+            status: 'loading',
+            errorMessage: null,
+          });
+          return true;
+        }
+        const current = queue[currentIndex];
+        if (current?.id === track.id) return false;
+        if (queue.some((t, index) => index > currentIndex && t.id === track.id)) return false;
+        const insertAt = Math.max(0, currentIndex + 1);
+        const next = [...queue];
+        next.splice(insertAt, 0, track);
+        set({ queue: next });
+        return true;
+      },
+
+      jumpTo: (index) => {
+        const { queue } = get();
+        if (index < 0 || index >= queue.length) return false;
+        resetShuffleHistory(index);
+        usePlayerProgressStore.getState().reset();
+        set({ currentIndex: index, status: 'loading', errorMessage: null });
+        return true;
+      },
+
+      removeFromQueue: (index) => {
+        const { queue, currentIndex } = get();
+        if (index <= currentIndex || index >= queue.length) return false;
+        resetShuffleHistory(currentIndex);
+        set({ queue: queue.filter((_, i) => i !== index) });
+        return true;
+      },
+
+      reorderQueue: (fromIndex, toIndex) => {
+        const { queue, currentIndex } = get();
+        if (
+          fromIndex <= currentIndex ||
+          toIndex <= currentIndex ||
+          fromIndex >= queue.length ||
+          toIndex >= queue.length ||
+          fromIndex === toIndex
+        ) {
+          return false;
+        }
+        const next = [...queue];
+        const [moved] = next.splice(fromIndex, 1);
+        if (!moved) return false;
+        next.splice(toIndex, 0, moved);
+        resetShuffleHistory(currentIndex);
+        set({ queue: next });
+        return true;
       },
 
       setStatus: (status) => set({ status }),
@@ -95,11 +228,30 @@ export const usePlayerStore = create<PlayerState>()(
         let nextIndex: number;
         if (shuffle === 'on') {
           if (queue.length === 1) {
+            if (repeat === 'off') {
+              set({ status: 'ended' });
+              return;
+            }
             nextIndex = currentIndex;
           } else {
-            do {
-              nextIndex = Math.floor(Math.random() * queue.length);
-            } while (nextIndex === currentIndex);
+            if (shuffleHistory[shuffleHistory.length - 1] !== currentIndex) {
+              shuffleHistory.push(currentIndex);
+            }
+            const all = queue.map((_, index) => index);
+            let candidates = all.filter((index) => !shuffleHistory.includes(index));
+            if (candidates.length === 0) {
+              if (repeat === 'off') {
+                set({ status: 'ended' });
+                return;
+              }
+              // Repeat all (or a manual next under repeat one) begins a new
+              // shuffle cycle, excluding the current track.
+              shuffleHistory = [currentIndex];
+              candidates = all.filter((index) => index !== currentIndex);
+            }
+            nextIndex =
+              candidates[Math.floor(Math.random() * candidates.length)] ?? currentIndex;
+            shuffleHistory.push(nextIndex);
           }
         } else {
           nextIndex = currentIndex + 1;
@@ -121,9 +273,20 @@ export const usePlayerStore = create<PlayerState>()(
       },
 
       previous: () => {
-        const { queue, currentIndex } = get();
+        const { queue, currentIndex, shuffle } = get();
         if (queue.length === 0) return;
-        const prevIndex = currentIndex > 0 ? currentIndex - 1 : 0;
+        let prevIndex = currentIndex > 0 ? currentIndex - 1 : 0;
+        if (shuffle === 'on' && shuffleHistory.length > 1) {
+          const position = shuffleHistory.lastIndexOf(currentIndex);
+          if (position > 0) {
+            prevIndex = shuffleHistory[position - 1];
+            shuffleHistory = shuffleHistory.slice(0, position);
+          } else {
+            resetShuffleHistory(prevIndex);
+          }
+        } else {
+          resetShuffleHistory(prevIndex);
+        }
         usePlayerProgressStore.getState().reset();
         set({
           currentIndex: prevIndex,
@@ -131,11 +294,21 @@ export const usePlayerStore = create<PlayerState>()(
         });
       },
 
-      toggleShuffle: () => set({ shuffle: get().shuffle === 'on' ? 'off' : 'on' }),
+      toggleShuffle: () => {
+        const shuffle = get().shuffle === 'on' ? 'off' : 'on';
+        resetShuffleHistory(get().currentIndex);
+        set({ shuffle });
+      },
+
+      setShuffle: (shuffle) => {
+        resetShuffleHistory(get().currentIndex);
+        set({ shuffle });
+      },
 
       setRepeat: (repeat) => set({ repeat }),
 
       clearQueue: () => {
+        resetShuffleHistory(-1);
         usePlayerProgressStore.getState().reset();
         set(emptyState());
       },

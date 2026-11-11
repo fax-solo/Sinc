@@ -21,6 +21,7 @@ interface DeezerTrack {
   release_date?: string;
   explicit_lyrics?: boolean;
   genre_id?: number;
+  preview?: string;
   artist?: { id: number; name: string; picture_medium?: string; picture_big?: string };
   album?: {
     id: number;
@@ -162,6 +163,7 @@ function toTrack(t: DeezerTrack): CanonicalTrack {
     album,
     durationMs: (t.duration ?? 0) * 1000,
     artworkUrl: t.album?.cover_medium ?? t.album?.cover_big,
+    previewUrl: t.preview,
     providerIds: { deezer: String(t.id) },
     releaseDate: t.release_date,
     explicit: t.explicit_lyrics === true,
@@ -265,9 +267,7 @@ export class DeezerAdapter {
   }
 
   /** An artist, their top tracks and albums (used when a chart artist is opened). */
-  async lookupArtist(
-    artistId: string
-  ): Promise<{
+  async lookupArtist(artistId: string): Promise<{
     artist: CanonicalArtist;
     albums: CanonicalAlbum[];
     topTracks: CanonicalTrack[];

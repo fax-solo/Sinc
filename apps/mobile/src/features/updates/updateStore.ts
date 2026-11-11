@@ -22,6 +22,7 @@ import {
   type LatestRelease,
 } from '../../services/updates/appUpdates';
 import { sincNotifications } from '../../services/notifications';
+import { usePreferencesStore } from '../preferences/preferencesStore';
 import { STORAGE_KEYS, storage } from '../../utils/storage';
 
 export type SoftUpdateStatus = 'idle' | 'checking' | 'available' | 'up-to-date' | 'error';
@@ -54,7 +55,12 @@ export const useUpdateStore = create<UpdateState>()(
           latest,
           softStatus: latest ? (result.available ? 'available' : 'up-to-date') : 'error',
         });
-        if (result.available && latest && get().remindedFor !== latest.versionName) {
+        if (
+          result.available &&
+          latest &&
+          get().remindedFor !== latest.versionName &&
+          usePreferencesStore.getState().notifications.updates
+        ) {
           set({ remindedFor: latest.versionName });
           void sincNotifications.showUpdateAvailable(
             latest.versionName,
@@ -86,6 +92,9 @@ export const useUpdateStore = create<UpdateState>()(
           if (get().softStatus === 'checking') return;
           set({ checked: true, softStatus: 'checking' });
           await applyCheck();
+          // A manual check also resets the automatic-check cooldown; otherwise
+          // the next foreground would immediately hit GitHub again.
+          set({ lastCheckAt: Date.now() });
         },
 
         dismissBanner: () => {

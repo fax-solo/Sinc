@@ -22,6 +22,7 @@ interface iTunesTrack {
   trackNumber?: number;
   trackCount?: number;
   artworkUrl100?: string;
+  previewUrl?: string;
   artistId?: number;
   artistName?: string;
   collectionArtistName?: string;
@@ -99,6 +100,7 @@ function toTrack(t: iTunesTrack, preferredArtwork = 300): CanonicalTrack {
     durationMs: t.trackTimeMillis ?? 0,
     trackNumber: t.trackNumber,
     artworkUrl: artworkUrl(t.artworkUrl100, preferredArtwork),
+    previewUrl: t.previewUrl,
     providerIds: { itunes: String(t.trackId) },
     releaseDate: t.releaseDate,
     explicit: t.trackExplicitness === 'explicit',
@@ -219,24 +221,51 @@ export const itunes = {
     return { album, tracks };
   },
 
-  async lookupArtist(
-    artistId: string
-  ): Promise<{
+  async lookupArtist(artistId: string): Promise<{
     artist: CanonicalArtist;
     albums: CanonicalAlbum[];
     topTracks: CanonicalTrack[];
   } | null> {
-    const json = await request<{ results?: Array<iTunesArtistRow & iTunesAlbumRow> }>(
-      `/lookup?id=${encodeURIComponent(artistId)}&entity=album&limit=200&country=${COUNTRY}`
-    );
-    const rows = json.results ?? [];
+    // iTunes exposes an artist's songs (in popularity order) through a second
+    // lookup, but not in the album lookup. Fetch both in parallel so the
+    // artist screen has albums and a populated "Popular" list in one round-trip
+    // window. Song failures are non-fatal: albums alone still make the page
+    // usable when Apple's timed-out response is flaky.
+    const [albumJson, songJson] = await Promise.all([
+      request<{ results?: Array<iTunesArtistRow & iTunesAlbumRow> }>(
+        `/lookup?id=${encodeURIComponent(artistId)}&entity=album&limit=200&country=${COUNTRY}`
+      ),
+      request<{ results?: Array<iTunesArtistRow & iTunesTrack> }>(
+        `/lookup?id=${encodeURIComponent(artistId)}&entity=song&limit=50&country=${COUNTRY}`
+      ).catch(() => ({ results: [] as Array<iTunesArtistRow & iTunesTrack> })),
+    ]);
+    const rows = albumJson.results ?? [];
     const artistRow = rows.find((r) => r.wrapperType === 'artist');
     if (!artistRow) return null;
+
     const albums = rows.filter((r) => r.wrapperType === 'collection').map(toAlbum);
+    const seen = new Set<string>();
+    const topTracks: CanonicalTrack[] = [];
+    for (const row of songJson.results ?? []) {
+      if (row.wrapperType !== 'track' || row.kind !== 'song') continue;
+      const key = `${row.trackName?.trim().toLowerCase() ?? ''}|${
+        row.artistName?.trim().toLowerCase() ?? ''
+      }`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      topTracks.push(toTrack(row));
+      if (topTracks.length >= 20) break;
+    }
+
+    const artist = toArtist(artistRow);
+    const artworkUrl =
+      albums.find((album) => album.artworkUrl)?.artworkUrl ??
+      topTracks.find((track) => track.artworkUrl)?.artworkUrl;
+
     return {
-      artist: toArtist(artistRow),
+      artist: { ...artist, artworkUrl: artist.artworkUrl ?? artworkUrl },
       albums,
-      topTracks: [],
+      topTracks,
     };
   },
 

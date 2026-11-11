@@ -8,14 +8,16 @@ import {
   formatYtSpeed,
   isBadDownloadDuration,
   isTransientDownloadError,
+  isFingerprintError,
   resetDirectSourceMissCache,
 } from './downloadsStore';
 
-const { findArchive, findJamendo, findFma, downloaderMock, ytMock, trackAnalytics } = vi.hoisted(
-  () => ({
+const { findArchive, findJamendo, findFma, previewMock, downloaderMock, ytMock, trackAnalytics } =
+  vi.hoisted(() => ({
     findArchive: vi.fn(),
     findJamendo: vi.fn(),
     findFma: vi.fn(),
+    previewMock: vi.fn(),
     downloaderMock: {
       download: vi.fn((..._args: unknown[]) =>
         Promise.resolve({
@@ -37,14 +39,17 @@ const { findArchive, findJamendo, findFma, downloaderMock, ytMock, trackAnalytic
       })),
     },
     trackAnalytics: vi.fn(),
-  })
-);
+  }));
 
 vi.mock('../providers/download-source', () => ({
   findArchiveSource: findArchive,
   findJamendoSource: findJamendo,
   findFmaSource: findFma,
   searchTitle: (title: string) => title,
+}));
+
+vi.mock('../providers/preview', () => ({
+  resolvePreviewUrl: previewMock,
 }));
 
 vi.mock('../native', () => ({
@@ -94,6 +99,8 @@ beforeEach(() => {
   findArchive.mockReset();
   findJamendo.mockReset();
   findFma.mockReset();
+  previewMock.mockReset();
+  previewMock.mockResolvedValue(null);
   downloaderMock.download.mockClear();
   downloaderMock.remove.mockClear();
   ytMock.available.mockClear();
@@ -141,7 +148,7 @@ describe('downloadsStore (local)', () => {
     expect(called[2]).toBe(safeFileName(track('itunes:1')));
   });
 
-  it('reuses a known soundcloud url for yt-dlp downloads', async () => {
+  it('ignores unverified provider URLs and resolves by strict search instead', async () => {
     const t = track('youtube:1');
     t.providerIds.soundcloud = 'https://soundcloud.com/a/b';
     findArchive.mockResolvedValueOnce(null);
@@ -154,8 +161,11 @@ describe('downloadsStore (local)', () => {
       number,
       unknown,
     ];
-    expect(called[1]).toBe('');
-    expect(called[4]).toBe('https://soundcloud.com/a/b');
+    // A catalog provider id can point at a cover/re-upload; the engine must
+    // search and validate the candidate instead of downloading it blindly.
+    expect(called[1]).toContain('Artist');
+    expect(called[1]).toContain('Track youtube:1');
+    expect(called[4]).toBeNull();
   });
 
   it('does not duplicate in-flight downloads', async () => {
@@ -190,10 +200,12 @@ describe('downloadsStore (local)', () => {
 
   it('rejects a direct download whose probed duration is wrong', () => {
     expect(isBadDownloadDuration(30_000, null)).toBe(true); // preview-length
-    expect(isBadDownloadDuration(0, 180_000)).toBe(false); // probe unavailable → accept
+    expect(isBadDownloadDuration(0, 180_000)).toBe(true); // unverified → fail closed
     expect(isBadDownloadDuration(180_000, undefined)).toBe(false);
     expect(isBadDownloadDuration(180_000, 180_000)).toBe(false);
+    expect(isBadDownloadDuration(174_000, 175_000)).toBe(false); // 1s intro difference
     expect(isBadDownloadDuration(30_000, 180_000)).toBe(true); // 0.17x of expected
+    expect(isBadDownloadDuration(198_000, 210_000)).toBe(true); // 12s off a 3:30 track
     expect(isBadDownloadDuration(500_000, 180_000)).toBe(true); // 2.8x of expected
     expect(isBadDownloadDuration(25 * 60 * 1000, null)).toBe(true); // 25min song?
     expect(isBadDownloadDuration(10 * 60 * 1000, null)).toBe(false);
@@ -216,6 +228,109 @@ describe('downloadsStore (local)', () => {
     expect(downloaderMock.remove).toHaveBeenCalledTimes(1); // bad file cleaned up
     expect(ytMock.download).toHaveBeenCalledTimes(1); // fell through to the engine
     expect(useDownloadsStore.getState().getDownload('itunes:1')?.phase).toBe('completed');
+  });
+
+  it('falls through to yt-dlp when the native layer rejects the direct file length', async () => {
+    findArchive.mockResolvedValueOnce({
+      url: 'https://archive.org/download/x/wrong-song.mp3',
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+      expectedDurationMs: 180_000,
+    });
+    downloaderMock.download.mockRejectedValueOnce(
+      Object.assign(new Error('Downloaded file does not match the requested track length'), {
+        code: 'DOWNLOAD_UNVERIFIED',
+      })
+    );
+    await useDownloadsStore.getState().downloadTrack(track('itunes:1'));
+
+    expect(downloaderMock.download).toHaveBeenCalledTimes(1);
+    expect(ytMock.download).toHaveBeenCalledTimes(1);
+    expect(useDownloadsStore.getState().getDownload('itunes:1')?.phase).toBe('completed');
+  });
+
+  it('passes the trusted catalog preview to the direct and engine tiers', async () => {
+    previewMock.mockResolvedValueOnce('https://preview.test/track.m4a');
+    findArchive.mockResolvedValueOnce({
+      url: 'https://archive.org/download/x/song.mp3',
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+    });
+    await useDownloadsStore.getState().downloadTrack(track('itunes:preview-direct'));
+    expect(downloaderMock.download.mock.calls[0][4]).toMatchObject({
+      previewUrl: 'https://preview.test/track.m4a',
+    });
+
+    resetStore();
+    findArchive.mockResolvedValueOnce(null);
+    findJamendo.mockResolvedValueOnce(null);
+    findFma.mockResolvedValueOnce(null);
+    previewMock.mockResolvedValueOnce('https://preview.test/track2.m4a');
+    await useDownloadsStore.getState().downloadTrack(track('itunes:preview-engine'));
+    const called = ytMock.download.mock.calls[0] as unknown[];
+    expect(called[11]).toBe('https://preview.test/track2.m4a');
+  });
+
+  it('falls through to yt-dlp when the direct audio fails fingerprint verification', async () => {
+    findArchive.mockResolvedValueOnce({
+      url: 'https://archive.org/download/x/wrong-recording.mp3',
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+    });
+    downloaderMock.download.mockRejectedValueOnce(
+      Object.assign(new Error('Downloaded audio does not match the selected recording'), {
+        code: 'DOWNLOAD_FINGERPRINT_MISMATCH',
+      })
+    );
+    await useDownloadsStore.getState().downloadTrack(track('itunes:fingerprint-direct'));
+
+    expect(downloaderMock.download).toHaveBeenCalledTimes(1);
+    expect(ytMock.download).toHaveBeenCalledTimes(1);
+    expect(useDownloadsStore.getState().getDownload('itunes:fingerprint-direct')?.phase).toBe(
+      'completed'
+    );
+  });
+
+  it('retries the engine once without the rejected direct source after a fingerprint mismatch', async () => {
+    findArchive.mockResolvedValueOnce({
+      url: 'https://archive.org/download/x/wrong-recording.mp3',
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+    });
+    downloaderMock.download.mockRejectedValueOnce(
+      Object.assign(new Error(''), { code: 'DOWNLOAD_FINGERPRINT_MISMATCH' })
+    );
+    ytMock.download
+      .mockRejectedValueOnce(
+        Object.assign(new Error(''), { code: 'DOWNLOAD_FINGERPRINT_MISMATCH' })
+      )
+      .mockResolvedValueOnce({
+        localUri: 'file:///sdcard/Sinc/right.mp3',
+        durationMs: 180_000,
+        mimeType: 'audio/mpeg',
+      });
+
+    await useDownloadsStore.getState().downloadTrack(track('itunes:fingerprint-retry'));
+
+    // The direct source is not searched or downloaded again; the engine gets
+    // one fresh resolution and succeeds.
+    expect(findArchive).toHaveBeenCalledTimes(1);
+    expect(downloaderMock.download).toHaveBeenCalledTimes(1);
+    expect(ytMock.download).toHaveBeenCalledTimes(2);
+    expect(useDownloadsStore.getState().getDownload('itunes:fingerprint-retry')?.phase).toBe(
+      'completed'
+    );
+  });
+
+  it('classifies fingerprint rejections from both the code and the message', () => {
+    expect(
+      isFingerprintError(Object.assign(new Error(''), { code: 'DOWNLOAD_FINGERPRINT_MISMATCH' }))
+    ).toBe(true);
+    expect(isFingerprintError(new Error('Could not verify DOWNLOAD_FINGERPRINT_UNAVAILABLE'))).toBe(
+      true
+    );
+    expect(isFingerprintError(new Error('HTTP_500'))).toBe(false);
+    expect(isFingerprintError(Object.assign(new Error(''), { code: 'HTTP_401' }))).toBe(false);
   });
 
   it('falls back to yt-dlp when the direct source transfer fails with an HTTP error', async () => {
@@ -286,6 +401,51 @@ describe('downloadsStore (local)', () => {
     expect(useDownloadsStore.getState().getDownload('itunes:park')?.phase).toBe('completed');
   });
 
+  it('resumes a direct transfer from the original URL instead of re-searching', async () => {
+    const sourceA = {
+      url: 'https://archive.org/download/a/a.mp3',
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+      expectedDurationMs: 180_000,
+    };
+    findArchive.mockResolvedValueOnce(sourceA);
+    downloaderMock.download.mockRejectedValueOnce(
+      new Error('network unreachable during direct transfer')
+    );
+
+    await useDownloadsStore.getState().downloadTrack(track('itunes:resume-direct'));
+    const row = useDownloadsStore.getState().getDownload('itunes:resume-direct');
+    expect(row?.phase).toBe('source');
+    expect(row?.error).toBe('Waiting for connection…');
+    expect(findArchive).toHaveBeenCalledTimes(1);
+
+    await useDownloadsStore.getState().pauseDownload(row!.jobId);
+    // If the provider were searched again it would return a different upload;
+    // the resume must keep appending to the part from the original URL.
+    findArchive.mockResolvedValueOnce({
+      url: 'https://archive.org/download/b/b.mp3',
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+      expectedDurationMs: 180_000,
+    });
+    await useDownloadsStore.getState().resumeDownload(row!.jobId);
+
+    expect(findArchive).toHaveBeenCalledTimes(1);
+    const secondCall = downloaderMock.download.mock.calls[1] as unknown as [
+      string,
+      string,
+      unknown,
+      unknown,
+      unknown,
+      boolean,
+    ];
+    expect(secondCall[1]).toBe(sourceA.url);
+    expect(secondCall[5]).toBe(true);
+    expect(useDownloadsStore.getState().getDownload('itunes:resume-direct')?.phase).toBe(
+      'completed'
+    );
+  });
+
   it('removeDownload drops the row and cleans native files', async () => {
     findArchive.mockResolvedValueOnce({
       url: 'https://archive.org/download/x/song.mp3',
@@ -305,6 +465,28 @@ describe('downloadsStore (local)', () => {
     await expect(
       useDownloadsStore.getState().removeDownload('missing-job')
     ).resolves.toBeUndefined();
+  });
+
+  it('does not mark a native user-cancel as a failed download', async () => {
+    findArchive.mockResolvedValueOnce({
+      url: 'https://archive.org/download/x/song.mp3',
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+    });
+    downloaderMock.download.mockRejectedValueOnce(
+      Object.assign(new Error('Download cancelled'), { code: 'DOWNLOAD_CANCELLED' })
+    );
+
+    await useDownloadsStore.getState().downloadTrack(track('itunes:cancel'));
+
+    // The notification action event may arrive after the native rejection;
+    // the row must stay resumable rather than flip to failed.
+    expect(useDownloadsStore.getState().getDownload('itunes:cancel')?.phase).not.toBe('failed');
+    expect(trackAnalytics).not.toHaveBeenCalledWith(
+      'download:failed',
+      'itunes:cancel',
+      expect.anything()
+    );
   });
 
   it('marks failures permanent and reports them', async () => {

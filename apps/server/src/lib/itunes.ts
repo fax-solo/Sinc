@@ -27,6 +27,7 @@ interface iTunesTrack {
   collectionArtistName?: string;
   trackExplicitness?: string;
   trackTimeMillis?: number;
+  previewUrl?: string;
   country?: string;
 }
 
@@ -111,6 +112,7 @@ function toTrack(t: iTunesTrack, preferredArtwork = 300): CanonicalTrack {
     durationMs: t.trackTimeMillis ?? 0,
     trackNumber: t.trackNumber,
     artworkUrl: artworkUrl(t.artworkUrl100, preferredArtwork),
+    previewUrl: t.previewUrl,
     providerIds: { itunes: String(t.trackId) },
     releaseDate: t.releaseDate,
     explicit: t.trackExplicitness === 'explicit',
@@ -302,9 +304,7 @@ export class ItunesAdapter {
     return { album, tracks };
   }
 
-  async lookupArtist(
-    artistId: string
-  ): Promise<{
+  async lookupArtist(artistId: string): Promise<{
     artist: CanonicalArtist;
     albums: CanonicalAlbum[];
     topTracks: CanonicalTrack[];

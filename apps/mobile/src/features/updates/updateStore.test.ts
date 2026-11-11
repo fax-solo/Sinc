@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UpdateCheckResult, LatestRelease } from '../../services/updates/appUpdates';
 import { useUpdateStore } from './updateStore';
+import { usePreferencesStore } from '../preferences/preferencesStore';
 import { storage, STORAGE_KEYS } from '../../utils/storage';
 
 const { mockedCheckUpdates, mockedNotify } = vi.hoisted(() => ({
@@ -46,6 +47,9 @@ beforeEach(() => {
   mockedCheckUpdates.mockReset();
   mockedNotify.mockReset();
   storage.clear();
+  usePreferencesStore.setState({
+    notifications: { updates: true, downloads: true, imports: true },
+  });
   useUpdateStore.setState({
     checked: false,
     latest: null,
@@ -105,6 +109,27 @@ describe('updateStore reminders', () => {
       '1.2.3',
       'https://github.com/fax-solo/Sinc/releases/latest'
     );
+  });
+
+  it('respects the update-notification preference without burning the reminder', async () => {
+    usePreferencesStore.setState({
+      notifications: { updates: false, downloads: true, imports: true },
+    });
+    mockedCheckUpdates.mockResolvedValue(softResult({ available: true, latest: release() }));
+
+    await useUpdateStore.getState().check();
+
+    expect(useUpdateStore.getState().softStatus).toBe('available');
+    expect(useUpdateStore.getState().remindedFor).toBeNull();
+    expect(mockedNotify).not.toHaveBeenCalled();
+
+    usePreferencesStore.setState({
+      notifications: { updates: true, downloads: true, imports: true },
+    });
+    await useUpdateStore.getState().check({ force: true });
+
+    expect(useUpdateStore.getState().remindedFor).toBe('1.2.3');
+    expect(mockedNotify).toHaveBeenCalledTimes(1);
   });
 
   it('reminds again when a newer release appears', async () => {
