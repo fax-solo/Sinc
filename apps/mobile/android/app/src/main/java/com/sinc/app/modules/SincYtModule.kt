@@ -616,6 +616,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           Log.w(LOG_TAG, "download re-redirected after stale target ($first): $reResolved")
           targetUrl = reResolved
           resolvedJobTargets[jobId] = reResolved
+          SincDownloads.postTransferStarted(jobId)
           downloadInternal(
             targetUrl,
             File(outDir, destinationFileName),

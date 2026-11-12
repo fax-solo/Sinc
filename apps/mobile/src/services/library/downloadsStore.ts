@@ -1044,7 +1044,19 @@ export const useDownloadsStore = create<DownloadsState>()(
 
         setPhaseTransfer: (jobId) => {
           const record = recordByJobId(jobId);
-          if (!record || record.phase !== 'source') return;
+          // The engine can re-resolve a stale stream and start a second
+          // transfer for the same job after a processing/tagging/validating
+          // stage. That transfer action is authoritative and must reset the
+          // stages instead of leaving the row stuck on "Writing tags…".
+          if (
+            !record ||
+            (record.phase !== 'source' &&
+              record.phase !== 'processing' &&
+              record.phase !== 'tagging' &&
+              record.phase !== 'validating')
+          ) {
+            return;
+          }
           upsert(jobId, {
             phase: 'transfer',
             provider: record.provider ?? 'youtube',
@@ -1173,7 +1185,15 @@ if (nativeBridge.downloads.available()) {
       // "resolving source" state immediately (the first % line can lag
       // behind whole seconds of buffered yt-dlp output on slow links).
       const record = recordByJobId(jobId);
-      if (record && record.phase === 'source') store.setPhaseTransfer(jobId);
+      if (
+        record &&
+        (record.phase === 'source' ||
+          record.phase === 'processing' ||
+          record.phase === 'tagging' ||
+          record.phase === 'validating')
+      ) {
+        store.setPhaseTransfer(jobId);
+      }
     }
   });
 

@@ -346,6 +346,14 @@ describe('downloadsStore (local)', () => {
     emitStage(jobId, 'not-a-stage');
     expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('validating');
 
+    // A re-resolved engine transfer resets the stage sequence for this job.
+    useDownloadsStore.getState().setPhaseTransfer(jobId);
+    expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('transfer');
+    emitStage(jobId, 'processing');
+    emitStage(jobId, 'tagging');
+    emitStage(jobId, 'validating');
+    expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('validating');
+
     completeDownload(gates, jobId);
     await pending;
     expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('completed');
