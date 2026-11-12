@@ -639,6 +639,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         // pauses KEEP it so a resume continues the same .part against the
         // same source instead of silently switching uploads.
         resolvedJobTargets.remove(jobId)
+        SincDownloads.postStage(jobId, "validating")
         // Final length guard on the measured file. The old 0.5x-2x window
         // accepted a different song that merely happened to be song-length;
         // require the catalog duration (a few seconds of intro/outro slack),
@@ -2367,9 +2368,11 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         tmp.copyTo(file, overwrite = true)
         tmp.delete()
       }
+      jobId?.let { SincDownloads.postStage(it, "processing") }
       val detected = SincAudioContainer.detectExtension(file)
       val finalFile = if (detected != null) SincAudioContainer.retarget(file, detected) else file
-      finishTaggedFile(finalFile, title, artist, album, artworkUrl)
+      finishTaggedFile(finalFile, title, artist, album, artworkUrl, jobId)
+      jobId?.let { SincDownloads.postStage(it, "validating") }
       val duration = probeAudioDuration(finalFile)
       return DownloadResult(finalFile, mimeTypeForExt(finalFile.extension), duration)
     } catch (e: Exception) {
@@ -2389,8 +2392,11 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     artist: String?,
     album: String?,
     artworkUrl: String?,
+    jobId: String? = null,
   ) {
     try {
+      if (file.extension.lowercase() != "mp3") return
+      jobId?.let { SincDownloads.postStage(it, "tagging") }
       val cover = downloadCover(artworkUrl, file.parentFile ?: return)
       try {
         if (file.extension.lowercase() == "mp3" && cover == null) {
@@ -2525,10 +2531,12 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       //                  the raw file. (Publishing a webm under a `.mp3` name
       //                  is how other players previously showed no artwork or
       //                  artist names.)
+      jobId?.let { SincDownloads.postStage(it, "processing") }
       val stem = template.name.removeSuffix(".mp3")
       val cover = template.parentFile?.let { downloadCover(artworkUrl, it) }
       val mp3Target = File(raw.parentFile, "$stem.mp3")
       val m4aTarget = File(raw.parentFile, "$stem.m4a")
+      jobId?.let { SincDownloads.postStage(it, "tagging") }
       val final: File = when (raw.extension.lowercase(Locale.ROOT)) {
         "mp3" -> if (cover != null) {
           val tagged = File(raw.parentFile, "$stem.tagged.mp3")

@@ -57,6 +57,8 @@ object SincDownloads {
   /** Paused (yt-dlp) jobs kept around so resume finds them. */
   private val paused = ConcurrentHashMap<String, Job>()
   private val progress = ConcurrentHashMap<String, Int>()
+  /** Post-transfer stage ("processing", "tagging", "validating"). */
+  private val stages = ConcurrentHashMap<String, String>()
   /** Jobs whose total byte count is unknown; never render these as a percent. */
   private val indeterminate = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
   private val serviceStarted = AtomicBoolean(false)
@@ -88,6 +90,7 @@ object SincDownloads {
     // old entry behind made a later cancel hit only one of the two maps.
     paused.remove(jobId)
     progress[jobId] = 0
+    stages.remove(jobId)
     indeterminate.remove(jobId)
     ensureServiceRunning()
     refresh()
@@ -131,6 +134,7 @@ object SincDownloads {
   fun cancel(jobId: String) {
     val job = active.remove(jobId) ?: paused.remove(jobId) ?: return
     progress.remove(jobId)
+    stages.remove(jobId)
     indeterminate.remove(jobId)
     job.kill()
     // Cancel means "remove the partial too". Pause deliberately does not run
@@ -152,6 +156,7 @@ object SincDownloads {
   fun discard(jobId: String) {
     val job = active.remove(jobId) ?: paused.remove(jobId) ?: return
     progress.remove(jobId)
+    stages.remove(jobId)
     indeterminate.remove(jobId)
     try {
       job.kill()
@@ -167,6 +172,7 @@ object SincDownloads {
   fun resume(jobId: String) {
     val job = paused.remove(jobId) ?: return
     progress[jobId] = progress[jobId] ?: 0
+    stages.remove(jobId)
     active[jobId] = job.copy(kill = {})
     postAction(jobId, "resume")
     refresh()
@@ -177,6 +183,7 @@ object SincDownloads {
     active.remove(jobId)
     paused.remove(jobId)
     progress.remove(jobId)
+    stages.remove(jobId)
     indeterminate.remove(jobId)
     refresh()
   }
@@ -341,7 +348,27 @@ object SincDownloads {
    * progress bar right at `download start` instead of after up to several
    * buffered seconds of stderr output. */
   fun postTransferStarted(jobId: String) {
+    stages.remove(jobId)
     postAction(jobId, "transfer")
+  }
+
+  /**
+   * Reports real post-transfer work so JS and the notification can say
+   * "Processing audio…", "Writing tags…" or "Verifying audio…" instead of a
+   * frozen / misleading 100% download bar.
+   */
+  fun postStage(jobId: String, stage: String) {
+    if (!active.containsKey(jobId)) return
+    if (stage != "processing" && stage != "tagging" && stage != "validating") return
+    stages[jobId] = stage
+    emit(
+      "SincDownloadStage",
+      Arguments.createMap().apply {
+        putString("jobId", jobId)
+        putString("stage", stage)
+      },
+    )
+    refresh()
   }
 
   private val mainHandler = Handler(Looper.getMainLooper())
@@ -409,10 +436,11 @@ object SincDownloads {
     val pct: Int,
     val paused: Boolean,
     val indeterminate: Boolean,
+    val stage: String?,
   )
 
   private fun describe(): NotifInfo {
-    if (count() == 0) return NotifInfo("Downloads", null, 0, false, false)
+    if (count() == 0) return NotifInfo("Downloads", null, 0, false, false, null)
     val ids = active.keys + paused.keys
     val jobId = ids.last()
     val isPaused = paused.containsKey(jobId)
@@ -423,6 +451,7 @@ object SincDownloads {
       progress[jobId] ?: 0,
       isPaused,
       indeterminate.contains(jobId),
+      stages[jobId],
     )
   }
 
@@ -457,8 +486,15 @@ object SincDownloads {
 
   private fun build(context: Context, info: NotifInfo): Notification {
     ensureChannel(context)
+    val stageText = when (info.stage) {
+      "processing" -> "Processing audio…"
+      "tagging" -> "Writing tags…"
+      "validating" -> "Verifying audio…"
+      else -> null
+    }
     val text = when {
       info.paused -> "Paused ${info.pct}% — tap Resume"
+      stageText != null -> stageText
       info.indeterminate -> "Downloading…"
       else -> "Downloading ${info.pct}%"
     }

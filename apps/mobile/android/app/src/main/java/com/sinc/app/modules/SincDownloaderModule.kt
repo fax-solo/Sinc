@@ -367,6 +367,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
               promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
               return
             }
+            SincDownloads.postStage(jobId, "processing")
             // A provider URL can be `.mp3` while the bytes are Ogg/FLAC. The
             // private name, public name and MIME must all follow the bytes.
             // Sniff BEFORE tagging so the tagger uses the real container.
@@ -375,6 +376,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
             if (detected != null) finalFile = retargetExtension(finalFile, detected)
             // Direct providers send raw files. Write metadata/artwork before
             // probing/publishing, using a lossless remux (never libmp3lame).
+            SincDownloads.postStage(jobId, "tagging")
             SincMediaTagger.tagInPlace(
               finalFile,
               metaTitle,
@@ -391,6 +393,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
             val extension = SincAudioContainer.normalizeExtension(finalFile.extension)
             val mimeType = SincAudioContainer.mimeForExtension(extension)
             val displayName = publicNameWithExtension(publicName, extension)
+            SincDownloads.postStage(jobId, "validating")
             // Real duration of the saved file. Reject a preview/compilation
             // segment BEFORE it is published to Music/Sinc or recorded as a
             // completed download. An unreadable probe is not allowed to pass

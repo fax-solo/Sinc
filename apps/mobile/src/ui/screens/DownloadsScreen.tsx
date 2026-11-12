@@ -131,9 +131,15 @@ export function DownloadsScreen() {
                   ? record.error
                   : record.phase === 'source'
                     ? 'Finding source'
-                    : indeterminate
-                      ? `Downloading…${speed ? ` · ${speed}` : ''}`
-                      : `${Math.round(percent)}%${speed ? ` · ${speed}` : ''}`;
+                    : record.phase === 'processing'
+                      ? 'Processing audio…'
+                      : record.phase === 'tagging'
+                        ? 'Writing tags…'
+                        : record.phase === 'validating'
+                          ? 'Verifying audio…'
+                          : indeterminate
+                            ? `Downloading…${speed ? ` · ${speed}` : ''}`
+                            : `${Math.round(percent)}%${speed ? ` · ${speed}` : ''}`;
             return (
               <View
                 key={record.jobId}

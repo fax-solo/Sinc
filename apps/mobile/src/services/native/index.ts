@@ -3,6 +3,7 @@ import type {
   NativeBridge,
   NativeDownloadActionEvent,
   NativeDownloadActionsModule,
+  NativeDownloadStageEvent,
   NativeDownloaderModule,
   NativePlayerCommand,
   NativePlayerModule,
@@ -176,6 +177,7 @@ function createUnavailableDownloadActions(): NativeDownloadActionsModule {
     cancel: unavailable('downloads.cancel'),
     addActionListener: () => () => {},
     addYtProgressListener: () => () => {},
+    addStageListener: () => () => {},
   };
 }
 
@@ -193,6 +195,10 @@ function createDownloadActions(): NativeDownloadActionsModule {
     },
     addYtProgressListener: (listener: (event: NativeYtProgressEvent) => void) => {
       const sub = emitter.addListener('SincYtProgress', listener);
+      return () => sub.remove();
+    },
+    addStageListener: (listener: (event: NativeDownloadStageEvent) => void) => {
+      const sub = emitter.addListener('SincDownloadStage', listener);
       return () => sub.remove();
     },
   };

@@ -15,34 +15,43 @@ import {
   resetDownloadQueueForTests,
 } from './downloadsStore';
 
-const { findArchive, findJamendo, findFma, previewMock, downloaderMock, ytMock, trackAnalytics } =
-  vi.hoisted(() => ({
-    findArchive: vi.fn(),
-    findJamendo: vi.fn(),
-    findFma: vi.fn(),
-    previewMock: vi.fn(),
-    downloaderMock: {
-      download: vi.fn((..._args: unknown[]): Promise<NativeDownloadResult> =>
-        Promise.resolve({
-          localUri: 'file:///sdcard/Sinc/song.mp3',
-          sizeBytes: 1234,
-          durationMs: 180_000,
-        })
-      ),
-      remove: vi.fn((..._args: unknown[]) => Promise.resolve(undefined)),
-    },
-    ytMock: {
-      available: vi.fn(() => true),
-      resolveStream: vi.fn(),
-      resolveByQuery: vi.fn(),
-      download: vi.fn(async () => ({
-        localUri: 'file:///sdcard/Sinc/dl.mp3',
-        durationMs: 180000,
-        mimeType: 'audio/mpeg',
-      })),
-    },
-    trackAnalytics: vi.fn(),
-  }));
+const {
+  findArchive,
+  findJamendo,
+  findFma,
+  previewMock,
+  downloaderMock,
+  ytMock,
+  trackAnalytics,
+  stageHandlers,
+} = vi.hoisted(() => ({
+  findArchive: vi.fn(),
+  findJamendo: vi.fn(),
+  findFma: vi.fn(),
+  previewMock: vi.fn(),
+  downloaderMock: {
+    download: vi.fn((..._args: unknown[]): Promise<NativeDownloadResult> =>
+      Promise.resolve({
+        localUri: 'file:///sdcard/Sinc/song.mp3',
+        sizeBytes: 1234,
+        durationMs: 180_000,
+      })
+    ),
+    remove: vi.fn((..._args: unknown[]) => Promise.resolve(undefined)),
+  },
+  ytMock: {
+    available: vi.fn(() => true),
+    resolveStream: vi.fn(),
+    resolveByQuery: vi.fn(),
+    download: vi.fn(async () => ({
+      localUri: 'file:///sdcard/Sinc/dl.mp3',
+      durationMs: 180000,
+      mimeType: 'audio/mpeg',
+    })),
+  },
+  trackAnalytics: vi.fn(),
+  stageHandlers: [] as Array<(event: { jobId: string; stage: string }) => void>,
+}));
 
 vi.mock('../providers/download-source', () => ({
   findArchiveSource: findArchive,
@@ -71,9 +80,13 @@ vi.mock('../native', () => ({
     },
     yt: ytMock,
     downloads: {
-      available: () => false,
+      available: () => true,
       addActionListener: vi.fn(() => () => {}),
       addYtProgressListener: vi.fn(() => () => {}),
+      addStageListener: (listener: (event: { jobId: string; stage: string }) => void) => {
+        stageHandlers.push(listener);
+        return () => {};
+      },
     },
   },
 }));
@@ -132,6 +145,10 @@ function completeDownload(gates: Map<string, Deferred<NativeDownloadResult>>, jo
     sizeBytes: 4321,
     durationMs: 180_000,
   });
+}
+
+function emitStage(jobId: string, stage: string): void {
+  for (const handler of stageHandlers) handler({ jobId, stage });
 }
 
 function resetStore() {
@@ -303,6 +320,37 @@ describe('downloadsStore (local)', () => {
     completeDownload(gates, jobIdForTrack(tracks[2]));
     await Promise.all(pending);
     expect(useDownloadsStore.getState().downloads.every((d) => d.phase === 'completed')).toBe(true);
+  });
+
+  it('reports post-transfer stages monotonically and ignores stale events', async () => {
+    const gates = holdDirectDownloads();
+    findArchive.mockResolvedValue({
+      url: 'https://archive.org/download/x/staged.mp3',
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+    });
+    const t = track('itunes:staged');
+    const pending = useDownloadsStore.getState().downloadTrack(t);
+    await vi.waitFor(() => expect(downloaderMock.download).toHaveBeenCalledTimes(1));
+    const jobId = jobIdForTrack(t);
+
+    emitStage(jobId, 'processing');
+    expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('processing');
+    emitStage(jobId, 'tagging');
+    expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('tagging');
+    emitStage(jobId, 'validating');
+    expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('validating');
+    // Late, duplicate and malformed events must not move the row backwards.
+    emitStage(jobId, 'tagging');
+    emitStage(jobId, 'processing');
+    emitStage(jobId, 'not-a-stage');
+    expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('validating');
+
+    completeDownload(gates, jobId);
+    await pending;
+    expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('completed');
+    emitStage(jobId, 'validating');
+    expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('completed');
   });
 
   it('starts a user tap before an earlier bulk import', async () => {

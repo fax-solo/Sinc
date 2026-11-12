@@ -169,7 +169,15 @@ export interface NativeYtProgressEvent {
 /** A download action triggered from the notification (or native side). */
 export interface NativeDownloadActionEvent {
   jobId: string;
-  action: 'paused' | 'cancelled' | 'resume';
+  action: 'paused' | 'cancelled' | 'resume' | 'transfer';
+}
+
+/** Work that happens after the byte transfer but before completion. */
+export type NativeDownloadStage = 'processing' | 'tagging' | 'validating';
+
+export interface NativeDownloadStageEvent {
+  jobId: string;
+  stage: NativeDownloadStage;
 }
 
 /** Bridge to pause / cancel running downloads from JS. */
@@ -179,6 +187,7 @@ export interface NativeDownloadActionsModule {
   cancel(jobId: string): Promise<void>;
   addActionListener(listener: (event: NativeDownloadActionEvent) => void): () => void;
   addYtProgressListener(listener: (event: NativeYtProgressEvent) => void): () => void;
+  addStageListener(listener: (event: NativeDownloadStageEvent) => void): () => void;
 }
 
 /** Raw result of a provider GET performed by the native HTTP bridge. */

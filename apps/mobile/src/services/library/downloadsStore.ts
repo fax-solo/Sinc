@@ -16,6 +16,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import type { CanonicalTrack } from '@sinc/shared';
 import { config } from '../../app/config';
 import { nativeBridge } from '../native';
+import type { NativeDownloadStage } from '../native/types';
 import { useLyricsStore } from '../lyrics/lyricsStore';
 import { track as trackAnalytics } from '../analytics/analytics';
 import { storage, STORAGE_KEYS } from '../../utils/storage';
@@ -30,14 +31,47 @@ import {
 } from '../providers/download-source';
 import { resolvePreviewUrl } from '../providers/preview';
 
-export type DownloadPhase = 'queued' | 'source' | 'transfer' | 'completed' | 'failed';
+export type DownloadPhase =
+  | 'queued'
+  | 'source'
+  | 'transfer'
+  | 'processing'
+  | 'tagging'
+  | 'validating'
+  | 'completed'
+  | 'failed';
 
 /** User taps jump bulk imports; restart resumes queue behind both. */
 export type DownloadPriority = 'user' | 'resume' | 'bulk';
 
 /** True while a record still owns a queue slot or a native transfer. */
 export function isDownloadInProgress(phase: DownloadPhase): boolean {
-  return phase === 'queued' || phase === 'source' || phase === 'transfer';
+  return (
+    phase === 'queued' ||
+    phase === 'source' ||
+    phase === 'transfer' ||
+    phase === 'processing' ||
+    phase === 'tagging' ||
+    phase === 'validating'
+  );
+}
+
+/** Monotonic native stages: late/duplicate events must not move backwards. */
+const DOWNLOAD_STAGE_RANK: Record<NativeDownloadStage, number> = {
+  processing: 2,
+  tagging: 3,
+  validating: 4,
+};
+
+const IN_PROGRESS_RANK: Partial<Record<DownloadPhase, number>> = {
+  transfer: 1,
+  processing: 2,
+  tagging: 3,
+  validating: 4,
+};
+
+function isNativeDownloadStage(value: unknown): value is NativeDownloadStage {
+  return value === 'processing' || value === 'tagging' || value === 'validating';
 }
 
 export interface DownloadRecord {
@@ -630,6 +664,26 @@ export const useDownloadsStore = create<DownloadsState>()(
             }
             progressStore.setSpeed(e.jobId, formatSpeed(e.speedBytesPerSec));
           }
+        });
+      }
+
+      // Native emits these only after the transfer is complete. They are
+      // monotonic: a duplicate, late, or malformed event cannot move a row
+      // backwards (or revive a completed/failed row).
+      if (nativeBridge.downloads.available()) {
+        nativeBridge.downloads.addStageListener((event) => {
+          if (!event || typeof event.jobId !== 'string' || !isNativeDownloadStage(event.stage)) {
+            return;
+          }
+          const record = recordByJobId(event.jobId);
+          if (!record || !isDownloadInProgress(record.phase)) return;
+          const currentRank = IN_PROGRESS_RANK[record.phase];
+          const nextRank = DOWNLOAD_STAGE_RANK[event.stage];
+          if (currentRank == null || nextRank <= currentRank) return;
+          upsert(event.jobId, { phase: event.stage, error: undefined });
+          // A stale byte rate from the transfer must not sit next to
+          // "Processing audio…" / "Verifying audio…".
+          useDownloadProgressStore.getState().setSpeed(event.jobId, null);
         });
       }
 
