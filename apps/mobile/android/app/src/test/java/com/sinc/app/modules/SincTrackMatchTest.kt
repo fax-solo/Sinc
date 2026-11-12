@@ -355,6 +355,26 @@ class SincTrackMatchTest {
   }
 
   @Test
+  fun `searchTitle preserves live radio and bracketed variants`() {
+    assertEquals("Song (Live)", searchTitle("Song (Live)"))
+    assertEquals("Song [Live]", searchTitle("Song [Live]"))
+    assertEquals("Song (Radio Edit)", searchTitle("Song (Radio Edit)"))
+    assertEquals("Song [Radio Edit]", searchTitle("Song [Radio Edit]"))
+    assertEquals("Song [Remix]", searchTitle("Song [Remix]"))
+    assertEquals("Song (Live at Wembley)", searchTitle("Song (Live at Wembley)"))
+    assertEquals("Song (Remixes)", searchTitle("Song (Remixes)"))
+    assertEquals("Song - Live", searchTitle("Song - Live"))
+  }
+
+  @Test
+  fun `searchTitle drops bracketed noise anywhere and keeps requested variants`() {
+    assertEquals("Song (Live)", searchTitle("Song (Live) [Official Audio]"))
+    assertEquals("Song", searchTitle("Song [Official Audio]"))
+    assertEquals("Song", searchTitle("Song (feat. Someone)"))
+    assertEquals("Song", searchTitle("Song (Alive)"))
+  }
+
+  @Test
   fun `titleGate via uploader or containment`() {
     assertTrue(titleGate("Daylight", "Ariana Grande", "Daylight", "Ariana Grande - Topic").passed)
     assertTrue(titleGate("Daylight", "Ariana Grande", "Daylight (Official Audio)", "whatever").viaContainment)

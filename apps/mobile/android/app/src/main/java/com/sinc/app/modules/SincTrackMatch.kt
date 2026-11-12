@@ -138,26 +138,24 @@ object SincTrackMatch {
       .any { tag -> hasTag(r, tag) && !hasTag(q, tag) }
   }
 
-  /** Keeps variant tags like "(Remix)"/" - Live" but drops alt-title parens. */
-  fun searchTitle(title: String): String {
-    var out = title
-      .trim()
-      .replace(Regex("\\([^)]*live[^)]*\\)", RegexOption.IGNORE_CASE), "")
-      .replace(Regex("\\([^)]*radio[^)]*\\)", RegexOption.IGNORE_CASE), "")
-      .replace(Regex("\\[[^\\]]+\\]"), "")
+  /**
+   * Keeps requested variant groups like "(Live)"/"[Radio Edit]" but drops
+   * alt-title bracketed noise such as "[Official Audio]" and "(feat. X)".
+   */
+  private val searchVariantWord = Regex(
+    """\b(?:remix|edit|mix|version|rework|instrumental|acoustic|demo|live|radio|extended)(?:s|es|ed|ing)?\b""",
+    RegexOption.IGNORE_CASE
+  )
+
+  private val searchVariantGroup = Regex("""\s*(\([^)]*\)|\[[^\]]*\])""")
+
+  fun searchTitle(title: String): String =
+    title.trim()
+      .replace(searchVariantGroup) { match ->
+        if (searchVariantWord.containsMatchIn(match.value)) match.value else ""
+      }
       .replace(Regex("\\s+"), " ")
       .trim()
-    val parens = Regex("\\(.+\\)$").find(out)
-    if (parens != null) {
-      val inner = parens.value.substring(1, parens.value.length - 1).lowercase(Locale.ROOT)
-      val isVariant = Regex(
-        "remix|edit|mix\\b|version|rework|instrumental|acoustic|demo|live|radio|extended",
-        RegexOption.IGNORE_CASE
-      ).containsMatchIn(inner)
-      if (!isVariant) out = out.substring(0, out.length - parens.value.length).trim()
-    }
-    return out
-  }
 
   fun stripVariantTags(title: String): String {
     val withoutParens = title.replace(Regex("\\(([^)]*)\\)"), " $1 ")

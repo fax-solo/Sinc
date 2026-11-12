@@ -72,24 +72,18 @@ export function searchQuery(track: CanonicalTrack): string {
   return `${track.artists[0]?.name ?? 'Unknown'} - ${searchTitle(track.title)}`;
 }
 
-/** Keeps variant tags like "(Remix)"/" - Live" but drops alt-title parens. */
+/** Keeps requested variant groups like "(Live)"/"[Radio Edit]" but drops alt titles. */
+const SEARCH_VARIANT_WORD =
+  /\b(?:remix|edit|mix|version|rework|instrumental|acoustic|demo|live|radio|extended)(?:s|es|ed|ing)?\b/i;
+
 export function searchTitle(title: string): string {
-  let out = title
+  return title
     .trim()
-    .replace(/\([^)]+live[^)]*\)/gi, '')
-    .replace(/\([^)]+radio[^)]*\)/gi, '')
-    .replace(/\[[^\]]+\]/g, '')
+    .replace(/\s*(\([^)]*\)|\[[^\]]*\])/g, (group) =>
+      SEARCH_VARIANT_WORD.test(group) ? group : ''
+    )
     .replace(/\s+/g, ' ')
     .trim();
-  const parens = out.match(/\(.+\)$/);
-  if (parens) {
-    const inner = parens[0].slice(1, -1).toLowerCase();
-    // Keep clear variants, drop anything else parenthesized (alt titles).
-    const isVariant =
-      /remix|edit|mix\b|version|rework|instrumental|acoustic|demo|live|radio|extended/.test(inner);
-    if (!isVariant) out = out.slice(0, -parens[0].length).trim();
-  }
-  return out;
 }
 
 // --- shared request-vs-candidate validation ----------------------------------

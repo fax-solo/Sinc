@@ -7,6 +7,7 @@ import {
   pickArchiveFile,
   pickArchiveTrack,
   scoreArchiveFile,
+  searchTitle,
   validateDownloadHit,
   validateSearchHit,
 } from './download-source';
@@ -63,6 +64,40 @@ describe('extensionForDownloadSource', () => {
         mimeType: 'application/octet-stream',
       })
     ).toBe('mp3');
+  });
+});
+
+describe('searchTitle', () => {
+  it('preserves requested live, radio and bracketed variants', () => {
+    expect(searchTitle('Song (Live)')).toBe('Song (Live)');
+    expect(searchTitle('Song [Live]')).toBe('Song [Live]');
+    expect(searchTitle('Song (Radio Edit)')).toBe('Song (Radio Edit)');
+    expect(searchTitle('Song [Radio Edit]')).toBe('Song [Radio Edit]');
+    expect(searchTitle('Song [Remix]')).toBe('Song [Remix]');
+    expect(searchTitle('Song (Live at Wembley)')).toBe('Song (Live at Wembley)');
+    expect(searchTitle('Song (Remixes)')).toBe('Song (Remixes)');
+    expect(searchTitle('Song - Live')).toBe('Song - Live');
+  });
+
+  it('still drops bracketed noise and alt titles anywhere in the title', () => {
+    expect(searchTitle('Song (Live) [Official Audio]')).toBe('Song (Live)');
+    expect(searchTitle('Song [Official Audio]')).toBe('Song');
+    expect(searchTitle('Song (feat. Someone)')).toBe('Song');
+    expect(searchTitle('Song (Alive)')).toBe('Song');
+  });
+
+  it('keeps the requested variant through download validation', () => {
+    const requested = searchTitle('Daylight (Live)');
+    expect(
+      validateDownloadHit(
+        requested,
+        'Ariana Grande',
+        'Daylight (Live)',
+        'Ariana Grande',
+        260_000,
+        260_000
+      )
+    ).toBe(true);
   });
 });
 
