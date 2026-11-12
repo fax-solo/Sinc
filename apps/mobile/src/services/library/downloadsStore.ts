@@ -30,7 +30,15 @@ import {
 } from '../providers/download-source';
 import { resolvePreviewUrl } from '../providers/preview';
 
-export type DownloadPhase = 'source' | 'transfer' | 'completed' | 'failed';
+export type DownloadPhase = 'queued' | 'source' | 'transfer' | 'completed' | 'failed';
+
+/** User taps jump bulk imports; restart resumes queue behind both. */
+export type DownloadPriority = 'user' | 'resume' | 'bulk';
+
+/** True while a record still owns a queue slot or a native transfer. */
+export function isDownloadInProgress(phase: DownloadPhase): boolean {
+  return phase === 'queued' || phase === 'source' || phase === 'transfer';
+}
 
 export interface DownloadRecord {
   jobId: string;
@@ -53,7 +61,10 @@ interface DownloadsState {
   pausedIds: ReadonlySet<string>;
   isDownloaded: (trackId: string) => boolean;
   getDownload: (trackId: string) => DownloadRecord | undefined;
-  downloadTrack: (track: CanonicalTrack, opts?: { resumePart?: boolean }) => Promise<void>;
+  downloadTrack: (
+    track: CanonicalTrack,
+    opts?: { resumePart?: boolean; priority?: DownloadPriority }
+  ) => Promise<void>;
   pauseDownload: (jobId: string) => Promise<void>;
   resumeDownload: (jobId: string) => Promise<void>;
   cancelDownload: (jobId: string) => Promise<void>;
@@ -68,34 +79,137 @@ interface DownloadsState {
 
 const PROGRESS_THROTTLE_MS = 250;
 
-/** Job ids currently being transferred this session (blocks duplicate taps). */
-const activeJobs = new Set<string>();
-/** Parallel resume lane count: resumes overlap instead of summing minutes. */
-const RESUME_CONCURRENCY = 2;
+/**
+ * Two transfers at a time matches the native yt-dlp pool. More than that
+ * saturates phone I/O and made every job slower; fewer leaves the engine idle.
+ */
+export const MAX_CONCURRENT_DOWNLOADS = 2;
 
-async function runWithConcurrency<T>(
-  items: T[],
-  limit: number,
-  task: (item: T, index: number) => Promise<void>
-): Promise<void> {
-  let next = 0;
-  const lanes = Math.max(1, Math.min(limit, items.length));
-  await Promise.all(
-    Array.from({ length: lanes }, async () => {
-      while (next < items.length) {
-        const index = next;
-        next += 1;
-        try {
-          await task(items[index], index);
-        } catch {
-          // Individual failures must not abort the batch.
-        }
-      }
-    })
-  );
+const PRIORITY_RANK: Record<DownloadPriority, number> = {
+  user: 0,
+  resume: 1,
+  bulk: 2,
+};
+
+interface QueuedDownload {
+  jobId: string;
+  priority: DownloadPriority;
+  order: number;
+  run: () => Promise<void>;
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+  cancelled: boolean;
 }
+
+const downloadQueue: QueuedDownload[] = [];
+const queuedDownloads = new Map<string, QueuedDownload>();
+const runningDownloads = new Map<string, Promise<void>>();
+let runningDownloadCount = 0;
+let queueOrder = 0;
+
+function hasScheduledDownload(jobId: string): boolean {
+  return queuedDownloads.has(jobId) || runningDownloads.has(jobId);
+}
+
+function hasRunningDownload(jobId: string): boolean {
+  return runningDownloads.has(jobId);
+}
+
+function pumpDownloadQueue(): void {
+  while (runningDownloadCount < MAX_CONCURRENT_DOWNLOADS && downloadQueue.length > 0) {
+    const entry = downloadQueue.shift();
+    if (!entry) return;
+    queuedDownloads.delete(entry.jobId);
+    if (entry.cancelled) {
+      entry.resolve();
+      continue;
+    }
+    runningDownloadCount += 1;
+    const running = (async () => {
+      try {
+        await entry.run();
+        entry.resolve();
+      } catch (error) {
+        entry.reject(error);
+      } finally {
+        runningDownloadCount = Math.max(0, runningDownloadCount - 1);
+        runningDownloads.delete(entry.jobId);
+        pumpDownloadQueue();
+      }
+    })();
+    runningDownloads.set(entry.jobId, running);
+  }
+}
+
+/**
+ * Enqueues one job and resolves only when its run settles. A duplicate call
+ * returns the existing queued/running promise instead of starting a second
+ * native transfer or resetting the row.
+ */
+function scheduleDownload(
+  jobId: string,
+  priority: DownloadPriority,
+  run: () => Promise<void>
+): Promise<void> {
+  const queued = queuedDownloads.get(jobId);
+  if (queued) return queued.promise;
+  const running = runningDownloads.get(jobId);
+  if (running) return running;
+
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  const entry: QueuedDownload = {
+    jobId,
+    priority,
+    order: queueOrder,
+    run,
+    promise,
+    resolve,
+    reject,
+    cancelled: false,
+  };
+  queueOrder += 1;
+  queuedDownloads.set(jobId, entry);
+  downloadQueue.push(entry);
+  // Stable priority order: a later user tap starts before an earlier bulk item.
+  downloadQueue.sort(
+    (a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || a.order - b.order
+  );
+  pumpDownloadQueue();
+  return promise;
+}
+
+/** Drops a not-yet-started job; active jobs are stopped through the native bridge. */
+function cancelQueuedDownload(jobId: string): boolean {
+  const entry = queuedDownloads.get(jobId);
+  if (!entry) return false;
+  entry.cancelled = true;
+  queuedDownloads.delete(jobId);
+  entry.resolve();
+  pumpDownloadQueue();
+  return true;
+}
+
 /** Session tokens so a killed run's rejection can't clobber a newer launch. */
 const launchToken = new Map<string, number>();
+
+/** Test isolation: callers must have settled real runs before resetting. */
+export function resetDownloadQueueForTests(): void {
+  for (const entry of [...queuedDownloads.values()]) {
+    entry.cancelled = true;
+    entry.resolve();
+  }
+  downloadQueue.length = 0;
+  queuedDownloads.clear();
+  runningDownloads.clear();
+  runningDownloadCount = 0;
+  launchToken.clear();
+}
 
 /** Finds the persisted record for a native event by jobId, if any. */
 function recordByJobId(jobId: string): DownloadRecord | undefined {
@@ -411,6 +525,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Wakes promptly when a pause/cancel invalidates the retry wait. */
+async function sleepUnlessStopped(ms: number, stopped: () => boolean): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (stopped()) return;
+    await sleep(Math.min(250, deadline - Date.now()));
+  }
+}
+
 // App-foreground resume: a reconnect *event* can be missed when NetInfo was
 // already offline at listener setup, so parked jobs also re-check whenever
 // the app becomes active and on a slow timer while any job is parked.
@@ -523,8 +646,7 @@ export const useDownloadsStore = create<DownloadsState>()(
           const jobId = jobIdForTrack(track);
           const existing = get().getDownload(track.id);
           if (existing?.phase === 'completed') return;
-          if (activeJobs.has(jobId)) return;
-          activeJobs.add(jobId);
+          if (hasScheduledDownload(jobId)) return;
           // Retries and resumes continue from any surviving `.part` rather
           // than trashing bytes the first attempt already transferred.
           let resumeNext = Boolean(opts?.resumePart);
@@ -534,7 +656,7 @@ export const useDownloadsStore = create<DownloadsState>()(
           let skipDirectAfterFingerprint = false;
 
           const downloads = [
-            { jobId, track, phase: 'source' as DownloadPhase, progress: 0, createdAt: Date.now() },
+            { jobId, track, phase: 'queued' as DownloadPhase, progress: 0, createdAt: Date.now() },
             ...get().downloads.filter((d) => d.jobId !== jobId),
           ];
           set({ downloads, downloadedIds: deriveDownloadedIds(downloads) });
@@ -543,6 +665,7 @@ export const useDownloadsStore = create<DownloadsState>()(
           set({ pausedIds });
           const progressStore = useDownloadProgressStore.getState();
           progressStore.setProgress(jobId, 0);
+          progressStore.setIndeterminate(jobId, false);
           progressStore.setSpeed(jobId, null);
           waitingForConnection.delete(jobId);
           const token = (launchToken.get(jobId) ?? 0) + 1;
@@ -575,7 +698,12 @@ export const useDownloadsStore = create<DownloadsState>()(
               const extension = extensionForDownloadSource(direct);
               const privateName = safeFileName(track, extension);
               const publicName = publicFileName(track, extension);
-              upsert(jobId, { phase: 'transfer', progress: 5, provider: direct.provider });
+              upsert(jobId, {
+                phase: 'transfer',
+                progress: 5,
+                provider: direct.provider,
+                error: undefined,
+              });
               useDownloadProgressStore.getState().setIndeterminate(jobId, true);
               let result: Awaited<ReturnType<typeof nativeBridge.downloader.download>> | null =
                 null;
@@ -661,7 +789,7 @@ export const useDownloadsStore = create<DownloadsState>()(
             if (!nativeBridge.yt.available()) {
               throw new Error('The on-device media engine is not linked (yt-dlp).');
             }
-            upsert(jobId, { phase: 'source', progress: 10 });
+            upsert(jobId, { phase: 'source', progress: 10, error: undefined });
             const query = `${track.artists[0]?.name ?? 'unknown'} - ${searchTitle(track.title)}`;
             const result = await nativeBridge.yt.download(
               jobId,
@@ -694,7 +822,11 @@ export const useDownloadsStore = create<DownloadsState>()(
             });
           };
 
-          try {
+          const run = async (): Promise<void> => {
+            // The scheduler may start this run after other queued jobs.
+            // Cancellation/pause can also win the race while it waits.
+            if (stopped()) return;
+            upsert(jobId, { phase: 'source', progress: 0, error: undefined });
             previewUrl = await resolvePreviewUrl(track).catch(() => null);
             if (launchToken.get(jobId) !== token) return;
             if (get().pausedIds.has(jobId)) return;
@@ -749,7 +881,7 @@ export const useDownloadsStore = create<DownloadsState>()(
                     phase: 'source',
                     error: `Retrying in ${Math.round(delayMs / 1000)}s…`,
                   });
-                  await sleep(delayMs);
+                  await sleepUnlessStopped(delayMs, stopped);
                   if (launchToken.get(jobId) !== token) return;
                   if (get().pausedIds.has(jobId)) return;
                   resumeNext = true;
@@ -776,21 +908,20 @@ export const useDownloadsStore = create<DownloadsState>()(
                 return;
               }
             }
-          } finally {
-            activeJobs.delete(jobId);
-          }
+          };
+          return scheduleDownload(jobId, opts?.priority ?? 'user', run);
         },
 
         pauseDownload: async (jobId) => {
           const record = recordByJobId(jobId);
           if (!record) return;
           if (record.phase === 'completed' || record.phase === 'failed') return;
-          // Parked jobs ("Waiting for connection…") have NO active worker —
-          // the old activeJobs guard made Pause a dead button on those rows
-          // while the park poller kept auto-reviving them against the user's
-          // wishes. Paused ids are honored by every resume path.
+          // Parked jobs ("Waiting for connection…") have NO active worker;
+          // queued jobs have not started either. Both must still be pausable,
+          // and the queue entry must be dropped so the scheduler cannot start
+          // them behind the user's back.
           const wasPaused = get().pausedIds.has(jobId);
-          activeJobs.delete(jobId);
+          const wasQueued = cancelQueuedDownload(jobId);
           launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
           waitingForConnection.delete(jobId);
           if (!wasPaused) {
@@ -798,6 +929,7 @@ export const useDownloadsStore = create<DownloadsState>()(
             pausedIds.add(jobId);
             set({ pausedIds });
           }
+          if (wasQueued) return;
           try {
             await nativeBridge.downloads.pause(jobId);
           } catch {
@@ -814,12 +946,19 @@ export const useDownloadsStore = create<DownloadsState>()(
           pausedIds.delete(jobId);
           set({ pausedIds });
           launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
-          await get().downloadTrack(record.track, { resumePart: true });
+          // A native pause rejects asynchronously. Let the old run release
+          // its scheduler slot before queuing the resume, otherwise the same
+          // job id would be treated as a duplicate and never restart.
+          const interrupted = runningDownloads.get(jobId);
+          if (interrupted) await interrupted;
+          if (get().pausedIds.has(jobId)) return;
+          await get().downloadTrack(record.track, { resumePart: true, priority: 'resume' });
         },
 
         cancelDownload: async (jobId) => {
           const record = recordByJobId(jobId);
-          activeJobs.delete(jobId);
+          const wasQueued = cancelQueuedDownload(jobId);
+          const wasRunning = hasRunningDownload(jobId) || waitingForConnection.has(jobId);
           directJobSources.delete(jobId);
           launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
           const pausedIds = new Set(get().pausedIds);
@@ -830,10 +969,12 @@ export const useDownloadsStore = create<DownloadsState>()(
           set({ downloads, downloadedIds: deriveDownloadedIds(downloads), pausedIds });
           waitingForConnection.delete(jobId);
           useDownloadProgressStore.getState().clearProgress(jobId);
-          try {
-            await nativeBridge.downloads.cancel(jobId);
-          } catch {
-            // Native already gone; state is what matters here.
+          if (!wasQueued && wasRunning) {
+            try {
+              await nativeBridge.downloads.cancel(jobId);
+            } catch {
+              // Native already gone; state is what matters here.
+            }
           }
           if (record) await removeNativeArtifacts(record);
         },
@@ -844,13 +985,17 @@ export const useDownloadsStore = create<DownloadsState>()(
           if (record.phase !== 'failed') return;
           // Transient errors already auto-retry; this is the manual path for
           // definitive failures (extraction blocked, no validated source…).
-          await get().downloadTrack(record.track, { resumePart: true });
+          await get().downloadTrack(record.track, { resumePart: true, priority: 'user' });
         },
 
         setPhaseTransfer: (jobId) => {
           const record = recordByJobId(jobId);
           if (!record || record.phase !== 'source') return;
-          upsert(jobId, { phase: 'transfer', provider: record.provider ?? 'youtube' });
+          upsert(jobId, {
+            phase: 'transfer',
+            provider: record.provider ?? 'youtube',
+            error: undefined,
+          });
           // No progress sample yet: show "Downloading…" rather than a stale
           // 0%/source percentage until the first measured byte arrives.
           useDownloadProgressStore.getState().setIndeterminate(jobId, true);
@@ -858,17 +1003,18 @@ export const useDownloadsStore = create<DownloadsState>()(
 
         resumeInFlight: async () => {
           const inFlight = get()
-            .downloads.filter((d) => d.phase === 'source' || d.phase === 'transfer')
+            .downloads.filter((d) => isDownloadInProgress(d.phase))
             .sort((a, b) => b.createdAt - a.createdAt);
-          await runWithConcurrency(inFlight, RESUME_CONCURRENCY, async (record, index) => {
-            if (get().pausedIds.has(record.jobId)) return;
-            // Staggered starts: the newest job — the one the user most likely
-            // just tapped — hits the lookup gates NOW; older jobs enter
-            // seconds apart instead of all queueing behind each other at boot
-            // (that pile-up is what made every resume feel 1-3 minutes slow).
-            await new Promise((r) => setTimeout(r, index * 7_000));
-            await get().downloadTrack(record.track, { resumePart: true });
-          });
+          // A new process has no in-memory source/target map. Appending new
+          // source bytes to a partial from the previous process can silently
+          // corrupt the file, so restart with a fresh transfer. Same-session
+          // pause/retry still resumes the original `.part`.
+          const pendingResumes = inFlight
+            .filter((record) => !get().pausedIds.has(record.jobId))
+            .map((record) =>
+              get().downloadTrack(record.track, { resumePart: false, priority: 'resume' })
+            );
+          await Promise.allSettled(pendingResumes);
         },
 
         resumeWaiting: async () => {
@@ -883,10 +1029,10 @@ export const useDownloadsStore = create<DownloadsState>()(
             records.push(record);
           }
           records.sort((a, b) => b.createdAt - a.createdAt);
-          await runWithConcurrency(records, RESUME_CONCURRENCY, async (record, index) => {
-            await new Promise((r) => setTimeout(r, index * 7_000));
-            await get().downloadTrack(record.track, { resumePart: true });
-          });
+          const pendingResumes = records.map((record) =>
+            get().downloadTrack(record.track, { resumePart: true, priority: 'resume' })
+          );
+          await Promise.allSettled(pendingResumes);
         },
 
         removeDownload: async (jobId) => {
@@ -898,11 +1044,12 @@ export const useDownloadsStore = create<DownloadsState>()(
           // and on finish published the "deleted" song into Music/Sinc. After
           // a token bump any running worker's checkpoints become stale and it
           // exits without upserting a finished record for the removed row.
-          const wasInFlight = activeJobs.has(jobId) || waitingForConnection.has(jobId);
+          const wasQueued = cancelQueuedDownload(jobId);
+          const wasInFlight =
+            !wasQueued && (hasRunningDownload(jobId) || waitingForConnection.has(jobId));
+          launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
+          waitingForConnection.delete(jobId);
           if (wasInFlight) {
-            activeJobs.delete(jobId);
-            launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
-            waitingForConnection.delete(jobId);
             try {
               await nativeBridge.downloads.cancel(jobId);
             } catch {
@@ -960,7 +1107,7 @@ if (nativeBridge.downloads.available()) {
     const store = useDownloadsStore.getState();
     if (action === 'cancelled') {
       const record = recordByJobId(jobId);
-      if (record && (record.phase === 'source' || record.phase === 'transfer')) {
+      if (record && isDownloadInProgress(record.phase)) {
         void store.cancelDownload(jobId);
       }
     } else if (action === 'paused') {

@@ -23,7 +23,7 @@ import {
 import { usePlayerProgressStore } from '../../services/player/playerProgressStore';
 import { playerService } from '../../services/player/PlayerService';
 import { useLibraryStore } from '../../services/library/libraryStore';
-import { useDownloadsStore } from '../../services/library/downloadsStore';
+import { isDownloadInProgress, useDownloadsStore } from '../../services/library/downloadsStore';
 import { openSongMenu } from '../songMenu/songMenuStore';
 import { formatDuration } from '../../utils/format';
 import { shareEntity } from '../../utils/share';
@@ -118,7 +118,7 @@ export function PlayerScreen() {
   const favorite = favoriteIds.has(track.id);
   const download = downloads.find((record) => record.track.id === track.id);
   const downloaded = download?.phase === 'completed' && Boolean(download.localUri);
-  const downloading = download?.phase === 'source' || download?.phase === 'transfer';
+  const downloading = download ? isDownloadInProgress(download.phase) : false;
   const playing = status === 'playing';
   const loading = status === 'loading';
   const artist = track.artists[0];

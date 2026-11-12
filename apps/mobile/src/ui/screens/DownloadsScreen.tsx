@@ -11,7 +11,11 @@ import { SongRow } from '../components/SongRow';
 import { ConfirmDialog, toast } from '../components/Overlays';
 import { EmptyState, Pill } from '../components/State';
 import { colors, radii, spacing } from '../theme';
-import { useDownloadsStore, type DownloadRecord } from '../../services/library/downloadsStore';
+import {
+  isDownloadInProgress,
+  useDownloadsStore,
+  type DownloadRecord,
+} from '../../services/library/downloadsStore';
 import { useDownloadProgressStore } from '../../services/library/downloadProgressStore';
 import { selectCurrentTrack, usePlayerStore } from '../../services/player/playerStore';
 import { playerService } from '../../services/player/PlayerService';
@@ -36,9 +40,7 @@ export function DownloadsScreen() {
   const playing = usePlayerStore((state) => state.status === 'playing');
   const [pendingRemove, setPendingRemove] = useState<DownloadRecord | null>(null);
 
-  const active = downloads.filter(
-    (record) => record.phase === 'source' || record.phase === 'transfer'
-  );
+  const active = downloads.filter((record) => isDownloadInProgress(record.phase));
   const failed = downloads.filter((record) => record.phase === 'failed');
   const completed = useMemo(
     () =>
@@ -114,7 +116,7 @@ export function DownloadsScreen() {
       {active.length > 0 ? (
         <View style={{ marginTop: spacing.md }}>
           <Text variant="micro" style={{ marginBottom: spacing.xs }}>
-            DOWNLOADING · {active.length}
+            IN PROGRESS · {active.length}
           </Text>
           {active.map((record) => {
             const paused = pausedIds.has(record.jobId);
@@ -123,11 +125,15 @@ export function DownloadsScreen() {
             const indeterminate = liveIndeterminate[record.jobId] === true;
             const status = paused
               ? 'Paused'
-              : record.phase === 'source'
-                ? 'Finding source'
-                : indeterminate
-                  ? `Downloading…${speed ? ` · ${speed}` : ''}`
-                  : `${Math.round(percent)}%${speed ? ` · ${speed}` : ''}`;
+              : record.phase === 'queued'
+                ? 'Queued'
+                : record.error
+                  ? record.error
+                  : record.phase === 'source'
+                    ? 'Finding source'
+                    : indeterminate
+                      ? `Downloading…${speed ? ` · ${speed}` : ''}`
+                      : `${Math.round(percent)}%${speed ? ` · ${speed}` : ''}`;
             return (
               <View
                 key={record.jobId}

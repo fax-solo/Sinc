@@ -12,6 +12,7 @@ import {
   isTransientDownloadError,
   isFingerprintError,
   resetDirectSourceMissCache,
+  resetDownloadQueueForTests,
 } from './downloadsStore';
 
 const { findArchive, findJamendo, findFma, previewMock, downloaderMock, ytMock, trackAnalytics } =
@@ -95,11 +96,54 @@ function track(id: string): CanonicalTrack {
   };
 }
 
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** Holds each native transfer open so the scheduler can be observed. */
+function holdDirectDownloads(): Map<string, Deferred<NativeDownloadResult>> {
+  const gates = new Map<string, Deferred<NativeDownloadResult>>();
+  downloaderMock.download.mockImplementation((...args: unknown[]) => {
+    const jobId = args[0] as string;
+    const gate = deferred<NativeDownloadResult>();
+    gates.set(jobId, gate);
+    return gate.promise;
+  });
+  return gates;
+}
+
+function completeDownload(gates: Map<string, Deferred<NativeDownloadResult>>, jobId: string): void {
+  const gate = gates.get(jobId);
+  if (!gate) throw new Error(`No held download for ${jobId}`);
+  gate.resolve({
+    localUri: `file:///data/sinc_downloads/${jobId}.mp3`,
+    sizeBytes: 4321,
+    durationMs: 180_000,
+  });
+}
+
 function resetStore() {
-  useDownloadsStore.setState({ downloads: [] });
+  useDownloadsStore.setState({
+    downloads: [],
+    downloadedIds: new Set<string>(),
+    pausedIds: new Set<string>(),
+  });
 }
 
 beforeEach(() => {
+  resetDownloadQueueForTests();
   resetStore();
   resetDirectSourceMissCache();
   findArchive.mockReset();
@@ -107,7 +151,12 @@ beforeEach(() => {
   findFma.mockReset();
   previewMock.mockReset();
   previewMock.mockResolvedValue(null);
-  downloaderMock.download.mockClear();
+  downloaderMock.download.mockReset();
+  downloaderMock.download.mockImplementation(async () => ({
+    localUri: 'file:///sdcard/Sinc/song.mp3',
+    sizeBytes: 1234,
+    durationMs: 180_000,
+  }));
   downloaderMock.remove.mockClear();
   ytMock.available.mockClear();
   ytMock.download.mockClear();
@@ -227,6 +276,133 @@ describe('downloadsStore (local)', () => {
     await first;
     const full = useDownloadsStore.getState().downloads;
     expect(full.filter((d) => d.track.id === 'itunes:9')).toHaveLength(1);
+  });
+
+  it('caps concurrent transfers at two and marks overflow as queued', async () => {
+    const gates = holdDirectDownloads();
+    findArchive.mockImplementation(async (candidate: CanonicalTrack) => ({
+      url: `https://archive.org/download/${candidate.id}.mp3`,
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+    }));
+    const tracks = ['queue-a', 'queue-b', 'queue-c'].map(track);
+    const pending = tracks.map((candidate) =>
+      useDownloadsStore.getState().downloadTrack(candidate)
+    );
+
+    await vi.waitFor(() => expect(downloaderMock.download).toHaveBeenCalledTimes(2));
+    expect(useDownloadsStore.getState().getDownload('queue-a')?.phase).toBe('transfer');
+    expect(useDownloadsStore.getState().getDownload('queue-b')?.phase).toBe('transfer');
+    expect(useDownloadsStore.getState().getDownload('queue-c')?.phase).toBe('queued');
+
+    completeDownload(gates, jobIdForTrack(tracks[0]));
+    await vi.waitFor(() => expect(downloaderMock.download).toHaveBeenCalledTimes(3));
+    expect(useDownloadsStore.getState().getDownload('queue-c')?.phase).toBe('transfer');
+
+    completeDownload(gates, jobIdForTrack(tracks[1]));
+    completeDownload(gates, jobIdForTrack(tracks[2]));
+    await Promise.all(pending);
+    expect(useDownloadsStore.getState().downloads.every((d) => d.phase === 'completed')).toBe(true);
+  });
+
+  it('starts a user tap before an earlier bulk import', async () => {
+    const gates = holdDirectDownloads();
+    findArchive.mockImplementation(async (candidate: CanonicalTrack) => ({
+      url: `https://archive.org/download/${candidate.id}.mp3`,
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+    }));
+    const [activeA, activeB, bulk, userTap] = ['prio-a', 'prio-b', 'prio-bulk', 'prio-user'].map(
+      track
+    );
+    const pending = [
+      useDownloadsStore.getState().downloadTrack(activeA),
+      useDownloadsStore.getState().downloadTrack(activeB),
+    ];
+    await vi.waitFor(() => expect(downloaderMock.download).toHaveBeenCalledTimes(2));
+
+    pending.push(useDownloadsStore.getState().downloadTrack(bulk, { priority: 'bulk' }));
+    pending.push(useDownloadsStore.getState().downloadTrack(userTap));
+    await vi.waitFor(() => {
+      expect(useDownloadsStore.getState().getDownload(bulk.id)?.phase).toBe('queued');
+      expect(useDownloadsStore.getState().getDownload(userTap.id)?.phase).toBe('queued');
+    });
+
+    completeDownload(gates, jobIdForTrack(activeA));
+    await vi.waitFor(() => expect(downloaderMock.download).toHaveBeenCalledTimes(3));
+    const thirdJobId = downloaderMock.download.mock.calls[2][0] as string;
+    expect(thirdJobId).toBe(jobIdForTrack(userTap));
+    expect(useDownloadsStore.getState().getDownload(bulk.id)?.phase).toBe('queued');
+
+    completeDownload(gates, jobIdForTrack(activeB));
+    await vi.waitFor(() => expect(downloaderMock.download).toHaveBeenCalledTimes(4));
+    expect(downloaderMock.download.mock.calls[3][0]).toBe(jobIdForTrack(bulk));
+
+    completeDownload(gates, jobIdForTrack(userTap));
+    completeDownload(gates, jobIdForTrack(bulk));
+    await Promise.all(pending);
+    expect(useDownloadsStore.getState().getDownload(userTap.id)?.phase).toBe('completed');
+    expect(useDownloadsStore.getState().getDownload(bulk.id)?.phase).toBe('completed');
+  });
+
+  it('cancels a queued download before it reaches the native bridge', async () => {
+    const gates = holdDirectDownloads();
+    findArchive.mockImplementation(async (candidate: CanonicalTrack) => ({
+      url: `https://archive.org/download/${candidate.id}.mp3`,
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+    }));
+    const tracks = ['cancel-q-a', 'cancel-q-b', 'cancel-q-c'].map(track);
+    const first = useDownloadsStore.getState().downloadTrack(tracks[0]);
+    const second = useDownloadsStore.getState().downloadTrack(tracks[1]);
+    const third = useDownloadsStore.getState().downloadTrack(tracks[2]);
+    await vi.waitFor(() => expect(downloaderMock.download).toHaveBeenCalledTimes(2));
+    const queued = useDownloadsStore.getState().getDownload(tracks[2].id)!;
+    expect(queued.phase).toBe('queued');
+
+    await useDownloadsStore.getState().cancelDownload(queued.jobId);
+    await third;
+    expect(useDownloadsStore.getState().getDownload(tracks[2].id)).toBeUndefined();
+    expect(downloaderMock.download).toHaveBeenCalledTimes(2);
+
+    completeDownload(gates, jobIdForTrack(tracks[0]));
+    completeDownload(gates, jobIdForTrack(tracks[1]));
+    await Promise.all([first, second]);
+  });
+
+  it('keeps a paused queued download out of the scheduler until resumed', async () => {
+    const gates = holdDirectDownloads();
+    findArchive.mockImplementation(async (candidate: CanonicalTrack) => ({
+      url: `https://archive.org/download/${candidate.id}.mp3`,
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+    }));
+    const tracks = ['pause-q-a', 'pause-q-b', 'pause-q-c'].map(track);
+    const first = useDownloadsStore.getState().downloadTrack(tracks[0]);
+    const second = useDownloadsStore.getState().downloadTrack(tracks[1]);
+    const third = useDownloadsStore.getState().downloadTrack(tracks[2]);
+    await vi.waitFor(() => expect(downloaderMock.download).toHaveBeenCalledTimes(2));
+    const queued = useDownloadsStore.getState().getDownload(tracks[2].id)!;
+    expect(queued.phase).toBe('queued');
+
+    await useDownloadsStore.getState().pauseDownload(queued.jobId);
+    await third;
+    expect(useDownloadsStore.getState().pausedIds.has(queued.jobId)).toBe(true);
+
+    completeDownload(gates, jobIdForTrack(tracks[0]));
+    await vi.waitFor(() =>
+      expect(useDownloadsStore.getState().getDownload(tracks[1].id)?.phase).toBe('transfer')
+    );
+    expect(downloaderMock.download).toHaveBeenCalledTimes(2);
+
+    const resumed = useDownloadsStore.getState().resumeDownload(queued.jobId);
+    await vi.waitFor(() => expect(downloaderMock.download).toHaveBeenCalledTimes(3));
+    expect(useDownloadsStore.getState().getDownload(tracks[2].id)?.phase).toBe('transfer');
+
+    completeDownload(gates, jobIdForTrack(tracks[1]));
+    completeDownload(gates, jobIdForTrack(tracks[2]));
+    await Promise.all([first, second, resumed]);
+    expect(useDownloadsStore.getState().getDownload(tracks[2].id)?.phase).toBe('completed');
   });
 
   it('removes a completed download and its file', async () => {
@@ -658,11 +834,37 @@ describe('downloadsStore (local)', () => {
     expect(useDownloadsStore.getState().downloads).toHaveLength(0);
   });
 
-  it('resumes in-flight downloads on the next launch', async () => {
+  it('resumes an active download after the native pause settles', async () => {
+    const gates = holdDirectDownloads();
+    findArchive.mockResolvedValue({
+      url: 'https://archive.org/download/x/active-pause.mp3',
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+    });
+    const t = track('itunes:active-pause');
+    const first = useDownloadsStore.getState().downloadTrack(t);
+    await vi.waitFor(() => expect(downloaderMock.download).toHaveBeenCalledTimes(1));
+    const row = useDownloadsStore.getState().getDownload(t.id)!;
+    const gate = gates.get(row.jobId);
+    expect(gate).toBeDefined();
+
+    await useDownloadsStore.getState().pauseDownload(row.jobId);
+    expect(useDownloadsStore.getState().pausedIds.has(row.jobId)).toBe(true);
+    gate!.reject(Object.assign(new Error('Download cancelled'), { code: 'DOWNLOAD_CANCELLED' }));
+    await first;
+
+    const resumed = useDownloadsStore.getState().resumeDownload(row.jobId);
+    await vi.waitFor(() => expect(downloaderMock.download).toHaveBeenCalledTimes(2));
+    completeDownload(gates, row.jobId);
+    await resumed;
+    expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('completed');
+  });
+
+  it('resumes a persisted queued job on the next launch without stale parts', async () => {
     const t = track('itunes:1');
     useDownloadsStore.setState({
       downloads: [
-        { jobId: jobIdForTrack(t), track: t, phase: 'source', progress: 0, createdAt: Date.now() },
+        { jobId: jobIdForTrack(t), track: t, phase: 'queued', progress: 0, createdAt: Date.now() },
       ],
     });
     findArchive.mockResolvedValue({
@@ -672,5 +874,9 @@ describe('downloadsStore (local)', () => {
     });
     await useDownloadsStore.getState().resumeInFlight();
     expect(useDownloadsStore.getState().getDownload('itunes:1')?.phase).toBe('completed');
+    // A new process cannot prove which source produced the old partial, so it
+    // must start a fresh transfer instead of appending new bytes to it.
+    const call = downloaderMock.download.mock.calls[0] as unknown[];
+    expect(call[5]).toBe(false);
   });
 });

@@ -16,7 +16,11 @@ import { musicApi, type DailyMix } from '../../api/music';
 import { getCachedPersonalizedHome } from '../../api/resultCache';
 import { useAuthStore } from '../../features/auth/authStore';
 import { useLibraryStore } from '../../services/library/libraryStore';
-import { useDownloadsStore } from '../../services/library/downloadsStore';
+import {
+  isDownloadInProgress,
+  useDownloadsStore,
+  type DownloadPriority,
+} from '../../services/library/downloadsStore';
 import { selectCurrentTrack, usePlayerStore } from '../../services/player/playerStore';
 import { playerService } from '../../services/player/PlayerService';
 import { openSongMenu } from '../songMenu/songMenuStore';
@@ -49,21 +53,17 @@ function useDownloadedIds(): Set<string> {
 async function queueDownloads(
   tracks: CanonicalTrack[],
   downloadedIds: Set<string>,
-  downloadTrack: (track: CanonicalTrack) => Promise<void>
+  downloadTrack: (track: CanonicalTrack, opts?: { priority?: DownloadPriority }) => Promise<void>
 ): Promise<{ queued: number; skipped: number }> {
   let queued = 0;
   let skipped = 0;
   for (const track of tracks) {
     const existing = useDownloadsStore.getState().getDownload(track.id);
-    if (
-      downloadedIds.has(track.id) ||
-      existing?.phase === 'source' ||
-      existing?.phase === 'transfer'
-    ) {
+    if (downloadedIds.has(track.id) || (existing && isDownloadInProgress(existing.phase))) {
       skipped += 1;
       continue;
     }
-    void downloadTrack(track).catch(() => undefined);
+    void downloadTrack(track, { priority: 'bulk' }).catch(() => undefined);
     queued += 1;
     await new Promise((resolve) => setTimeout(resolve, 350));
   }

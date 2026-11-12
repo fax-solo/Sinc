@@ -8,7 +8,7 @@ import { BottomSheet, ConfirmDialog, SheetRow, toast } from '../components/Overl
 import { useSongMenuStore } from './songMenuStore';
 import { playerService } from '../../services/player/PlayerService';
 import { useLibraryStore, type LocalPlaylist } from '../../services/library/libraryStore';
-import { useDownloadsStore } from '../../services/library/downloadsStore';
+import { isDownloadInProgress, useDownloadsStore } from '../../services/library/downloadsStore';
 import { useDownloadProgressStore } from '../../services/library/downloadProgressStore';
 import { useLockStore } from '../../features/lock/lockStore';
 import { navigateTo } from '../navigation/navigation';
@@ -75,7 +75,7 @@ export function SongMenuHost() {
   const download = downloads.find((record) => record.track.id === track.id);
   const favorite = favoriteIds.has(track.id);
   const isDownloaded = download?.phase === 'completed' && Boolean(download.localUri);
-  const isDownloading = download?.phase === 'source' || download?.phase === 'transfer';
+  const isDownloading = download ? isDownloadInProgress(download.phase) : false;
   const canDownload = !isDownloaded && !isDownloading;
   const downloadPercent = download
     ? (liveProgress[download.jobId] ?? download.progress)

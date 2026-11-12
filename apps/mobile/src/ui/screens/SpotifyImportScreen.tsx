@@ -12,7 +12,7 @@ import { EmptyState, ErrorState, Pill, ListSkeleton } from '../components/State'
 import { colors, radii, spacing } from '../theme';
 import { importSpotifyPlaylist, type SpotifyImportResult } from '../../api/music';
 import { useLibraryStore } from '../../services/library/libraryStore';
-import { useDownloadsStore } from '../../services/library/downloadsStore';
+import { isDownloadInProgress, useDownloadsStore } from '../../services/library/downloadsStore';
 import { useNotificationStore } from '../../features/notifications/notificationStore';
 import { usePreferencesStore } from '../../features/preferences/preferencesStore';
 import { selectCurrentTrack, usePlayerStore } from '../../services/player/playerStore';
@@ -105,16 +105,11 @@ export function SpotifyImportScreen({
     let skipped = 0;
     for (const track of status.result.tracks) {
       const existing = store.getDownload(track.id);
-      if (
-        existing &&
-        (existing.localUri ||
-          existing.phase === 'source' ||
-          existing.phase === 'transfer')
-      ) {
+      if (existing && (existing.localUri || isDownloadInProgress(existing.phase))) {
         skipped += 1;
         continue;
       }
-      void downloadTrack(track).catch(() => undefined);
+      void downloadTrack(track, { priority: 'bulk' }).catch(() => undefined);
       queued += 1;
       await new Promise((resolve) => setTimeout(resolve, 400));
     }

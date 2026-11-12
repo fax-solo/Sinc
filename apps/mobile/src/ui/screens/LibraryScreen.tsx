@@ -18,7 +18,7 @@ import { BottomSheet, ConfirmDialog, SheetRow, toast } from '../components/Overl
 import { EmptyState, Pill } from '../components/State';
 import { colors, radii, spacing } from '../theme';
 import { useLibraryStore, type LocalPlaylist } from '../../services/library/libraryStore';
-import { useDownloadsStore } from '../../services/library/downloadsStore';
+import { isDownloadInProgress, useDownloadsStore } from '../../services/library/downloadsStore';
 import { selectCurrentTrack, usePlayerStore } from '../../services/player/playerStore';
 import { playerService } from '../../services/player/PlayerService';
 import { openSongMenu } from '../songMenu/songMenuStore';
@@ -66,7 +66,7 @@ export function LibraryScreen() {
   const toggleFollowArtist = useLibraryStore((state) => state.toggleFollowArtist);
   const downloads = useDownloadsStore((state) => state.downloads);
   const downloadTrack = useDownloadsStore((state) => state.downloadTrack);
-  const activeDownloads = downloads.filter((record) => record.phase === 'source' || record.phase === 'transfer');
+  const activeDownloads = downloads.filter((record) => isDownloadInProgress(record.phase));
   const completed = useMemo(
     () => downloads.filter((record) => record.phase === 'completed' && record.localUri),
     [downloads]
@@ -191,7 +191,7 @@ export function LibraryScreen() {
     const missing = playlist.tracks.filter((track) => {
       if (downloadedIds.has(track.id)) return false;
       const existing = useDownloadsStore.getState().getDownload(track.id);
-      return existing?.phase !== 'source' && existing?.phase !== 'transfer';
+      return !existing || !isDownloadInProgress(existing.phase);
     });
     if (missing.length === 0) {
       toast('All songs are already downloaded or downloading', 'default');
@@ -203,7 +203,7 @@ export function LibraryScreen() {
     // Downloads queue; waiting for every full transfer here would freeze the
     // action for minutes.
     for (const track of missing) {
-      void downloadTrack(track).catch(() => undefined);
+      void downloadTrack(track, { priority: 'bulk' }).catch(() => undefined);
       await new Promise((resolve) => setTimeout(resolve, 350));
     }
   };
