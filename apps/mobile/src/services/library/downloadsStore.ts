@@ -85,6 +85,10 @@ export interface DownloadRecord {
   error?: string;
   createdAt: number;
   completedAt?: number;
+  /** Consecutive automatic transfer attempts, persisted across restarts. */
+  attempts?: number;
+  /** Epoch ms before which an automatic retry must not start. */
+  retryAt?: number;
   /** Actual Music/Sinc display name; may differ from publicFileName (m4a/webm). */
   publishedName?: string;
 }
@@ -112,6 +116,9 @@ interface DownloadsState {
 }
 
 const PROGRESS_THROTTLE_MS = 250;
+
+/** Automatic transfer retries: two waits before the job is marked failed. */
+const RETRY_DELAYS_MS = [5_000, 15_000] as const;
 
 /**
  * Two transfers at a time matches the native yt-dlp pool. More than that
@@ -243,11 +250,45 @@ export function resetDownloadQueueForTests(): void {
   runningDownloads.clear();
   runningDownloadCount = 0;
   launchToken.clear();
+  for (const timer of retryTimers.values()) clearTimeout(timer);
+  retryTimers.clear();
+  pendingCleanup.clear();
 }
 
 /** Finds the persisted record for a native event by jobId, if any. */
 function recordByJobId(jobId: string): DownloadRecord | undefined {
   return useDownloadsStore.getState().downloads.find((d) => d.jobId === jobId);
+}
+
+/** Timers for persisted backoff windows; re-armable after a process restart. */
+const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearRetryTimer(jobId: string): void {
+  const timer = retryTimers.get(jobId);
+  if (!timer) return;
+  clearTimeout(timer);
+  retryTimers.delete(jobId);
+}
+
+/**
+ * Waits out a persisted retry window. A restart before `retryAt` re-arms the
+ * same wait instead of hammering the host or skipping the backoff.
+ */
+function scheduleRetryResume(record: DownloadRecord): void {
+  const delayMs = Math.max(0, (record.retryAt ?? 0) - Date.now());
+  clearRetryTimer(record.jobId);
+  const timer = setTimeout(() => {
+    retryTimers.delete(record.jobId);
+    const current = recordByJobId(record.jobId);
+    if (!current || !isDownloadInProgress(current.phase)) return;
+    if (useDownloadsStore.getState().pausedIds.has(record.jobId)) return;
+    // A new process cannot prove which source produced the old partial.
+    void useDownloadsStore
+      .getState()
+      .downloadTrack(current.track, { resumePart: false, priority: 'resume' });
+  }, delayMs);
+  (timer as unknown as { unref?: () => void }).unref?.();
+  retryTimers.set(record.jobId, timer);
 }
 
 /**
@@ -276,6 +317,30 @@ async function removeNativeArtifacts(record: DownloadRecord): Promise<void> {
   } catch {
     // Local cleanup is best-effort; the store record is what matters.
   }
+}
+
+/**
+ * Native cleanup is keyed by the track-derived job id. If the user cancels
+ * and immediately re-downloads, the old cleanup must finish before the new
+ * transfer starts — otherwise it can discard the new job's partial/output.
+ */
+const pendingCleanup = new Map<string, Promise<void>>();
+
+function queueCleanupTask(jobId: string, task: () => Promise<void>): Promise<void> {
+  const previous = pendingCleanup.get(jobId) ?? Promise.resolve();
+  const current = previous
+    .catch(() => undefined)
+    .then(task)
+    .catch(() => undefined);
+  pendingCleanup.set(jobId, current);
+  void current.finally(() => {
+    if (pendingCleanup.get(jobId) === current) pendingCleanup.delete(jobId);
+  });
+  return current;
+}
+
+function queueNativeCleanup(record: DownloadRecord): Promise<void> {
+  return queueCleanupTask(record.jobId, () => removeNativeArtifacts(record));
 }
 
 function shortHash(input: string): string {
@@ -680,7 +745,14 @@ export const useDownloadsStore = create<DownloadsState>()(
           const currentRank = IN_PROGRESS_RANK[record.phase];
           const nextRank = DOWNLOAD_STAGE_RANK[event.stage];
           if (currentRank == null || nextRank <= currentRank) return;
-          upsert(event.jobId, { phase: event.stage, error: undefined });
+          // Reaching the first post-transfer stage proves the transfer
+          // attempt succeeded, so a later restart gets a fresh retry budget.
+          const patch: Partial<DownloadRecord> = { phase: event.stage, error: undefined };
+          if (event.stage === 'processing') {
+            patch.attempts = 0;
+            patch.retryAt = undefined;
+          }
+          upsert(event.jobId, patch);
           // A stale byte rate from the transfer must not sit next to
           // "Processing audio…" / "Verifying audio…".
           useDownloadProgressStore.getState().setSpeed(event.jobId, null);
@@ -699,6 +771,8 @@ export const useDownloadsStore = create<DownloadsState>()(
         downloadTrack: async (track, opts) => {
           const jobId = jobIdForTrack(track);
           const existing = get().getDownload(track.id);
+          // An explicit tap/resume replaces the persisted backoff timer.
+          clearRetryTimer(jobId);
           if (existing?.phase === 'completed') return;
           if (hasScheduledDownload(jobId)) return;
           // Retries and resumes continue from any surviving `.part` rather
@@ -709,8 +783,23 @@ export const useDownloadsStore = create<DownloadsState>()(
           // which re-searches with a fresh candidate.
           let skipDirectAfterFingerprint = false;
 
+          // Keep the automatic-retry budget across a pause/restart, but a
+          // manual retry of a hard-failed row starts a fresh budget. A
+          // process death mid-transfer must not hand the job unlimited
+          // retries just because the backoff deadline was already cleared.
+          const carriedAttempts =
+            existing && existing.phase !== 'failed' ? (existing.attempts ?? 0) : 0;
+
           const downloads = [
-            { jobId, track, phase: 'queued' as DownloadPhase, progress: 0, createdAt: Date.now() },
+            {
+              jobId,
+              track,
+              phase: 'queued' as DownloadPhase,
+              progress: 0,
+              createdAt: Date.now(),
+              attempts: carriedAttempts,
+              retryAt: undefined,
+            },
             ...get().downloads.filter((d) => d.jobId !== jobId),
           ];
           set({ downloads, downloadedIds: deriveDownloadedIds(downloads) });
@@ -828,6 +917,8 @@ export const useDownloadsStore = create<DownloadsState>()(
                     sizeBytes: result.sizeBytes,
                     provider: direct.provider,
                     completedAt: Date.now(),
+                    attempts: 0,
+                    retryAt: undefined,
                     publishedName: result.publishedName ?? publicName,
                   });
                   return;
@@ -872,6 +963,8 @@ export const useDownloadsStore = create<DownloadsState>()(
               sizeBytes: 0,
               provider: recordByJobId(jobId)?.provider ?? 'youtube',
               completedAt: Date.now(),
+              attempts: 0,
+              retryAt: undefined,
               publishedName: result.publishedName ?? publicFileName(track),
             });
           };
@@ -879,12 +972,14 @@ export const useDownloadsStore = create<DownloadsState>()(
           const run = async (): Promise<void> => {
             // The scheduler may start this run after other queued jobs.
             // Cancellation/pause can also win the race while it waits.
+            const cleanup = pendingCleanup.get(jobId);
+            if (cleanup) await cleanup;
             if (stopped()) return;
             upsert(jobId, { phase: 'source', progress: 0, error: undefined });
             previewUrl = await resolvePreviewUrl(track).catch(() => null);
             if (launchToken.get(jobId) !== token) return;
             if (get().pausedIds.has(jobId)) return;
-            for (let attemptIndex = 0; ; attemptIndex += 1) {
+            for (let attemptIndex = carriedAttempts; ; attemptIndex += 1) {
               try {
                 await attempt();
                 trackAnalytics('download:complete', track.id, {
@@ -910,7 +1005,11 @@ export const useDownloadsStore = create<DownloadsState>()(
                 if (attemptIndex < 1 && isFingerprintError(err)) {
                   skipDirectAfterFingerprint = true;
                   resumeNext = false;
-                  upsert(jobId, { phase: 'source', error: 'Trying a different source…' });
+                  upsert(jobId, {
+                    phase: 'source',
+                    error: 'Trying a different source…',
+                    retryAt: undefined,
+                  });
                   continue;
                 }
                 // Connection loss or a degraded link is not a failure: park
@@ -922,6 +1021,7 @@ export const useDownloadsStore = create<DownloadsState>()(
                   upsert(jobId, {
                     phase: 'source',
                     error: 'Waiting for connection…',
+                    retryAt: undefined,
                   });
                   useDownloadProgressStore.getState().setSpeed(jobId, null);
                   ensureParkPoller();
@@ -929,15 +1029,21 @@ export const useDownloadsStore = create<DownloadsState>()(
                 }
                 // Transient transfer errors get automatic retries with
                 // backoff; each retry resumes from the surviving `.part`.
-                if (attemptIndex < 2 && isTransientDownloadError(err)) {
-                  const delayMs = [5_000, 15_000][attemptIndex];
+                // The attempt count and retry deadline are persisted, so a
+                // process death during the wait does not reset or skip it.
+                if (attemptIndex < RETRY_DELAYS_MS.length && isTransientDownloadError(err)) {
+                  const delayMs = RETRY_DELAYS_MS[attemptIndex] ?? RETRY_DELAYS_MS[0];
+                  const nextAttempt = attemptIndex + 1;
                   upsert(jobId, {
                     phase: 'source',
                     error: `Retrying in ${Math.round(delayMs / 1000)}s…`,
+                    attempts: nextAttempt,
+                    retryAt: Date.now() + delayMs,
                   });
                   await sleepUnlessStopped(delayMs, stopped);
                   if (launchToken.get(jobId) !== token) return;
                   if (get().pausedIds.has(jobId)) return;
+                  upsert(jobId, { retryAt: undefined });
                   resumeNext = true;
                   continue;
                 }
@@ -953,6 +1059,8 @@ export const useDownloadsStore = create<DownloadsState>()(
                   phase: 'failed',
                   progress: 0,
                   error: message,
+                  attempts: 0,
+                  retryAt: undefined,
                 });
                 trackAnalytics('download:failed', track.id, {
                   provider: get().getDownload(track.id)?.provider ?? 'unknown',
@@ -976,6 +1084,7 @@ export const useDownloadsStore = create<DownloadsState>()(
           // them behind the user's back.
           const wasPaused = get().pausedIds.has(jobId);
           const wasQueued = cancelQueuedDownload(jobId);
+          clearRetryTimer(jobId);
           launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
           waitingForConnection.delete(jobId);
           if (!wasPaused) {
@@ -1013,6 +1122,7 @@ export const useDownloadsStore = create<DownloadsState>()(
           const record = recordByJobId(jobId);
           const wasQueued = cancelQueuedDownload(jobId);
           const wasRunning = hasRunningDownload(jobId) || waitingForConnection.has(jobId);
+          clearRetryTimer(jobId);
           directJobSources.delete(jobId);
           launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
           const pausedIds = new Set(get().pausedIds);
@@ -1023,14 +1133,19 @@ export const useDownloadsStore = create<DownloadsState>()(
           set({ downloads, downloadedIds: deriveDownloadedIds(downloads), pausedIds });
           waitingForConnection.delete(jobId);
           useDownloadProgressStore.getState().clearProgress(jobId);
-          if (!wasQueued && wasRunning) {
-            try {
-              await nativeBridge.downloads.cancel(jobId);
-            } catch {
-              // Native already gone; state is what matters here.
+          // Register the cleanup before awaiting the native cancel. A quick
+          // re-download then waits for this chain instead of racing it.
+          const cleanup = queueCleanupTask(jobId, async () => {
+            if (!wasQueued && wasRunning) {
+              try {
+                await nativeBridge.downloads.cancel(jobId);
+              } catch {
+                // Native already gone; state is what matters here.
+              }
             }
-          }
-          if (record) await removeNativeArtifacts(record);
+            if (record) await removeNativeArtifacts(record);
+          });
+          await cleanup;
         },
 
         retryDownload: async (jobId) => {
@@ -1075,11 +1190,18 @@ export const useDownloadsStore = create<DownloadsState>()(
           // source bytes to a partial from the previous process can silently
           // corrupt the file, so restart with a fresh transfer. Same-session
           // pause/retry still resumes the original `.part`.
-          const pendingResumes = inFlight
-            .filter((record) => !get().pausedIds.has(record.jobId))
-            .map((record) =>
+          const pendingResumes: Array<Promise<void>> = [];
+          for (const record of inFlight) {
+            if (get().pausedIds.has(record.jobId)) continue;
+            if (record.retryAt && record.retryAt > Date.now()) {
+              // A restart during backoff must not skip the wait.
+              scheduleRetryResume(record);
+              continue;
+            }
+            pendingResumes.push(
               get().downloadTrack(record.track, { resumePart: false, priority: 'resume' })
             );
+          }
           await Promise.allSettled(pendingResumes);
         },
 
@@ -1095,15 +1217,23 @@ export const useDownloadsStore = create<DownloadsState>()(
             records.push(record);
           }
           records.sort((a, b) => b.createdAt - a.createdAt);
-          const pendingResumes = records.map((record) =>
-            get().downloadTrack(record.track, { resumePart: true, priority: 'resume' })
-          );
+          const pendingResumes: Array<Promise<void>> = [];
+          for (const record of records) {
+            if (record.retryAt && record.retryAt > Date.now()) {
+              scheduleRetryResume(record);
+              continue;
+            }
+            pendingResumes.push(
+              get().downloadTrack(record.track, { resumePart: true, priority: 'resume' })
+            );
+          }
           await Promise.allSettled(pendingResumes);
         },
 
         removeDownload: async (jobId) => {
           const record = get().downloads.find((d) => d.jobId === jobId);
           if (!record) return;
+          clearRetryTimer(jobId);
           directJobSources.delete(jobId);
           // Stop any in-flight transfer or park loop FIRST. The old code only
           // cleaned up completed files — an in-flight job kept transferring,
@@ -1125,7 +1255,7 @@ export const useDownloadsStore = create<DownloadsState>()(
           // yt-dlp downloads live in the yt module's `sinc_yt` dir, which the
           // generic downloader module never touches — route cleanup to the
           // module that owns the file (feature-detected for old builds).
-          await removeNativeArtifacts(record);
+          await queueNativeCleanup(record);
           const downloads = get().downloads.filter((d) => d.jobId !== jobId);
           set({ downloads, downloadedIds: deriveDownloadedIds(downloads) });
           useDownloadProgressStore.getState().clearProgress(jobId);
