@@ -41,6 +41,9 @@ class SincPlayerModule(reactContext: ReactApplicationContext) :
 
   private val mainHandler = Handler(Looper.getMainLooper())
 
+  /** Android 13+ only asks the user once; avoid re-prompting on every load. */
+  private var notificationPermissionAsked = false
+
   init {
     // A fresh module means the React context was rebuilt (JS reload / unmount).
     // The service owns the single player, so we only re-point event routing at
@@ -86,6 +89,7 @@ class SincPlayerModule(reactContext: ReactApplicationContext) :
     mainHandler.post {
       try {
         sharedTrackId = trackId
+        PlaybackService.setFavoriteState(metadata?.getBoolean("favorite") ?: false)
         PlaybackService.start(reactApplicationContext)
         val exo = PlaybackService.getPlayer(reactApplicationContext)
         Log.i("SincPlayer", "load track=$trackId hls=${isHls(uri, mimeType)} mime=$mimeType uri=${uri.take(120)}")
@@ -96,9 +100,18 @@ class SincPlayerModule(reactContext: ReactApplicationContext) :
               metadata?.getString("title")?.let { setTitle(it) }
               metadata?.getString("artist")?.let { setArtist(it) }
               metadata?.getString("artworkUrl")?.let { setArtworkUri(Uri.parse(it)) }
+              metadata?.getString("albumTitle")?.let { setAlbumTitle(it) }
+              if (metadata?.hasKey("durationMs") == true) {
+                setDurationMs(metadata.getDouble("durationMs").toLong())
+              }
             }
             .build()
-        val item = MediaItem.Builder().setUri(uri).setMediaMetadata(mediaMetadata).build()
+        val item =
+          MediaItem.Builder()
+            .setMediaId(trackId)
+            .setUri(uri)
+            .setMediaMetadata(mediaMetadata)
+            .build()
 
         // Remote streams go through the shared disk cache (instant replays,
         // offline-friendly repeats); local files bypass it.
@@ -179,7 +192,8 @@ class SincPlayerModule(reactContext: ReactApplicationContext) :
           val granted =
             ContextCompat.checkSelfPermission(activity, Manifest.permission.POST_NOTIFICATIONS) ==
               PackageManager.PERMISSION_GRANTED
-          if (!granted) {
+          if (!granted && !notificationPermissionAsked) {
+            notificationPermissionAsked = true
             activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
           }
         }
@@ -190,10 +204,70 @@ class SincPlayerModule(reactContext: ReactApplicationContext) :
     }
   }
 
-  /** Called from [PlaybackService] when lock-screen/notification next/prev is pressed. */
-  fun emitCommand(command: String) {
+  /**
+   * Reconciles the JS player store with the service after app start or a JS
+   * reload. The service keeps playing while React rebuilds; without this the
+   * UI would show idle/paused while audio is running.
+   */
+  @ReactMethod
+  fun getState(promise: Promise) {
     mainHandler.post {
-      emit("SincPlayerCommand", Arguments.createMap().apply { putString("command", command) })
+      val snapshot = PlaybackService.snapshot()
+      promise.resolve(
+        Arguments.createMap().apply {
+          putString("trackId", snapshot.trackId)
+          putBoolean("isPlaying", snapshot.isPlaying)
+          putString("playbackState", snapshot.playbackState)
+          putDouble("positionMs", snapshot.positionMs.toDouble())
+          putDouble("durationMs", snapshot.durationMs.toDouble())
+          putDouble("bufferedPositionMs", snapshot.bufferedPositionMs.toDouble())
+          putBoolean("favorite", snapshot.favorite)
+          putBoolean("shuffle", snapshot.shuffle)
+          putString("repeat", snapshot.repeat)
+        },
+      )
+    }
+  }
+
+  /** JS remains authoritative for favorites; native only mirrors the icon. */
+  @ReactMethod
+  fun setFavorite(favorite: Boolean, promise: Promise) {
+    mainHandler.post {
+      PlaybackService.setFavoriteState(favorite)
+      promise.resolve(null)
+    }
+  }
+
+  /** Called from [PlaybackService] when lock-screen/notification controls are used. */
+  fun emitCommand(command: String, trackId: String?) {
+    mainHandler.post {
+      emit(
+        "SincPlayerCommand",
+        Arguments.createMap().apply {
+          putString("command", command)
+          trackId?.let { putString("trackId", it) }
+        },
+      )
+    }
+  }
+
+  /** Emits a full transport snapshot after native-side state changes. */
+  fun emitState(snapshot: PlaybackSnapshot) {
+    mainHandler.post {
+      emit(
+        "SincPlayerState",
+        Arguments.createMap().apply {
+          putString("trackId", snapshot.trackId)
+          putBoolean("isPlaying", snapshot.isPlaying)
+          putString("playbackState", snapshot.playbackState)
+          putDouble("positionMs", snapshot.positionMs.toDouble())
+          putDouble("durationMs", snapshot.durationMs.toDouble())
+          putDouble("bufferedPositionMs", snapshot.bufferedPositionMs.toDouble())
+          putBoolean("favorite", snapshot.favorite)
+          putBoolean("shuffle", snapshot.shuffle)
+          putString("repeat", snapshot.repeat)
+        },
+      )
     }
   }
 
