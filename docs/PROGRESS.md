@@ -93,6 +93,35 @@ Known limitations:
 - JS intentionally never fabricates a track when the native session reports one the
   store does not know; such snapshots are logged out and ignored.
 
+## Phase 3 — Show Lyrics deep link ✅
+
+Implemented:
+
+- Added a `Lyrics: 'lyrics'` route to the deep-link config, so the native
+  `sinc://lyrics` PendingIntent from the notification/lockscreen action lands on the
+  existing `LyricsScreen` (both warm `onNewIntent` and cold start).
+- Verified the manifest already carries a BROWSABLE `VIEW` filter for the `sinc`
+  scheme on `MainActivity`, so no manifest change was needed.
+- Cold-start behavior verified by code inspection: the player store rehydrates
+  synchronously (MMKV), so the Lyrics screen finds the restored current track, and the
+  Phase 2 `syncFromNative()` reconciliation restores play/pause state before the
+  navigation parse. No playback is ever started by the deep link.
+- App PIN lock: `LockGate` overlays the whole navigator while armed, so a
+  deep-linked Lyrics screen cannot bypass the PIN; the screen is already mounted
+  underneath once the user unlocks.
+
+Files changed:
+
+- `apps/mobile/src/app/navigation/linking.ts`
+
+Checks:
+
+- `npm run typecheck -w @sinc/mobile` ✅
+- `npm test -w @sinc/mobile` ✅ 310 passed.
+- End-to-end notification action → LyricsScreen: 🕒 pending a device/emulator
+  (native `openLyrics()` path was compiled in Phase 1; runtime verification still
+  requires Test C on hardware).
+
 ## Upcoming
 
 - Phase 2: JS playback-state reconciliation and favorite bridge.

@@ -24,6 +24,9 @@ export const linking: LinkingOptions<RootStackParamList> = {
       Artist: 'artist/:id',
       Playlist: 'playlist/:id',
       Mix: 'mix/:mixId',
+      // Notification/lockscreen Show Lyrics action; expects an already-restored
+      // player session and never starts playback itself.
+      Lyrics: 'lyrics',
     },
   },
 };
