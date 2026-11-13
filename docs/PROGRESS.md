@@ -122,6 +122,33 @@ Checks:
   (native `openLyrics()` path was compiled in Phase 1; runtime verification still
   requires Test C on hardware).
 
+## Phase 4 — Lyrics screen refinement ✅
+
+Implemented:
+
+- Added the explicit **Return to current line** pill: while the user is manually
+  scrolled away (auto-follow suspended), a floating accent pill appears above the
+  transport bar and jumps straight back to the sung line. The 4.5s manual-timeout
+  now reuses the same handler, so both paths behave identically.
+- Auto-follow scrolling now respects the OS **reduced-motion** preference
+  (`AccessibilityInfo.isReduceMotionEnabled` + `reduceMotionChanged`): scroll
+  animation is disabled when the user opts out of motion.
+- State coverage confirmed (existing behavior, no change needed): loading skeletons,
+  synchronized lines with active/passing highlight, unsynchronized plain text,
+  "No lyrics found" empty state, LRCLIB error state with retry, and track-changed
+  reload keyed by `track.id`. Seek updates propagate through the progress store, and
+  tapping any line seeks via `playerService.seekTo` without touching the session.
+
+Files changed:
+
+- `apps/mobile/src/ui/screens/LyricsScreen.tsx`
+
+Checks:
+
+- `npm run typecheck -w @sinc/mobile` ✅
+- `npm test -w @sinc/mobile` ✅ 310 passed.
+- Visual/scroll verification on device: 🕒 pending.
+
 ## Upcoming
 
 - Phase 2: JS playback-state reconciliation and favorite bridge.

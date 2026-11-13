@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   Pressable,
   ScrollView,
   View,
   useWindowDimensions,
 } from 'react-native';
+import Ionicons from '@react-native-vector-icons/ionicons';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -31,9 +33,9 @@ export function LyricsScreen() {
   const status = usePlayerStore((state) => state.status);
   const positionMs = usePlayerProgressStore((state) => state.positionMs);
   const durationMs = usePlayerProgressStore((state) => state.durationMs);
-  const lyrics = useLyricsStore((state) => (track ? state.cache[track.id] ?? null : null));
+  const lyrics = useLyricsStore((state) => (track ? (state.cache[track.id] ?? null) : null));
   const loading = useLyricsStore((state) => (track ? Boolean(state.loading[track.id]) : false));
-  const offset = useLyricsStore((state) => (track ? state.offsets[track.id] ?? 0 : 0));
+  const offset = useLyricsStore((state) => (track ? (state.offsets[track.id] ?? 0) : 0));
   const loadLyrics = useLyricsStore((state) => state.loadLyrics);
   const clearLyrics = useLyricsStore((state) => state.clearLyrics);
   const adjustSync = useLyricsStore((state) => state.adjustSync);
@@ -46,6 +48,21 @@ export function LyricsScreen() {
   const [attemptedTrackId, setAttemptedTrackId] = useState<string | null>(null);
   const [forceLoading, setForceLoading] = useState(false);
   const [manual, setManual] = useState(false);
+  const [reduceMotion, setReduceMotion] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void AccessibilityInfo.isReduceMotionEnabled().then((value) => {
+      if (active) setReduceMotion(value);
+    });
+    const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', (value) =>
+      setReduceMotion(value)
+    );
+    return () => {
+      active = false;
+      sub.remove();
+    };
+  }, []);
 
   useEffect(() => {
     linePositions.current = {};
@@ -91,8 +108,17 @@ export function LyricsScreen() {
     if (y == null) return;
     scrollRef.current?.scrollTo({
       y: Math.max(0, y - height * 0.34),
-      animated: true,
+      animated: !reduceMotion,
     });
+  };
+
+  /** Escape hatch from manual scrolling: jump straight back to the sung line. */
+  const returnToCurrentLine = () => {
+    manualUntil.current = 0;
+    if (scrollTimer.current) clearTimeout(scrollTimer.current);
+    setManual(false);
+    const index = activeIndexRef.current;
+    if (index >= 0) scrollToActive(index);
   };
 
   useEffect(() => {
@@ -141,8 +167,7 @@ export function LyricsScreen() {
   };
 
   const hasLyrics = Boolean(lyrics && (lyrics.lines.length > 0 || lyrics.plain));
-  const attempted =
-    (attemptedTrackId === track.id && !loading) || hasLyrics;
+  const attempted = (attemptedTrackId === track.id && !loading) || hasLyrics;
   const noLyricsFound =
     attempted &&
     !loading &&
@@ -210,9 +235,7 @@ export function LyricsScreen() {
           setManual(true);
           if (scrollTimer.current) clearTimeout(scrollTimer.current);
           scrollTimer.current = setTimeout(() => {
-            setManual(false);
-            const index = activeIndexRef.current;
-            if (index >= 0) scrollToActive(index);
+            returnToCurrentLine();
           }, MANUAL_SCROLL_TIMEOUT);
         }}
       >
@@ -297,12 +320,41 @@ export function LyricsScreen() {
               fontWeight: '500',
             }}
           >
-            {lyrics?.plain ??
-              lyrics?.lines.map((line) => line.text).join('\n') ??
-              ''}
+            {lyrics?.plain ?? lyrics?.lines.map((line) => line.text).join('\n') ?? ''}
           </Text>
         ) : null}
       </ScrollView>
+
+      {synced && manual && activeIndex >= 0 ? (
+        <Pressable
+          onPress={returnToCurrentLine}
+          accessibilityRole="button"
+          accessibilityLabel="Return to the current lyric line"
+          style={({ pressed }) => ({
+            position: 'absolute',
+            alignSelf: 'center',
+            bottom: insets.bottom + 148,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 6,
+            paddingHorizontal: 14,
+            paddingVertical: 8,
+            borderRadius: 999,
+            backgroundColor: colors.accent,
+            opacity: pressed ? 0.8 : 1,
+            shadowColor: colors.black,
+            shadowOpacity: 0.35,
+            shadowRadius: 8,
+            shadowOffset: { width: 0, height: 2 },
+            elevation: 6,
+          })}
+        >
+          <Ionicons name="arrow-down" size={13} color={colors.onAccent} />
+          <Text variant="caption" style={{ color: colors.onAccent, fontWeight: '700' }}>
+            Current line
+          </Text>
+        </Pressable>
+      ) : null}
 
       <View
         style={{
@@ -323,7 +375,11 @@ export function LyricsScreen() {
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: -6 }}>
           <Text variant="caption">{formatDuration(positionMs)}</Text>
           <Text variant="caption">
-            {durationMs > 0 ? formatDuration(durationMs) : track.durationMs > 0 ? formatDuration(track.durationMs) : '--:--'}
+            {durationMs > 0
+              ? formatDuration(durationMs)
+              : track.durationMs > 0
+                ? formatDuration(track.durationMs)
+                : '--:--'}
           </Text>
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
@@ -363,7 +419,10 @@ export function LyricsScreen() {
                 accessibilityLabel="Reset lyric timing"
                 style={{ minWidth: 58, alignItems: 'center', paddingVertical: 4 }}
               >
-                <Text variant="caption" style={{ color: offset !== 0 ? colors.accent : colors.textMuted }}>
+                <Text
+                  variant="caption"
+                  style={{ color: offset !== 0 ? colors.accent : colors.textMuted }}
+                >
                   {offset === 0 ? 'SYNC' : `${offset > 0 ? '+' : ''}${(offset / 1000).toFixed(2)}s`}
                 </Text>
                 {offset !== 0 ? (
