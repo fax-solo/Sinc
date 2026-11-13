@@ -5,7 +5,9 @@ import type {
   NativeDownloadActionsModule,
   NativeDownloadStageEvent,
   NativeDownloaderModule,
+  NativePlaybackState,
   NativePlayerCommand,
+  NativePlayerCommandEvent,
   NativePlayerModule,
   NativeProgressEvent,
   NativeDownloadProgress,
@@ -31,9 +33,12 @@ function createUnavailablePlayer(): NativePlayerModule {
     seekTo: unavailable('player.seekTo'),
     stop: unavailable('player.stop'),
     requestNotificationPermission: unavailable('player.requestNotificationPermission'),
+    getState: unavailable('player.getState'),
+    setFavorite: unavailable('player.setFavorite'),
     addProgressListener: () => () => {},
     addCompletionListener: () => () => {},
     addErrorListener: () => () => {},
+    addStateListener: () => () => {},
     addCommandListener: () => () => {},
   };
 }
@@ -61,6 +66,8 @@ function createPlayer(): NativePlayerModule {
     seekTo: (positionMs) => module.seekTo(positionMs),
     stop: () => module.stop(),
     requestNotificationPermission: () => module.requestNotificationPermission(),
+    getState: () => module.getState(),
+    setFavorite: (favorite) => module.setFavorite(favorite),
     addProgressListener: (listener: (e: NativeProgressEvent) => void) => {
       const sub = emitter.addListener('SincPlayerProgress', listener);
       return () => sub.remove();
@@ -79,9 +86,15 @@ function createPlayer(): NativePlayerModule {
       );
       return () => sub.remove();
     },
-    addCommandListener: (listener: (command: NativePlayerCommand) => void) => {
-      const sub = emitter.addListener('SincPlayerCommand', (event: { command: string }) =>
-        listener(event.command as NativePlayerCommand)
+    addStateListener: (listener: (event: NativePlaybackState) => void) => {
+      const sub = emitter.addListener('SincPlayerState', listener);
+      return () => sub.remove();
+    },
+    addCommandListener: (listener: (event: NativePlayerCommandEvent) => void) => {
+      const sub = emitter.addListener(
+        'SincPlayerCommand',
+        (event: { command: string; trackId?: string }) =>
+          listener({ command: event.command as NativePlayerCommand, trackId: event.trackId })
       );
       return () => sub.remove();
     },

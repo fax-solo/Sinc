@@ -15,11 +15,32 @@ export interface NativeProgressEvent {
 export interface NativeTrackMetadata {
   title?: string;
   artist?: string;
+  albumTitle?: string;
   artworkUrl?: string;
+  durationMs?: number;
+  favorite?: boolean;
 }
 
 /** Commands issued by the lock-screen / notification media controls. */
-export type NativePlayerCommand = 'next' | 'previous';
+export type NativePlayerCommand = 'next' | 'previous' | 'favorite';
+
+export interface NativePlayerCommandEvent {
+  command: NativePlayerCommand;
+  trackId?: string;
+}
+
+/** Transport snapshot emitted by the service after native-side changes. */
+export interface NativePlaybackState {
+  trackId?: string | null;
+  isPlaying: boolean;
+  playbackState: 'idle' | 'buffering' | 'ready' | 'ended' | 'unknown';
+  positionMs: number;
+  durationMs: number;
+  bufferedPositionMs?: number;
+  favorite?: boolean;
+  shuffle?: boolean;
+  repeat?: 'off' | 'one' | 'all';
+}
 
 export interface NativePlayerModule {
   /** True when the native module is linked and usable. */
@@ -37,10 +58,15 @@ export interface NativePlayerModule {
   stop(): Promise<void>;
   /** Requests POST_NOTIFICATIONS at runtime (Android 13+); no-op elsewhere. */
   requestNotificationPermission(): Promise<void>;
+  /** Current service-side transport snapshot for startup reconciliation. */
+  getState(): Promise<NativePlaybackState>;
+  /** JS library store is authoritative; native mirrors it for notification UI. */
+  setFavorite(favorite: boolean): Promise<void>;
   addProgressListener(listener: (event: NativeProgressEvent) => void): () => void;
   addCompletionListener(listener: (trackId: string) => void): () => void;
   addErrorListener(listener: (message: string) => void): () => void;
-  addCommandListener(listener: (command: NativePlayerCommand) => void): () => void;
+  addStateListener(listener: (event: NativePlaybackState) => void): () => void;
+  addCommandListener(listener: (event: NativePlayerCommandEvent) => void): () => void;
 }
 
 export interface NativeDownloadProgress {

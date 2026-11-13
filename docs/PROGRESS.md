@@ -53,6 +53,46 @@ Known limitations:
   in-app player.
 - Open Sinc is the standard notification-body tap.
 
+## Phase 2 — JS playback-state reconciliation and favorite bridge ✅
+
+Implemented:
+
+- Native transport snapshots (`SincPlayerState`) now flow into the JS player store.
+  Notification/lockscreen play/pause no longer desyncs the UI: `ready`+playing promotes
+  the store to `playing` (including out of `loading`), `ready`+paused demotes a live
+  `playing`/`loading` state to `paused`, buffering/ended/idle are mapped, and stale
+  snapshots for a superseded track are ignored.
+- `PlayerService` reconciles with the still-running service on app start/reload via
+  `player.getState()` after listeners attach, and `App.tsx` now calls
+  `playerService.initialize()` on mount so this runs before the first playback action.
+- The notification Favorite action is wired end-to-end: `SincPlayerCommand` events carry
+  the command + trackId, `PlayerService` toggles the library store only when the command
+  matches the current track, and a library-store subscription mirrors the new favorite
+  state back to the native session (single push — the command handler relies on the
+  subscription rather than pushing twice).
+- Native `MediaItem` metadata now includes album title, duration, and favorite state;
+  `load()` reads the favorite flag from the library store at load time.
+
+Files added/changed:
+
+- `apps/mobile/src/app/App.tsx`
+- `apps/mobile/src/services/native/types.ts`
+- `apps/mobile/src/services/native/index.ts`
+- `apps/mobile/src/services/player/PlayerService.ts`
+- `apps/mobile/src/services/player/PlayerService.test.ts`
+
+Checks:
+
+- `npm run typecheck -w @sinc/mobile` ✅
+- `npm test -w @sinc/mobile` ✅ 310 passed (was 302; +7 new tests covering snapshot
+  sync in both directions, favorite toggle + mirroring, and stale-command rejection).
+- Device-level Test A/B verification: 🕒 pending a connected device/emulator.
+
+Known limitations:
+
+- JS intentionally never fabricates a track when the native session reports one the
+  store does not know; such snapshots are logged out and ignored.
+
 ## Upcoming
 
 - Phase 2: JS playback-state reconciliation and favorite bridge.
