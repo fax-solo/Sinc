@@ -149,6 +149,52 @@ Checks:
 - `npm test -w @sinc/mobile` ✅ 310 passed.
 - Visual/scroll verification on device: 🕒 pending.
 
+## Phase 5 — Expanded player, audio output, Show Lyrics shortcut ✅
+
+Implemented:
+
+- **Audio output selection** (the one missing expanded-player feature):
+  - New native `SincAudioOutputModule`: lists Android output routes via
+    `AudioManager.getDevices(GET_DEVICES_OUTPUTS)` (Bluetooth, wired, USB, HDMI,
+    speaker, earpiece), infers the active route following Android's precedence
+    when nothing is pinned, and applies the choice to the process-wide ExoPlayer
+    via `setPreferredAudioDevice`. A negative id restores the OS default.
+  - `PlaybackService` companion now tracks `preferredAudioDeviceId` so the UI
+    highlight survives module re-instantiation.
+  - New `audioOutput` bridge (`getOutputs`/`setOutput`) with unavailable stubs,
+    registered in `SincPackage`.
+  - PlayerScreen gained an **Output** footer button opening a BottomSheet picker
+    (Automatic + detected devices, current route highlighted, per-type icons);
+    selection applies immediately and refreshes the list.
+- Extended-player inventory confirmed against the spec (no duplication needed):
+  artwork, title/artist/album, favorite heart, progress bar with seek,
+  shuffle/previous/play/next/repeat, **Show Lyrics** footer shortcut (→ Lyrics
+  screen, preserving playback), Queue, Share, Download, and **More** (ellipsis →
+  song menu, which contains Add to Playlist).
+
+Files added/changed:
+
+- `apps/mobile/android/app/src/main/java/com/sinc/app/modules/SincAudioOutputModule.kt` (new)
+- `apps/mobile/android/app/src/main/java/com/sinc/app/modules/PlaybackService.kt`
+- `apps/mobile/android/app/src/main/java/com/sinc/app/modules/SincPackage.kt`
+- `apps/mobile/src/services/native/types.ts`
+- `apps/mobile/src/services/native/index.ts`
+- `apps/mobile/src/ui/screens/PlayerScreen.tsx`
+
+Checks:
+
+- `./gradlew :app:compileDebugKotlin` ✅
+- `npm run typecheck -w @sinc/mobile` ✅
+- `npm test -w @sinc/mobile` ✅ 310 passed.
+- Live route switching across Bluetooth/wired devices: 🕒 pending device tests (E).
+
+Known limitations:
+
+- Route inference when "Automatic" is selected is an approximation of Android's
+  internal precedence; actual audio routing is still decided by the OS.
+- If a pinned device disconnects, Android falls back to default routing on its
+  own; the picker refreshes its highlight the next time it is opened.
+
 ## Upcoming
 
 - Phase 2: JS playback-state reconciliation and favorite bridge.

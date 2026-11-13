@@ -1,9 +1,5 @@
 import { useEffect, useMemo, useState, type ComponentProps } from 'react';
-import {
-  Pressable,
-  View,
-  useWindowDimensions,
-} from 'react-native';
+import { Pressable, View, useWindowDimensions } from 'react-native';
 import { LinearGradient } from 'react-native-linear-gradient';
 import Ionicons from '@react-native-vector-icons/ionicons';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -13,13 +9,10 @@ import { Artwork } from '../components/Artwork';
 import { Text } from '../components/Text';
 import { IconButton } from '../components/Buttons';
 import { PlaybackControls, SeekBar } from '../components/Playback';
-import { ConfirmDialog, toast } from '../components/Overlays';
+import { ConfirmDialog, BottomSheet, SheetRow, toast } from '../components/Overlays';
 import { EmptyState } from '../components/State';
 import { colors, radii, spacing } from '../theme';
-import {
-  selectCurrentTrack,
-  usePlayerStore,
-} from '../../services/player/playerStore';
+import { selectCurrentTrack, usePlayerStore } from '../../services/player/playerStore';
 import { usePlayerProgressStore } from '../../services/player/playerProgressStore';
 import { playerService } from '../../services/player/PlayerService';
 import { useLibraryStore } from '../../services/library/libraryStore';
@@ -28,6 +21,8 @@ import { openSongMenu } from '../songMenu/songMenuStore';
 import { formatDuration } from '../../utils/format';
 import { shareEntity } from '../../utils/share';
 import { musicApi } from '../../api/music';
+import { nativeBridge } from '../../services/native';
+import type { AudioOutputDevice } from '../../services/native/types';
 import type { RootStackParamList } from '../../app/navigation/types';
 
 export function PlayerScreen() {
@@ -52,6 +47,9 @@ export function PlayerScreen() {
   const removeDownload = useDownloadsStore((state) => state.removeDownload);
 
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [outputSheet, setOutputSheet] = useState(false);
+  const [outputs, setOutputs] = useState<AudioOutputDevice[]>([]);
+  const [outputsLoading, setOutputsLoading] = useState(false);
 
   // `sinc://song/<id>` links load and play the linked track. The param is
   // consumed so reopening the player from the mini player does not replay it.
@@ -123,12 +121,35 @@ export function PlayerScreen() {
   const loading = status === 'loading';
   const artist = track.artists[0];
   const displayDuration = durationMs > 0 ? durationMs : track.durationMs;
-  const source = track.providerIds.deezer
-    ? 'Deezer'
-    : track.providerIds.itunes
-      ? 'iTunes'
-      : 'Sinc';
-  const error = status === 'error' ? errorMessage ?? 'This track could not be played.' : null;
+  const source = track.providerIds.deezer ? 'Deezer' : track.providerIds.itunes ? 'iTunes' : 'Sinc';
+  const error = status === 'error' ? (errorMessage ?? 'This track could not be played.') : null;
+
+  const refreshOutputs = () =>
+    nativeBridge.audioOutput
+      .getOutputs()
+      .then((devices) => setOutputs(Array.from(devices)))
+      .catch(() => toast('Could not list audio outputs', 'error'));
+
+  const openOutputSheet = () => {
+    if (!nativeBridge.audioOutput.available()) {
+      toast('Audio output switching is unavailable on this device', 'error');
+      return;
+    }
+    setOutputSheet(true);
+    setOutputsLoading(true);
+    void refreshOutputs().finally(() => setOutputsLoading(false));
+  };
+
+  const selectOutput = (deviceId: number, automatic: boolean) => {
+    void nativeBridge.audioOutput
+      .setOutput(deviceId)
+      .then((ok) => {
+        if (!ok) throw new Error('no playback session');
+        toast(automatic ? 'Audio output set to automatic' : 'Audio output switched', 'success');
+        return refreshOutputs();
+      })
+      .catch(() => toast('Could not switch audio output', 'error'));
+  };
 
   const handleDownload = () => {
     if (downloaded) {
@@ -143,9 +164,7 @@ export function PlayerScreen() {
     // Queueing is synchronous, so give immediate feedback instead of making
     // the button look unresponsive for the download's full duration.
     const failedDownload = download?.phase === 'failed' ? download : null;
-    const pending = failedDownload
-      ? retryDownload(failedDownload.jobId)
-      : downloadTrack(track);
+    const pending = failedDownload ? retryDownload(failedDownload.jobId) : downloadTrack(track);
     toast(failedDownload ? 'Download retried' : 'Download started', 'success');
     void pending.catch((caught: unknown) => {
       toast(caught instanceof Error ? caught.message : 'Could not start download', 'error');
@@ -237,7 +256,12 @@ export function PlayerScreen() {
                 }}
                 accessibilityRole="button"
                 accessibilityLabel={`Go to ${artist?.name ?? 'artist'}`}
-                style={{ flexDirection: 'row', alignItems: 'center', gap: 5, alignSelf: 'flex-start' }}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 5,
+                  alignSelf: 'flex-start',
+                }}
               >
                 <Text variant="bodyLarge" color="textSecondary" numberOfLines={1}>
                   {track.artists.map((item) => item.name).join(', ')}
@@ -253,7 +277,14 @@ export function PlayerScreen() {
                       justifyContent: 'center',
                     }}
                   >
-                    <Text style={{ fontSize: 9, lineHeight: 12, fontWeight: '900', color: colors.background }}>
+                    <Text
+                      style={{
+                        fontSize: 9,
+                        lineHeight: 12,
+                        fontWeight: '900',
+                        color: colors.background,
+                      }}
+                    >
                       E
                     </Text>
                   </View>
@@ -347,7 +378,9 @@ export function PlayerScreen() {
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
               <Text variant="caption">{formatDuration(positionMs)}</Text>
               <Text variant="caption">
-                {displayDuration > 0 ? `-${formatDuration(Math.max(0, displayDuration - positionMs))}` : '--:--'}
+                {displayDuration > 0
+                  ? `-${formatDuration(Math.max(0, displayDuration - positionMs))}`
+                  : '--:--'}
               </Text>
             </View>
           </View>
@@ -388,6 +421,7 @@ export function PlayerScreen() {
               label={`Queue${queue.length > 0 ? ` · ${queue.length}` : ''}`}
               onPress={() => navigation.navigate('Queue')}
             />
+            <FooterButton icon="volume-high-outline" label="Output" onPress={openOutputSheet} />
             <FooterButton
               icon="share-outline"
               label="Share"
@@ -403,6 +437,45 @@ export function PlayerScreen() {
           </View>
         </View>
       </View>
+
+      <BottomSheet
+        visible={outputSheet}
+        onClose={() => setOutputSheet(false)}
+        title="Audio output"
+        subtitle="Play through a connected speaker"
+      >
+        <SheetRow
+          icon="options-outline"
+          label="Automatic"
+          detail="Follow Android's default routing"
+          tone="accent"
+          onPress={() => selectOutput(-1, true)}
+        />
+        {outputsLoading && outputs.length === 0 ? (
+          <Text
+            variant="caption"
+            style={{ paddingHorizontal: spacing.lg, paddingVertical: spacing.md }}
+          >
+            Looking for devices…
+          </Text>
+        ) : null}
+        {outputs.map((device) => {
+          const detail =
+            device.productName && device.productName !== device.name
+              ? device.productName
+              : undefined;
+          return (
+            <SheetRow
+              key={device.id}
+              icon={outputIcon(device.name)}
+              label={device.name}
+              detail={detail}
+              tone={device.isCurrent ? 'accent' : 'default'}
+              onPress={() => selectOutput(device.id, false)}
+            />
+          );
+        })}
+      </BottomSheet>
 
       <ConfirmDialog
         visible={confirmRemove}
@@ -421,6 +494,14 @@ export function PlayerScreen() {
       />
     </View>
   );
+}
+
+function outputIcon(name: string): ComponentProps<typeof Ionicons>['name'] {
+  if (name.includes('Bluetooth')) return 'bluetooth-outline';
+  if (name.includes('USB')) return 'hardware-chip-outline';
+  if (name.includes('HDMI')) return 'tv-outline';
+  if (name.includes('Wired')) return 'headset-outline';
+  return 'volume-medium-outline';
 }
 
 function FooterButton({

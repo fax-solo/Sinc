@@ -245,4 +245,26 @@ export interface NativeBridge {
   yt: NativeYtModule;
   downloads: NativeDownloadActionsModule;
   http: NativeHttpModule;
+  audioOutput: NativeAudioOutputModule;
+}
+
+/** One physical output (speaker, headphones, Bluetooth…) visible to Android. */
+export interface AudioOutputDevice {
+  /** Stable while the device stays connected; pass back to setOutput. */
+  id: number;
+  name: string;
+  productName?: string;
+  isCurrent: boolean;
+}
+
+export interface NativeAudioOutputModule {
+  /** True when the native module is linked and usable. */
+  available(): boolean;
+  /** Lists output routes; the active route is flagged. */
+  getOutputs(): Promise<AudioOutputDevice[]>;
+  /**
+   * Routes playback to the given device id; a negative id restores the OS
+   * default. Resolves false when there is no running playback session.
+   */
+  setOutput(deviceId: number): Promise<boolean>;
 }

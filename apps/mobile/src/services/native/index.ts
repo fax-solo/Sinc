@@ -9,6 +9,8 @@ import type {
   NativePlayerCommand,
   NativePlayerCommandEvent,
   NativePlayerModule,
+  NativeAudioOutputModule,
+  AudioOutputDevice,
   NativeProgressEvent,
   NativeDownloadProgress,
   NativeHttpModule,
@@ -232,6 +234,27 @@ function createHttp(): NativeHttpModule {
   };
 }
 
+function createAudioOutput(): NativeAudioOutputModule {
+  const module = NativeModules.SincAudioOutput;
+  if (!module) {
+    return {
+      available: () => false,
+      getOutputs: unavailable('audioOutput.getOutputs'),
+      setOutput: unavailable('audioOutput.setOutput'),
+    };
+  }
+  return {
+    available: () => true,
+    getOutputs: async () => {
+      const raw = (await module.getOutputs()) as AudioOutputDevice[];
+      // Native returns a WritableArray that arrives as an array-like with a
+      // non-standard prototype in some bridge modes; copy into a plain array.
+      return Array.from(raw ?? []);
+    },
+    setOutput: (deviceId) => module.setOutput(deviceId),
+  };
+}
+
 /**
  * Access point for the native modules. Falls back to throwing stubs when the
  * native side is not linked, so JS code and tests can always import it safely.
@@ -242,4 +265,5 @@ export const nativeBridge: NativeBridge = {
   yt: createYt(),
   downloads: createDownloadActions(),
   http: createHttp(),
+  audioOutput: createAudioOutput(),
 };

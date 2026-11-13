@@ -58,6 +58,9 @@ class PlaybackService : MediaSessionService() {
     /** Mirrored favorite state for the current track, owned by the JS library store. */
     @Volatile var currentFavorite: Boolean = false
 
+    /** Explicitly chosen audio output, `-1`/null means follow the OS default. */
+    @Volatile var preferredAudioDeviceId: Int? = null
+
     /** The process-wide player, created on first use. */
     fun getPlayer(context: Context): ExoPlayer {
       exoPlayer?.let { return it }
