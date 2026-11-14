@@ -85,4 +85,6 @@ export const STORAGE_KEYS = {
   ANALYTICS: 'sinc.analytics',
   UPDATES: 'sinc.updates',
   STREAM_CACHE: 'sinc.streamCache',
+  NOTIFICATIONS: 'sinc.notifications',
+  UI_PREFS: 'sinc.uiPrefs',
 } as const;

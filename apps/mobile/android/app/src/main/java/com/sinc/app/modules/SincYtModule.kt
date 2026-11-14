@@ -8,6 +8,7 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import java.io.BufferedInputStream
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -16,15 +17,27 @@ import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 import java.util.Locale
 import com.sinc.app.modules.SincTrackMatch.Candidate
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.Semaphore
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONArray
 import org.json.JSONObject
+
+/**
+ * A finished file failed content verification. Carries a stable JS error code
+ * so the download store can distinguish a rejected source from a network error.
+ */
+private class FingerprintRejectedException(val code: String, message: String) :
+  Exception(message)
+
+/** The user paused or cancelled while the transfer/verification was running. */
+private class DownloadCancelledException(message: String) : Exception(message)
 
 /**
  * On-device yt-dlp / ffmpeg module (`NativeModules.SincYt`).
@@ -45,9 +58,16 @@ class SincYtModule(reactContext: ReactApplicationContext) :
 
   init {
     SincDownloads.attach(reactContext)
+    // One ffmpeg launcher for both the yt-dlp post-processor and the direct
+    // tagger; the direct module is constructed independently and must not
+    // guess the library path.
+    SincFfmpeg.configure(ffmpegBinary(), libDir(), abiDir())
     // The probe needs the bundled ffmpeg's location (owned here) before any
     // downloader (OkHttp path) can length-check what it saved.
     SincAudioProbe.configure(ffmpegBinary(), libDir())
+    // Content verification also decodes through the bundled ffmpeg and caches
+    // the trusted catalog preview under this module's cache directory.
+    SincAudioFingerprint.configure(ffmpegBinary(), libDir(), reactApplicationContext.cacheDir)
   }
 
   override fun getName(): String = "SincYt"
@@ -59,14 +79,14 @@ class SincYtModule(reactContext: ReactApplicationContext) :
      * on next use (e.g. after the bundled lib set shrinks, so stale files
      * from older builds don't linger in app storage).
      */
-    const val ASSET_REVISION = 3
+    const val ASSET_REVISION = 4
   }
 
   /** Streams shorter than this are treated as previews and skipped. */
   private val minFullLengthMs = 45_000L
   /**
    * Retry flags for search invocations (one-shot + candidate listing). Kept
-   * deliberately light: the client rotation across [fallbackClients] already
+   * deliberately light: the client rotation across the wave ladder already
    * IS the retry strategy, and heavy per-process retries are what turned one
    * bad network day into 7-minute resolves.
    */
@@ -100,10 +120,20 @@ class SincYtModule(reactContext: ReactApplicationContext) :
    */
   private val audiusAppName = "Sinc"
   private val audiusBase = "https://discoveryprovider.audius.co"
-  private val queryCacheTtlMs = 10 * 60 * 1000L
+  /**
+   * Query cache holds for 90 minutes and is persisted with the url cache: a
+   * song replayed later in the session — or right after an app restart —
+   * resolves from cache instead of paying a new search. googlevideo URLs live
+   * ~6h, so 90min stays comfortably inside a URL's lifetime; downloads still
+   * never start on a stale entry (see [downloadFreshWindowMs]).
+   */
+  private val queryCacheTtlMs = 90 * 60 * 1000L
   private val streamCacheTtlMs = 6 * 60 * 60 * 1000L
 
-  private class CachedEntry<V>(val expiresAtMs: Long, val value: V)
+  /** Strict (download) lookups only trust cached resolves younger than this. */
+  private val downloadFreshWindowMs = 45 * 60 * 1000L
+
+  private class CachedEntry<V>(val createdAtMs: Long, val expiresAtMs: Long, val value: V)
 
   /**
    * Audio-URL → StreamInfo and query → StreamInfo caches. YouTube's direct
@@ -117,7 +147,8 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     query.trim().lowercase(Locale.ROOT).replace(Regex("\\s+"), " ")
 
   private fun <V> putCache(map: MutableMap<String, CachedEntry<V>>, key: String, ttlMs: Long, value: V) {
-    map[key] = CachedEntry(System.currentTimeMillis() + ttlMs, value)
+    val now = System.currentTimeMillis()
+    map[key] = CachedEntry(now, now + ttlMs, value)
     scheduleUrlCachePersist()
   }
 
@@ -176,6 +207,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
             JSONObject()
               .put("k", key)
               .put("e", entry.expiresAtMs)
+              .put("c", entry.createdAtMs)
               .put("u", v.uri)
               .put("x", v.ext)
               .put("d", v.durationMs)
@@ -213,6 +245,9 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           val key = row.optString("k", "")
           if (uri.isEmpty() || key.isEmpty()) continue
           map[key] = CachedEntry(
+            // Entries persisted before "c" existed resolve as very old: safe —
+            // playback still uses them, downloads re-search for a fresh URL.
+            row.optLong("c", 0L),
             expiresAtMs,
             StreamInfo(uri, row.optString("x", "mp4").ifBlank { "mp4" }, row.optLong("d", 0L)),
           )
@@ -250,7 +285,14 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     promise.resolve(removed > 0)
   }
 
-  private val executor: ExecutorService = Executors.newFixedThreadPool(2)
+  /**
+   * Bridge-side glue: ReactMethod entry points block here while the heavy
+   * work (yt-dlp spawns) happens on [raceExecutor]. Four threads (was two):
+   * queue prefetches must never make a play tap's resolve wait its turn —
+   * that wait was invisible in logs and read as "finding a source" taking
+   * seconds longer than it did.
+   */
+  private val executor: ExecutorService = Executors.newFixedThreadPool(4)
   /**
    * Dedicated pool for download jobs. Previously downloads ran on the shared
    * lookup executor: two long transfers (resolve + extract on a weak link can
@@ -314,6 +356,13 @@ class SincYtModule(reactContext: ReactApplicationContext) :
 
   private fun ytdlpZipapp(): File = File(abiDir(), "yt-dlp.zipapp")
 
+  /**
+   * Real-files yt-dlp app directory. `python3 <this dir>` imports yt-dlp from
+   * disk instead of the zip, which lets CPython persist `__pycache__` and
+   * cuts roughly half the per-spawn startup cost (see [extractYtdlpSources]).
+   */
+  private fun ytdlpAppDir(): File = File(abiDir(), "ytdlp")
+
   private fun ffmpegBinary(): File = File(nativeBinDir(), "libsincffmpeg.so")
 
   private fun libDir(): File = File(abiDir(), "lib")
@@ -357,12 +406,75 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  /**
+   * In-flight "artist - title" resolves so a play tap JOINS a running prefetch
+   * (or an earlier play of the same song) instead of spawning a duplicate
+   * search. Keyed by normalized query + mode; the value completes with the
+   * resolved URL (null = that attempt found nothing validated).
+   */
+  private val inFlightQueries = ConcurrentHashMap<String, CompletableFuture<String?>>()
+
+  /**
+   * Shared entry for [resolveByQuery] (play) and [prefetch]. A twin caller
+   * waits on the running attempt rather than racing it — two identical
+   * searches otherwise doubled process load and gate permits for zero gain.
+   * A joined attempt that returns null falls through to a fresh run: a null
+   * from a prefetch may simply mean it never looked deeper (allowDeep=false).
+   */
+  private fun joinOrRunQueryResolve(
+    artist: String,
+    title: String,
+    durationMs: Long?,
+    strict: Boolean,
+    allowDeep: Boolean,
+  ): String? {
+    val query = listOf(artist.trim(), searchTitle(title).trim())
+      .filter { it.isNotEmpty() }
+      .joinToString(" - ")
+      .trim()
+    if (query.isEmpty()) return null
+    val key = SincDownloadRules.resolveCacheKey(queryCacheKey(query), durationMs, strict)
+    inFlightQueries[key]?.takeUnless { it.isDone }?.let { existing ->
+      Log.d(LOG_TAG, "joining in-flight resolve for '$query'")
+      val joined = try {
+        existing.get(170_000L, TimeUnit.MILLISECONDS)
+      } catch (_: Exception) {
+        null
+      }
+      if (joined != null) return joined
+      Log.d(LOG_TAG, "joined resolve came back empty; running a fresh one for '$query'")
+    }
+    val future = CompletableFuture<String?>()
+    val raced = inFlightQueries.putIfAbsent(key, future)
+    if (raced != null && !raced.isDone) {
+      val joined = try {
+        raced.get(170_000L, TimeUnit.MILLISECONDS)
+      } catch (_: Exception) {
+        null
+      }
+      if (joined != null) return joined
+    }
+    try {
+      val url = resolveByQueryInternal(artist, title, durationMs, strict, allowDeep)
+      future.complete(url)
+      return url
+    } finally {
+      inFlightQueries.remove(key, future)
+    }
+  }
+
   @ReactMethod
   fun resolveByQuery(artist: String, title: String, durationMs: Double, promise: Promise) {
     executor.execute {
       try {
         if (!ensureReady()) throw IllegalStateException("The on-device yt-dlp module is unavailable")
-        val url = resolveByQueryInternal(artist, title, if (durationMs > 0) Math.round(durationMs) else null)
+        val url = joinOrRunQueryResolve(
+          artist,
+          title,
+          if (durationMs > 0) Math.round(durationMs) else null,
+          strict = false,
+          allowDeep = true,
+        )
         promise.resolve(url)
       } catch (e: Exception) {
         Log.e(LOG_TAG, "resolveByQuery failed: ${e.message}")
@@ -384,46 +496,19 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           promise.resolve(false)
           return@execute
         }
-        val query = listOf(artist.trim(), searchTitle(title).trim())
-          .filter { it.isNotEmpty() }
-          .joinToString(" - ")
-          .trim()
-        if (query.isEmpty()) {
-          promise.resolve(false)
-          return@execute
-        }
         val expected = if (durationMs > 0) Math.round(durationMs) else null
         val started = System.currentTimeMillis()
-        // Prefetch stays light on purpose: the cheap Audius tier plus a
-        // first-hit-wins race. No slow candidate loop, no deep fallback —
+        // Prefetch shares the play path (same query cache, same in-flight
+        // dedupe) but stays light on purpose: no deep candidate loop —
         // prefetch must never burn minutes of CPU/network in the background
-        // for a track the user may skip past.
-        val cacheKey = queryCacheKey(query)
-        val audius = resolveAudius(query, artist, title, expected)
-        val stream = if (audius != null) {
-          putCache(queryCache, cacheKey, queryCacheTtlMs, audius)
-          putCache(streamCache, audius.uri, streamCacheTtlMs, audius)
-          audius
-        } else {
-          raceClients(
-            "prefetch",
-            query,
-            listOf(youtubeClient) + fallbackClients,
-            60_000,
-          ) { client ->
-            when (
-              val out = resolveSearchOneShotWithClient(query, artist, title, expected, client)
-            ) {
-              is OneShotOutcome.Hit -> out.info
-              else -> null
-            }
-          }?.second
-        }
-        promise.resolve(stream != null)
+        // for a track the user may already be past. If a play resolve for the
+        // same query is running, this joins it for free.
+        val warm = joinOrRunQueryResolve(artist, title, expected, strict = false, allowDeep = false)
+        promise.resolve(warm != null)
         Log.d(
           LOG_TAG,
-          "prefetch ${if (stream != null) "hit" else "miss"} in " +
-            "${System.currentTimeMillis() - started}ms for '$query'"
+          "prefetch ${if (warm != null) "hit" else "miss"} in " +
+            "${System.currentTimeMillis() - started}ms for '$artist - $title'"
         )
       } catch (e: Exception) {
         Log.w(LOG_TAG, "prefetch failed for '$artist - $title': ${e.message}")
@@ -431,6 +516,10 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       }
     }
   }
+
+  /** True when the user paused or cancelled this job. */
+  private fun isStopped(jobId: String): Boolean =
+    SincDownloads.isPaused(jobId) || !SincDownloads.isActive(jobId)
 
   @ReactMethod
   fun download(
@@ -445,8 +534,20 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     album: String?,
     artworkUrl: String?,
     publicFileName: String?,
+    previewUrl: String?,
     promise: Promise,
   ) {
+    val outDir = File(reactApplicationContext.filesDir, "sinc_yt")
+    outDir.mkdirs()
+    // Register on the bridge thread, before the executor queue. Downloads are
+    // queued behind a 2-thread pool; registering only inside the worker made
+    // pause/cancel silently do nothing until that job eventually started.
+    SincDownloads.begin(
+      jobId,
+      title ?: destinationFileName,
+      kill = {},
+      cleanup = { deleteJobFiles(outDir, destinationFileName) },
+    )
     downloadExecutor.execute {
       try {
         Log.i(LOG_TAG, "download entry jobId=$jobId mediaUrl=${mediaUrl?.take(60) ?: "<none>"} resume=$resumePart")
@@ -456,6 +557,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         // is a bare "Artist - Title" search string that must be resolved first.
         val rawTarget = if (mediaUrl.isNullOrBlank()) query else mediaUrl
         if (rawTarget.isBlank()) throw IllegalStateException("No source to download")
+        if (isStopped(jobId)) throw DownloadCancelledException("Download cancelled")
         var targetUrl = if (mediaUrl.isNullOrBlank()) {
           // Downloads resolve in strict mode: no cover/alteration fall-through.
           // A paused run continues from the SAME resolved source (re-resolving
@@ -472,8 +574,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         } else {
           rawTarget
         }
-        val outDir = File(reactApplicationContext.filesDir, "sinc_yt")
-        outDir.mkdirs()
+        if (isStopped(jobId)) throw DownloadCancelledException("Download cancelled")
         Log.d(LOG_TAG, "download start jobId=$jobId resumePart=$resumePart target=$targetUrl")
         // Tell the JS store the transfer began — the row flips from
         // "resolving" to a ticking bar NOW, not at the first stderr % line.
@@ -495,7 +596,10 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           // the module already knows title/artist — instead of surfacing a
           // dead-URL failure to the user.
           val staleUrl = targetUrl.contains("googlevideo.com") || isDirectAudioFile(targetUrl)
-          val canRecover = !mediaUrl.isNullOrBlank() &&
+          // A query-resolved target (mediaUrl == null) is just as likely to
+          // expire mid-transfer as a catalog-provided URL; re-resolve by
+          // artist/title in both cases instead of failing the job.
+          val canRecover = !isStopped(jobId) &&
             !artist.isNullOrBlank() && !title.isNullOrBlank() &&
             (staleUrl || first.message?.contains("403") == true ||
               first.message?.contains("404") == true)
@@ -512,6 +616,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           Log.w(LOG_TAG, "download re-redirected after stale target ($first): $reResolved")
           targetUrl = reResolved
           resolvedJobTargets[jobId] = reResolved
+          SincDownloads.postTransferStarted(jobId)
           downloadInternal(
             targetUrl,
             File(outDir, destinationFileName),
@@ -523,23 +628,81 @@ class SincYtModule(reactContext: ReactApplicationContext) :
             resumePart,
           )
         }
+        // The file transfer finished, but the user can still pause/cancel
+        // while the duration probe and content verification run. Keep the job
+        // registered until publishing is decided, and never publish for a
+        // stopped job.
+        if (isStopped(jobId)) {
+          result.file.delete()
+          throw DownloadCancelledException("Download cancelled")
+        }
         // Success: the job is done, drop the cached target. Failures and
         // pauses KEEP it so a resume continues the same .part against the
         // same source instead of silently switching uploads.
         resolvedJobTargets.remove(jobId)
-        // Final length guard on the measured file: this is what stops
-        // hour-long loops and compilations from being saved as 4-minute songs.
+        SincDownloads.postStage(jobId, "validating")
+        // Final length guard on the measured file. The old 0.5x-2x window
+        // accepted a different song that merely happened to be song-length;
+        // require the catalog duration (a few seconds of intro/outro slack),
+        // and reject an unreadable probe rather than tagging a guess.
         val finalMs = result.durationMs
-        val tooShort = finalMs in 1 until minFullLengthMs
-        val tooFarFromExpected = expectedMs != null && expectedMs > 0 && finalMs > 0L &&
-          (finalMs < (expectedMs * 0.5).toLong() || finalMs > (expectedMs * 2))
-        val overlongUnknown =
-          (expectedMs == null || expectedMs <= 0) && finalMs > maxUnknownLengthMs
-        if (tooShort || tooFarFromExpected || overlongUnknown) {
+        if (!SincDownloadRules.isDurationAcceptable(finalMs, expectedMs)) {
           result.file.delete()
+          // If the strict resolver cached this source, a manual retry would
+          // otherwise reuse the same wrong upload forever. Forget only this
+          // strict entry; playback/prefetch entries remain valid.
+          forgetStrictResolution(query, expectedMs)
           throw IllegalStateException(
             "Downloaded file is too short, too long, or doesn't match the song's length"
           )
+        }
+        // Duration is not identity: a different recording/cover can pass every
+        // metadata and length gate. Require the finished audio to contain the
+        // catalog preview before tagging or publishing it. A missing preview is
+        // the only case that falls back to the metadata/length gates.
+        if (!previewUrl.isNullOrBlank()) {
+          val fingerprint = SincAudioFingerprint.verify(result.file, previewUrl)
+          when (fingerprint.status) {
+            SincAudioFingerprint.Status.MATCH ->
+              Log.i(
+                LOG_TAG,
+                "fingerprint accepted jobId=$jobId score=${fingerprint.matches}/" +
+                  "${fingerprint.referenceHashes}"
+              )
+            SincAudioFingerprint.Status.MISMATCH -> {
+              result.file.delete()
+              // The audio itself is wrong. Drop the strict resolve so a retry
+              // searches again instead of replaying the same source forever.
+              forgetStrictResolution(query, expectedMs)
+              streamCache.remove(targetUrl)
+              throw FingerprintRejectedException(
+                "DOWNLOAD_FINGERPRINT_MISMATCH",
+                "The downloaded audio does not match the selected recording " +
+                  "(fingerprint ${fingerprint.matches}/${fingerprint.referenceHashes})"
+              )
+            }
+            SincAudioFingerprint.Status.UNAVAILABLE -> {
+              result.file.delete()
+              // Do not discard the strict resolve here: a preview CDN/network
+              // problem says nothing about the download source.
+              throw FingerprintRejectedException(
+                "DOWNLOAD_FINGERPRINT_UNAVAILABLE",
+                "Could not verify the downloaded audio against the catalog preview " +
+                  "(${fingerprint.reason})"
+              )
+            }
+            SincAudioFingerprint.Status.NO_REFERENCE ->
+              Log.w(
+                LOG_TAG,
+                "fingerprint skipped jobId=$jobId reason=${fingerprint.reason}"
+              )
+          }
+        }
+        // Verification can take seconds; a pause/cancel during it must still
+        // win over publishing.
+        if (isStopped(jobId)) {
+          result.file.delete()
+          throw DownloadCancelledException("Download cancelled")
         }
         // Tag the file so other music players show title/artist/album/artwork,
         // and publish a copy to the public Music/Sinc collection. The display
@@ -586,9 +749,27 @@ class SincYtModule(reactContext: ReactApplicationContext) :
             )
           }
         )
+      } catch (e: DownloadCancelledException) {
+        Log.i(LOG_TAG, "download cancelled jobId=$jobId: ${e.message}")
+        promise.reject("DOWNLOAD_CANCELLED", e.message)
+      } catch (e: FingerprintRejectedException) {
+        if (isStopped(jobId)) {
+          Log.i(LOG_TAG, "download cancelled during verification jobId=$jobId")
+          promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
+        } else {
+          Log.w(LOG_TAG, "download rejected jobId=$jobId: ${e.message}")
+          promise.reject(e.code, e.message)
+        }
       } catch (e: Exception) {
-        Log.e(LOG_TAG, "download failed jobId=$jobId: ${e.message}", e)
-        promise.reject("YT_DOWNLOAD_ERROR", e.message)
+        if (isStopped(jobId)) {
+          Log.i(LOG_TAG, "download cancelled jobId=$jobId: ${e.message}")
+          promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
+        } else {
+          Log.e(LOG_TAG, "download failed jobId=$jobId: ${e.message}", e)
+          promise.reject("YT_DOWNLOAD_ERROR", e.message)
+        }
+      } finally {
+        SincDownloads.end(jobId)
       }
     }
   }
@@ -606,17 +787,36 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       val outDir = File(reactApplicationContext.filesDir, "sinc_yt")
       val target = File(outDir, fileName)
       if (target.canonicalPath.startsWith(outDir.canonicalPath + File.separator)) {
-        target.delete()
-        // Drop stale partials for the same stem, if any linger.
-        outDir.listFiles()
-          ?.filter { it.name.startsWith(fileName) && (it.name.endsWith(".part") || it.name.endsWith(".ytdl")) }
-          ?.forEach { it.delete() }
+        deleteJobFiles(outDir, fileName)
       }
       SincDownloads.removePublished(publicFileName)
       promise.resolve(null)
     } catch (e: Exception) {
       Log.w(LOG_TAG, "remove failed for $fileName: ${e.message}")
       promise.resolve(null)
+    }
+  }
+
+  /**
+   * Deletes every artifact belonging to one job stem: the final container
+   * (which may not match the legacy `.mp3` template extension), `.part`,
+   * `.ytdl` and temporary tag files. Used by both cancel cleanup and remove.
+   */
+  private fun deleteJobFiles(outDir: File, fileName: String) {
+    val safeName = File(fileName).name
+    if (safeName.isBlank() || safeName == "." || safeName == "..") return
+    val stem = safeName.substringBeforeLast('.', safeName)
+    outDir.listFiles()?.forEach { file ->
+      val name = file.name
+      if (
+        name == safeName ||
+        name.startsWith("$stem.") ||
+        name.startsWith("$stem.part") ||
+        name.startsWith("$stem.ytdl") ||
+        name.startsWith("$stem-")
+      ) {
+        file.delete()
+      }
     }
   }
 
@@ -653,6 +853,11 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           abiDir().apply { mkdirs() }
           extract("bin/ytdlp.zipapp", ytdlpZipapp())
           runCatching { extract("bin/ca-cert.pem", sslCertFile()) }
+          // Unpack the zipapp into a real directory so CPython can cache
+          // bytecode between spawns (the zip app cannot). Best-effort: the
+          // zipapp itself remains the working fallback.
+          runCatching { extractYtdlpSources() }
+            .onFailure { Log.w(LOG_TAG, "ytdlp unpack failed (zipapp fallback): ${it.message}") }
           // Wipe a previous partial/incomplete stdlib tree before unpacking so a
           // stale broken layout can never shadow the fresh copy below.
           libDir().deleteRecursively()
@@ -662,6 +867,12 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           Log.d(LOG_TAG, "extraction done in ${System.currentTimeMillis() - started}ms; python=$pyEntryCount")
         } else {
           Log.d(LOG_TAG, "engine ready (extracted tree verified, marker match)")
+          // Marker survived but the unpacked tree didn't (interrupted/cleaned
+          // install): repair just the unpack, never the whole extraction.
+          if (!ytdlpAppDir().isDirectory) {
+            runCatching { extractYtdlpSources() }
+              .onFailure { Log.w(LOG_TAG, "ytdlp unpack repair failed: ${it.message}") }
+          }
         }
         return finishExtraction(true)
       } catch (e: Exception) {
@@ -752,6 +963,53 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     Log.d(LOG_TAG, "inflated $inflated files from stdlib_extras.zip")
   }
 
+  /**
+   * Unpacks ytdlp.zipapp — a shebang line followed by a zip image — into
+   * [ytdlpAppDir] so `python3 <dir>` runs yt-dlp from real files. From a zip,
+   * every spawn recompiles every module; from disk, CPython writes
+   * `__pycache__` once and later spawns import ~3x faster (measured 0.8s vs
+   * 0.28s warm on desktop with this exact bundled build — several times that
+   * on a phone CPU). Run() falls back to the zipapp if this ever failed.
+   */
+  private fun extractYtdlpSources() {
+    val target = ytdlpAppDir()
+    target.deleteRecursively()
+    target.mkdirs()
+    val bytes = ytdlpZipapp().readBytes()
+    var offset = 0
+    while (offset + 4 <= bytes.size) {
+      if (
+        bytes[offset] == 0x50.toByte() && bytes[offset + 1] == 0x4B.toByte() &&
+        bytes[offset + 2] == 0x03.toByte() && bytes[offset + 3] == 0x04.toByte()
+      ) {
+        break
+      }
+      offset += 1
+    }
+    if (offset + 4 > bytes.size) throw IllegalStateException("no zip image in ytdlp.zipapp")
+    var inflated = 0
+    BufferedInputStream(java.io.ByteArrayInputStream(bytes, offset, bytes.size)).use { input ->
+      ZipInputStream(input).use { zip ->
+        while (true) {
+          val entry = zip.nextEntry ?: break
+          val name = entry.name
+          if (name.isBlank() || name.startsWith("/") || name.split('/').any { it == ".." }) {
+            Log.w(LOG_TAG, "skipping unsafe ytdlp entry: $name")
+          } else if (entry.isDirectory) {
+            File(target, name).mkdirs()
+          } else {
+            val out = File(target, name)
+            out.parentFile?.mkdirs()
+            out.outputStream().use { destination -> zip.copyTo(destination) }
+            inflated += 1
+          }
+          zip.closeEntry()
+        }
+      }
+    }
+    Log.d(LOG_TAG, "unpacked $inflated ytdlp files into ${target.name}/")
+  }
+
   private fun copyAssetTree(assetPath: String, target: File) {
     val isDir = isFileAsset(assetPath).not()
     if (isDir) {
@@ -802,6 +1060,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     timeoutMs: Long,
     gate: Semaphore,
     jobId: String? = null,
+    onStdoutLine: ((String) -> Unit)? = null,
     onStderrLine: ((String) -> Unit)? = null,
   ): RunResult {
     gate.acquire()
@@ -810,19 +1069,25 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     var process: Process? = null
     return try {
       val executable = pythonBinary()
-      val zipapp = ytdlpZipapp()
+      // Prefer the unpacked yt-dlp tree over the zipapp: from real files
+      // CPython persists __pycache__ once and every later spawn imports ~3x
+      // faster (measured 0.8s → 0.28s warm on desktop with this exact
+      // build; several times that on a phone CPU). The zipapp stays as a
+      // working fallback if the unpack ever failed.
+      val ytdlpRoot = ytdlpAppDir().takeIf { it.isDirectory } ?: ytdlpZipapp()
       // -4 forces IPv4: the bundled Termux Python has no Happy Eyeballs, so on
       // networks with broken IPv6 egress every connection stalls or dies.
       // (This mirrors Seal's default invocation, which works where ours didn't.)
       val pb = ProcessBuilder(
-        listOf(executable.absolutePath, zipapp.absolutePath, "-4") + jsRuntimeArgs() + args
+        listOf(executable.absolutePath, ytdlpRoot.absolutePath, "-4") + jsRuntimeArgs() + args
       )
       pb.redirectErrorStream(false)
       pb.environment().apply {
         put("LD_LIBRARY_PATH", libDir().absolutePath)
         put("PATH", "${abiDir().absolutePath}:/system/bin:/system/xbin")
-        put("PYTHONDONTWRITEBYTECODE", "1")
-        // The interpreter now lives in the APK native-lib dir (far from the
+        // Bytecode writing is deliberately NOT disabled: the unpacked tree
+        // needs __pycache__ to pay off (see the comment above ytdlpRoot).
+        // The interpreter lives in the APK native-lib dir (far from the
         // stdlib), so tell python where its prefix tree was unpacked.
         put("PYTHONHOME", abiDir().absolutePath)
         put("SSL_CERT_FILE", sslCertFile().absolutePath)
@@ -831,11 +1096,13 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       process = pb.start()
       if (jobId != null) {
         SincDownloads.attachKill(jobId) { process?.destroyForcibly() }
-        // The job may have been cancelled while queued behind the gate.
-        if (!SincDownloads.isActive(jobId)) process?.destroyForcibly()
+        // The job may have been paused/cancelled while queued behind the gate.
+        if (SincDownloads.isPaused(jobId) || !SincDownloads.isActive(jobId)) {
+          process?.destroyForcibly()
+        }
       }
       val proc = process!!
-      val stdout = ProcessStreamReader(proc.inputStream)
+      val stdout = ProcessStreamReader(proc.inputStream, onStdoutLine)
       val stderr = ProcessStreamReader(proc.errorStream, onStderrLine)
       val finished = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
       if (!finished) {
@@ -919,7 +1186,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     }
   }
 
-  private fun youtubeClientArgs(urlOrQuery: String, client: String = youtubeClient): List<String> =
+  private fun youtubeClientArgs(urlOrQuery: String, client: String): List<String> =
     if (
       client.isNotBlank() &&
       Regex("youtube|ytsearch|googlevideo", RegexOption.IGNORE_CASE).containsMatchIn(urlOrQuery)
@@ -930,20 +1197,40 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     }
 
   /**
-   * YouTube client to ask for stream formats with. Blank means "no
-   * `--extractor-args`": yt-dlp's own default negotiation, which works where
-   * forced clients don't (several forced clients now need PO tokens / sign-in
-   * on many networks and fail with "Requested format is not available").
-   * Individual videos occasionally expose no formats for one client, so
-   * lookups retry across the fallback list before giving up. `web`, `tv`,
-   * `web_safari` and `ios` are deliberately absent: they require PO tokens on
-   * most networks as of 2026.
+   * Client wave ladder for YouTube lookups. Wave 1 is ONE yt-dlp process —
+   * not the old six-way concurrent race: staggered python cold starts starved
+   * the winning attempt on 4-core phones, and two names in the old list
+   * (`tv_embedded`, `android_testsuite`) are outright rejected by the bundled
+   * 2026.08.19 build ("Skipping unsupported client …"), after which they just
+   * duplicated the default client's work.
+   *
+   * Wave 1 pins `visionos`: part of yt-dlp's default client set, answers in
+   * ~3s and carries real audio-only formats (m4a itag 140 @130k, opus 251
+   * @129k) that download cleanly — verified against this exact bundled build.
+   * Wave 2 adds "" (blank = no `--extractor-args`: yt-dlp's own default
+   * negotiation, which adapts if a pinned client ever breaks) and
+   * web_embedded. Wave 3 is playback-only: android answers fastest but only
+   * publishes the muxed ITAG 18 mp4 (360p video + 96k audio), useless for
+   * audio-only downloads. `web`, `tv`, `web_safari`, `ios`, `mweb`,
+   * `android_vr` stay absent: they require PO tokens on most networks as of
+   * 2026.
    */
-  private var youtubeClient = ""
+  private val youtubePrimaryWave = listOf("visionos")
+  private val youtubeSecondWave = listOf("", "web_embedded")
+  private val youtubeMuxedWave = listOf("android")
 
-  /** Alternate YouTube clients tried when the first one finds no formats. */
-  private val fallbackClients =
-    listOf("android", "web_embedded", "tv_embedded", "mweb", "android_testsuite")
+  /** Delay before wave 2 joins a lookup that has not won yet (ms). */
+  private val secondWaveDelayMs = 5_000L
+  /** Delay before the playback-only muxed wave joins a lenient lookup (ms). */
+  private val muxedWaveDelayMs = 10_000L
+
+  /** Wave schedule for a YouTube/ytsearch lookup: later waves retry harder. */
+  private fun youtubeClientWaves(lenient: Boolean): List<Pair<Long, List<String>>> {
+    val waves = mutableListOf(0L to youtubePrimaryWave)
+    waves += secondWaveDelayMs to youtubeSecondWave
+    if (lenient) waves += muxedWaveDelayMs to youtubeMuxedWave
+    return waves
+  }
 
   // ---------------------------------------------------------------------
   // yt-dlp operations (mirror server ytdlp.ts)
@@ -964,43 +1251,52 @@ class SincYtModule(reactContext: ReactApplicationContext) :
   }
 
   /**
-   * Runs one attempt per client concurrently; the first non-null result wins
-   * and the losers are cancelled (their yt-dlp processes are destroyed via
-   * thread interruption — see run()). Sequential client rotation turned one
-   * bad-network day into 7-minute resolves; racing keeps it to the cost of the
-   * single fastest success.
+   * Runs client attempts in timed waves; the first non-null result wins and
+   * the losers are cancelled (their yt-dlp processes are destroyed via thread
+   * interruption — see run()). A wave joins when its delay elapses OR the
+   * moment every earlier attempt finished without winning, so a healthy
+   * lookup costs one process while a broken one still rotates clients without
+   * waiting out the full delay. Sequential rotation was what turned one
+   * bad-network day into 7-minute resolves; waves keep that recovery while
+   * dropping the old six-cold-starts-per-lookup storm.
    */
   private fun <T> raceClients(
     label: String,
     key: String,
-    clients: List<String>,
+    waves: List<Pair<Long, List<String>>>,
     budgetMs: Long,
     attempt: (client: String) -> T?,
   ): Pair<String, T>? {
-    if (clients.isEmpty()) return null
-    if (clients.size == 1) {
+    if (waves.isEmpty()) return null
+    val firstWaveClients = waves[0].second
+    if (waves.size == 1 && firstWaveClients.size == 1) {
       val value = try {
-        attempt(clients[0])
+        attempt(firstWaveClients[0])
       } catch (_: Exception) {
         null
       }
-      return if (value != null) clients[0] to value else null
+      return if (value != null) firstWaveClients[0] to value else null
     }
     val started = System.currentTimeMillis()
-    val futures = clients.map { client ->
-      raceExecutor.submit<Pair<String, T>?> {
-        val value = try {
-          attempt(client)
-        } catch (_: Exception) {
-          null
+    val futures = mutableListOf<Pair<String, Future<Pair<String, T>?>>>()
+    fun launch(clients: List<String>) {
+      for (client in clients) {
+        futures += client to raceExecutor.submit<Pair<String, T>?> {
+          val value = try {
+            attempt(client)
+          } catch (_: Exception) {
+            null
+          }
+          if (value != null) client to value else null
         }
-        if (value != null) client to value else null
       }
     }
+    launch(firstWaveClients)
+    var nextWave = 1
     try {
       val deadline = started + budgetMs
       while (true) {
-        for (future in futures) {
+        for ((_, future) in futures) {
           if (!future.isDone) continue
           val won = try {
             future.get()
@@ -1008,7 +1304,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
             null
           }
           if (won != null) {
-            futures.forEach { if (!it.isDone) it.cancel(true) }
+            futures.forEach { if (!it.second.isDone) it.second.cancel(true) }
             Log.d(
               LOG_TAG,
               "$label race won by ${won.first.ifBlank { "default" }} in " +
@@ -1017,9 +1313,17 @@ class SincYtModule(reactContext: ReactApplicationContext) :
             return won
           }
         }
-        if (futures.all { it.isDone }) return null
+        if (nextWave < waves.size) {
+          val (delayMs, waveClients) = waves[nextWave]
+          if (futures.all { it.second.isDone } || System.currentTimeMillis() >= started + delayMs) {
+            launch(waveClients)
+            nextWave += 1
+          }
+        }
+        // Every scheduled wave has been launched and every attempt lost.
+        if (nextWave >= waves.size && futures.all { it.second.isDone }) return null
         if (System.currentTimeMillis() >= deadline) {
-          futures.forEach { if (!it.isDone) it.cancel(true) }
+          futures.forEach { if (!it.second.isDone) it.second.cancel(true) }
           Log.w(LOG_TAG, "$label race timed out for $key")
           return null
         }
@@ -1027,12 +1331,12 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           Thread.sleep(250)
         } catch (_: InterruptedException) {
           Thread.currentThread().interrupt()
-          futures.forEach { if (!it.isDone) it.cancel(true) }
+          futures.forEach { if (!it.second.isDone) it.second.cancel(true) }
           return null
         }
       }
     } finally {
-      futures.forEach { if (!it.isDone) it.cancel(true) }
+      futures.forEach { if (!it.second.isDone) it.second.cancel(true) }
     }
   }
 
@@ -1049,7 +1353,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     val won = raceClients(
       if (audioOnly) "resolve-audio" else "resolve",
       key,
-      listOf(youtubeClient) + fallbackClients,
+      youtubeClientWaves(lenient = !audioOnly),
       if (audioOnly) 45_000 else 90_000,
     ) { client ->
       resolveWithClient(urlOrQuery, client)
@@ -1220,7 +1524,9 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     durationMs: Long?,
     strict: Boolean = false,
   ): OneShotOutcome {
-    val clients = listOf(youtubeClient) + fallbackClients
+    // Downloads never see the muxed android wave (its hit would always be
+    // parked and waited on); playback keeps it as the last retry.
+    val waves = youtubeClientWaves(lenient = !strict)
     val started = System.currentTimeMillis()
     val hardDeadline = started + 150_000
     var muxedHit: OneShotOutcome.Hit? = null
@@ -1231,20 +1537,25 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     // hit is enough for the audio-capable clients to answer; afterwards the
     // muxed hit is accepted and the downloader converts it (retag→mp3→m4a).
     var audioWaitDeadlineMs = 0L
-    val futures = clients.map { client ->
-      raceExecutor.submit<OneShotOutcome> {
-        try {
-          resolveSearchOneShotWithClient(query, artist, title, durationMs, client, strict)
-        } catch (_: Exception) {
-          OneShotOutcome.NoFormats
+    val futures = mutableListOf<Pair<String, Future<OneShotOutcome>>>()
+    fun launch(clients: List<String>) {
+      for (client in clients) {
+        futures += client to raceExecutor.submit<OneShotOutcome> {
+          try {
+            resolveSearchOneShotWithClient(query, artist, title, durationMs, client, strict)
+          } catch (_: Exception) {
+            OneShotOutcome.NoFormats
+          }
         }
       }
     }
+    launch(waves[0].second)
+    var nextWave = 1
     try {
       // Return the first validated hit immediately (fast success); otherwise
       // wait for every client so the outcome classification below is honest.
       while (true) {
-        for ((index, future) in futures.withIndex()) {
+        for ((client, future) in futures) {
           if (!future.isDone) continue
           val outcome = try {
             future.get()
@@ -1268,17 +1579,24 @@ class SincYtModule(reactContext: ReactApplicationContext) :
               }
               continue
             }
-            futures.forEach { if (!it.isDone) it.cancel(true) }
+            futures.forEach { if (!it.second.isDone) it.second.cancel(true) }
             putCache(streamCache, "ytsearch1:$query", streamCacheTtlMs, outcome.info)
             Log.d(
               LOG_TAG,
-              "one-shot hit via ${clients[index].ifBlank { "default" }} in " +
+              "one-shot hit via ${client.ifBlank { "default" }} in " +
                 "${System.currentTimeMillis() - started}ms for '$query'"
             )
             return outcome
           }
         }
-        if (futures.all { it.isDone }) break
+        if (nextWave < waves.size) {
+          val (delayMs, waveClients) = waves[nextWave]
+          if (futures.all { it.second.isDone } || System.currentTimeMillis() >= started + delayMs) {
+            launch(waveClients)
+            nextWave += 1
+          }
+        }
+        if (nextWave >= waves.size && futures.all { it.second.isDone }) break
         if (muxedHit != null && audioWaitDeadlineMs > 0L &&
           System.currentTimeMillis() >= audioWaitDeadlineMs
         ) {
@@ -1286,7 +1604,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           break
         }
         if (System.currentTimeMillis() >= hardDeadline) {
-          futures.forEach { if (!it.isDone) it.cancel(true) }
+          futures.forEach { if (!it.second.isDone) it.second.cancel(true) }
           Log.w(LOG_TAG, "one-shot collect timed out for '$query'")
           break
         }
@@ -1294,12 +1612,12 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           Thread.sleep(250)
         } catch (_: InterruptedException) {
           Thread.currentThread().interrupt()
-          futures.forEach { if (!it.isDone) it.cancel(true) }
+          futures.forEach { if (!it.second.isDone) it.second.cancel(true) }
           break
         }
       }
     } finally {
-      futures.forEach { if (!it.isDone) it.cancel(true) }
+      futures.forEach { if (!it.second.isDone) it.second.cancel(true) }
     }
     if (muxedHit != null) {
       putCache(streamCache, "ytsearch1:$query", streamCacheTtlMs, muxedHit.info)
@@ -1308,7 +1626,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     }
     val outcomes = futures.mapNotNull { f ->
       try {
-        f.get()
+        f.second.get()
       } catch (_: Exception) {
         null
       }
@@ -1611,7 +1929,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         "--flat-playlist",
         "--dump-single-json",
         "--no-playlist",
-      ) + searchRetryArgs + lookupNetArgs + youtubeClientArgs(prefix) + listOf("$prefix${8}:$query"),
+      ) + searchRetryArgs + lookupNetArgs + youtubeClientArgs(prefix, "") + listOf("$prefix${8}:$query"),
       60_000,
       lookupGate,
     )
@@ -1654,6 +1972,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     title: String,
     durationMs: Long?,
     strict: Boolean = false,
+    allowDeep: Boolean = true,
   ): String? {
     // Mirrors the server: the *search query* is variant-stripped for recall,
     // while the *match* uses the raw title so bestMatch can see live/remix tags.
@@ -1665,57 +1984,132 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     Log.i(LOG_TAG, "resolve entry query='$query' strict=$strict")
 
     // Repeat plays (or plays of the same query within the TTL) are instant.
-    val cacheKey = queryCacheKey(query)
+    // Strictness + duration are part of the key: a lenient prefetch/playback
+    // entry must never satisfy a download, and two versions of the same
+    // artist/title must not share a cached stream.
+    val cacheKey = SincDownloadRules.resolveCacheKey(queryCacheKey(query), durationMs, strict)
     // A validated-but-muxed (itag 18/22 video mp4) hit: never handed to a
     // strict download as THE answer, but kept so the resolve can still return
     // it if nothing audio-only exists anywhere.
     var muxedFallback: StreamInfo? = null
-    lookupCache(queryCache, cacheKey)?.let { cached ->
-      if (!strict || isAudioContainer(cached.ext)) return cached.uri
-      Log.d(LOG_TAG, "cached muxed container (${cached.ext}) demoted to fallback for '$query'")
-      muxedFallback = cached
+    queryCache[cacheKey]?.let { entry ->
+      val now = System.currentTimeMillis()
+      val ageMs = now - entry.createdAtMs
+      when {
+        entry.expiresAtMs < now -> queryCache.remove(cacheKey)
+        // A download may start long after the URL was resolved, and googlevideo
+        // URLs die after ~6h — starting one on a half-expired URL wastes the
+        // job. Only fresh cached resolves are trusted for downloads. Playback
+        // keeps the full TTL: a dead URL is caught by the stale-retry path.
+        strict && ageMs > downloadFreshWindowMs -> {
+          Log.d(
+            LOG_TAG,
+            "ignoring stale cached resolve (${ageMs / 60_000}min old) for strict '$query'"
+          )
+        }
+        else -> {
+          val cached = entry.value
+          if (!strict || isAudioContainer(cached.ext)) return cached.uri
+          Log.d(LOG_TAG, "cached muxed container (${cached.ext}) demoted to fallback for '$query'")
+          muxedFallback = cached
+        }
+      }
     }
 
-    // Audius (win-when-matched) and the yt search run CONCURRENTLY. A serial
-    // probe stalls every non-Audius resolve for the tier's full timeout on a
-    // bad link before the search even begins; out-of-band it adds nothing.
-    // Preference stays with Audius (matched ≤8s usually, cheaper, and its
-    // stream URL needs no extraction) — after the search lands we only wait a
-    // short grace window for it, never the old serial worst case.
+    // Audius (~1s, two plain HTTPS calls) and the yt-dlp search RACE with the
+    // first VALIDATED result winning. The old order blocked on the search and
+    // only THEN waited up to 8s more for Audius: a track YouTube hit in 3s
+    // could take 11s, and a 1s Audius answer was ignored until the search
+    // finished. Now either tier wins the instant it validates, so the worst
+    // case collapsed to the fastest tier's own work.
     val audiusFuture = audiusExecutor.submit<StreamInfo?>(
       java.util.concurrent.Callable { resolveAudius(query, artist, title, durationMs, strict) }
     )
-    val oneShot = resolveSearchOneShot(query, artist, title, durationMs, strict)
-    val audius = try {
-      audiusFuture.get(8_000L, TimeUnit.MILLISECONDS)
-    } catch (e: Exception) {
-      audiusFuture.cancel(true)
-      null
-    }
-    if (audius != null) {
-      putCache(queryCache, cacheKey, queryCacheTtlMs, audius)
-      putCache(streamCache, audius.uri, streamCacheTtlMs, audius)
-      return audius.uri
-    }
-
-    // Fast path: validated top hits across clients, raced concurrently.
-    // This is what makes play feel instant (no candidate loop, no re-resolve).
-    when (val fast = oneShot) {
-      is OneShotOutcome.Hit -> {
-        if (strict && !isAudioContainer(fast.info.ext)) {
-          // The top hit is a muxed video container: park it and let the
-          // deep search (which asks clients for audio-only picks) find a
-          // real audio format for the download.
-          Log.d(LOG_TAG, "one-shot muxed container (${fast.info.ext}) demoted for '$query'")
-          muxedFallback = fast.info
-          putCache(queryCache, cacheKey, queryCacheTtlMs, fast.info)
-          putCache(streamCache, fast.info.uri, streamCacheTtlMs, fast.info)
-        } else {
-          putCache(queryCache, cacheKey, queryCacheTtlMs, fast.info)
-          putCache(streamCache, fast.info.uri, streamCacheTtlMs, fast.info)
-          return fast.info.uri
+    val searchFuture = raceExecutor.submit<OneShotOutcome>(
+      java.util.concurrent.Callable { resolveSearchOneShot(query, artist, title, durationMs, strict) }
+    )
+    val raceStarted = System.currentTimeMillis()
+    // searchFuture carries a 150s internal hard deadline of its own; leave
+    // headroom so its outcome classification (muxed parking etc.) lands first.
+    val raceDeadline = raceStarted + 160_000L
+    var searchSettled = false
+    var audiusDone = false
+    var winner: StreamInfo? = null
+    var winnerFrom = ""
+    var searchOutcome: OneShotOutcome? = null
+    while (winner == null && !(searchSettled && audiusDone)) {
+      if (winner == null && !audiusDone && audiusFuture.isDone) {
+        audiusDone = true
+        val audiusInfo = try {
+          audiusFuture.get()
+        } catch (_: Exception) {
+          null
+        }
+        if (audiusInfo != null) {
+          winner = audiusInfo
+          winnerFrom = "audius"
+          break
         }
       }
+      if (winner == null && !searchSettled && searchFuture.isDone) {
+        searchSettled = true
+        searchOutcome = try {
+          searchFuture.get()
+        } catch (_: Exception) {
+          OneShotOutcome.NoFormats
+        }
+        val fast = searchOutcome as? OneShotOutcome.Hit
+        when {
+          fast != null && !(strict && !isAudioContainer(fast.info.ext)) -> {
+            winner = fast.info
+            winnerFrom = "yt"
+            break
+          }
+          fast != null -> {
+            // The top hit is a muxed video container: park it (usable only as
+            // a last resort) and keep waiting for the Audius audio-only miss.
+            Log.d(LOG_TAG, "one-shot muxed container (${fast.info.ext}) demoted for '$query'")
+            muxedFallback = fast.info
+            putCache(queryCache, cacheKey, queryCacheTtlMs, fast.info)
+            putCache(streamCache, fast.info.uri, streamCacheTtlMs, fast.info)
+          }
+        }
+      }
+      if (System.currentTimeMillis() >= raceDeadline) break
+      try {
+        Thread.sleep(100)
+      } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        break
+      }
+    }
+    if (winner != null) {
+      if (winnerFrom == "audius") {
+        searchFuture.cancel(true)
+        putCache(queryCache, cacheKey, queryCacheTtlMs, winner)
+        putCache(streamCache, winner.uri, streamCacheTtlMs, winner)
+        Log.d(
+          LOG_TAG,
+          "query race won by audius in ${System.currentTimeMillis() - raceStarted}ms for '$query'"
+        )
+        return winner.uri
+      }
+      audiusFuture.cancel(true)
+      putCache(queryCache, cacheKey, queryCacheTtlMs, winner)
+      putCache(streamCache, winner.uri, streamCacheTtlMs, winner)
+      Log.d(
+        LOG_TAG,
+        "query race won by yt in ${System.currentTimeMillis() - raceStarted}ms for '$query'"
+      )
+      return winner.uri
+    }
+    // Nothing won: nothing may keep spawning yt-dlp past this point.
+    searchFuture.cancel(true)
+    if (!audiusDone) audiusFuture.cancel(true)
+
+    // No tier produced a validated source. The deep pool below (bounded,
+    // scored every-candidate) is the only remaining chance this song has.
+    when (val fast = searchOutcome) {
       is OneShotOutcome.NoFormats -> {
         if (strict) {
           // A download must not die because the TOP hit's formats are gated
@@ -1737,20 +2131,36 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         }
       }
       is OneShotOutcome.Rejected -> {
-        // Formats exist but validation refused them — deeper candidates may
+        // Formats existed but validation refused them — deeper candidates may
         // still match, so fall through to scoring.
+      }
+      is OneShotOutcome.Hit -> {
+        // Parked muxed hit while Audius missed/unmatched: the deep pool below
+        // still gets its chance; the parked URL may return at the very end.
+        Log.d(LOG_TAG, "one-shot parked muxed hit carries the race for '$query'")
+      }
+      null -> {
+        // Race deadline tripped before either tier answered.
+        Log.w(LOG_TAG, "query race found nothing before the deadline for '$query'")
       }
     }
 
     // Slow fallback: list both sites' candidates concurrently, then score
     // soundcloud first (usually the cleaner match), then youtube.
-    val siteLists = collectOutcomes(
-      "candidates",
-      query,
-      listOf("soundcloud", "youtube"),
-      75_000,
-    ) { site -> searchCandidates(query, site) }
-      .sortedBy { (site, _) -> if (site == "soundcloud") 0 else 1 }
+    val siteLists = if (allowDeep) {
+      collectOutcomes(
+        "candidates",
+        query,
+        listOf("soundcloud", "youtube"),
+        75_000,
+      ) { site -> searchCandidates(query, site) }
+        .sortedBy { (site, _) -> if (site == "soundcloud") 0 else 1 }
+    } else {
+      // Prefetch must never burn minutes of CPU/network in the background for
+      // a track the user may already be past.
+      Log.d(LOG_TAG, "skipping deep candidate pool for '$query' (warm path stays light)")
+      emptyList()
+    }
     for ((site, candidates) in siteLists) {
       if (candidates.isEmpty()) continue
       val best = SincTrackMatch.bestMatch(title, artist, durationMs, candidates, strict) ?: continue
@@ -1799,6 +2209,27 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           "No downloadable source was found for this track"
         },
       )
+  }
+
+  /**
+   * Drops the strict query-cache entry for [query] after a finished file
+   * failed duration verification. The resolver's next attempt must be free to
+   * pick a different candidate instead of replaying the rejected upload.
+   */
+  private fun forgetStrictResolution(query: String, durationMs: Long?) {
+    val trimmed = query.trim()
+    if (trimmed.isEmpty() || trimmed.contains("://")) return
+    val parts = trimmed.split(" - ", limit = 2).map { it.trim() }
+    val artist = parts.getOrNull(0) ?: ""
+    val title = parts.getOrNull(1) ?: ""
+    val normalized = listOf(artist, searchTitle(title))
+      .map { it.trim() }
+      .filter { it.isNotEmpty() }
+      .joinToString(" - ")
+    if (normalized.isEmpty()) return
+    queryCache.remove(
+      SincDownloadRules.resolveCacheKey(queryCacheKey(normalized), durationMs, strict = true)
+    )
   }
 
   /** True for URLs that ARE the audio bytes (no extraction needed). */
@@ -1879,6 +2310,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       throw IllegalStateException("Direct download failed (HTTP ${conn.responseCode})")
     }
     val total = conn.contentLengthLong
+    val deadline = System.currentTimeMillis() + downloadTimeoutMs
     val tmp = File(outDir, "${template.name}.part")
     try {
       var written = 0L
@@ -1904,7 +2336,20 @@ class SincYtModule(reactContext: ReactApplicationContext) :
                 val pct = ((written.toDouble() / total) * 100).toInt().coerceIn(0, 99)
                 SincDownloads.update(jobId, pct)
                 SincDownloads.emitYtProgress(jobId, pct, formatSpeedText(speed))
+              } else {
+                SincDownloads.updateUnknown(jobId)
+                SincDownloads.emitYtProgress(
+                  jobId,
+                  null,
+                  formatSpeedText(speed),
+                  written,
+                  null,
+                  true,
+                )
               }
+            }
+            if (System.currentTimeMillis() > deadline) {
+              throw IllegalStateException("Direct download timed out")
             }
             if (jobId != null && !SincDownloads.isActive(jobId)) {
               throw InterruptedException("Direct download cancelled")
@@ -1924,9 +2369,13 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         tmp.copyTo(file, overwrite = true)
         tmp.delete()
       }
-      finishTaggedFile(file, title, artist, album, artworkUrl)
-      val duration = probeAudioDuration(file)
-      return DownloadResult(file, mimeTypeForExt(file.extension), duration)
+      jobId?.let { SincDownloads.postStage(it, "processing") }
+      val detected = SincAudioContainer.detectExtension(file)
+      val finalFile = if (detected != null) SincAudioContainer.retarget(file, detected) else file
+      finishTaggedFile(finalFile, title, artist, album, artworkUrl, jobId)
+      jobId?.let { SincDownloads.postStage(it, "validating") }
+      val duration = probeAudioDuration(finalFile)
+      return DownloadResult(finalFile, mimeTypeForExt(finalFile.extension), duration)
     } catch (e: Exception) {
       tmp.delete()
       throw e
@@ -1944,17 +2393,23 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     artist: String?,
     album: String?,
     artworkUrl: String?,
+    jobId: String? = null,
   ) {
     try {
+      if (file.extension.lowercase() != "mp3") return
+      jobId?.let { SincDownloads.postStage(it, "tagging") }
       val cover = downloadCover(artworkUrl, file.parentFile ?: return)
       try {
         if (file.extension.lowercase() == "mp3" && cover == null) {
           tagMp3InPlace(file, title, artist, album)
         } else if (file.extension.lowercase() == "mp3" && cover != null && cover.isFile) {
           val tagged = File(file.parentFile, "${file.nameWithoutExtension}.tagged.mp3")
-          if (transcodeToMp3(file, tagged, title, artist, album, cover)) {
+          if (SincMediaTagger.remuxMp3WithCover(file, tagged, title, artist, album, cover)) {
             file.delete()
-            tagged.renameTo(file)
+            if (!tagged.renameTo(file)) {
+              tagged.copyTo(file, overwrite = true)
+              tagged.delete()
+            }
           } else {
             tagged.delete()
             tagMp3InPlace(file, title, artist, album)
@@ -1991,6 +2446,11 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     artworkUrl: String?,
     resumePart: Boolean,
   ): DownloadResult {
+    // The caller registers the job before resolving the query. If the user
+    // paused/cancelled while that was happening, do not start a transfer.
+    if (jobId != null && isStopped(jobId)) {
+      throw DownloadCancelledException("Download cancelled")
+    }
     if (!resumePart) {
       // Drop stale partials from a previously killed run: resuming them against
       // a freshly-resolved (expired/changed) URL fails with HTTP 416 forever.
@@ -2002,23 +2462,15 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         }
       }
     }
-    if (jobId != null) {
-      // The process isn't started yet; run() registers the real kill handle.
-      SincDownloads.begin(jobId, title ?: template.name) {}
-    }
     // Direct audio files (Audius streams, plain MP3 links): plain HTTPS
     // download, no yt-dlp spawn. Much faster and immune to extractor blocks.
     if (isDirectAudioFile(urlOrQuery)) {
-      return try {
-        downloadDirectResult(urlOrQuery, template, jobId, title, artist, album, artworkUrl)
-      } finally {
-        if (jobId != null) SincDownloads.end(jobId)
-      }
+      return downloadDirectResult(urlOrQuery, template, jobId, title, artist, album, artworkUrl)
     }
     val base = listOf(
       "--no-warnings",
       "--no-playlist",
-    ) + youtubeClientArgs(urlOrQuery) + listOf(
+    ) + youtubeClientArgs(urlOrQuery, "") + listOf(
       // Prefer the m4a/aac stream: it retags losslessly (no transcode → the
       // download finishes right after the transfer) and every music player
       // reads mp4 metadata. Falls back to whatever is available.
@@ -2031,12 +2483,18 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       "--socket-timeout",
       "30",
       "--newline",
+      // Structured progress is emitted on stdout. The old code only parsed
+      // human `[download] %` lines from stderr, where yt-dlp does not write
+      // them, so the UI bar stayed at 0% for the whole transfer.
+      "--progress-template",
+      "SINC_PROGRESS %(progress)j",
+      "--progress-delta",
+      "0.5",
       "-o",
       "${template.parentFile?.absolutePath.orEmpty()}/${template.name}.%(ext)s",
       urlOrQuery,
     )
-    return try {
-      val completed = run(
+    val completed = run(
         base,
         // Mobile networks are slow (observed ~235KiB/s on-device); a 3-10MB
         // track legitimately needs >2min, so the old 90s cap failed downloads.
@@ -2045,6 +2503,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         downloadTimeoutMs,
         downloadGate,
         jobId,
+        onStdoutLine = { line -> onDownloadProgress(jobId, line) },
         onStderrLine = { line -> onDownloadProgress(jobId, line) },
       )
       if (completed.code != 0) {
@@ -2073,17 +2532,20 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       //                  the raw file. (Publishing a webm under a `.mp3` name
       //                  is how other players previously showed no artwork or
       //                  artist names.)
+      jobId?.let { SincDownloads.postStage(it, "processing") }
       val stem = template.name.removeSuffix(".mp3")
       val cover = template.parentFile?.let { downloadCover(artworkUrl, it) }
       val mp3Target = File(raw.parentFile, "$stem.mp3")
       val m4aTarget = File(raw.parentFile, "$stem.m4a")
+      jobId?.let { SincDownloads.postStage(it, "tagging") }
       val final: File = when (raw.extension.lowercase(Locale.ROOT)) {
         "mp3" -> if (cover != null) {
           val tagged = File(raw.parentFile, "$stem.tagged.mp3")
-          if (transcodeToMp3(raw, tagged, title, artist, album, cover)) {
+          if (SincMediaTagger.remuxMp3WithCover(raw, tagged, title, artist, album, cover)) {
             raw.delete()
             tagged
           } else {
+            tagged.delete()
             tagMp3InPlace(raw, title, artist, album)
             raw
           }
@@ -2136,10 +2598,7 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         throw IllegalStateException("Download failed: no audio file produced")
       }
       val duration = probeAudioDuration(final)
-      DownloadResult(final, mimeTypeForExt(final.extension), duration)
-    } finally {
-      if (jobId != null) SincDownloads.end(jobId)
-    }
+      return DownloadResult(final, mimeTypeForExt(final.extension), duration)
   }
 
   /** The file yt-dlp actually wrote for `template`, ignoring partial fragments. */
@@ -2151,17 +2610,8 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       ?.maxByOrNull { it.length() }
 
   /** Container mime for the extensions yt-dlp hands back. */
-  private fun mimeTypeForExt(ext: String): String = when (ext.lowercase()) {
-    "mp3" -> "audio/mpeg"
-    "m4a", "mp4", "m4b" -> "audio/mp4"
-    "opus" -> "audio/opus"
-    "ogg", "oga" -> "audio/ogg"
-    "webm" -> "audio/webm"
-    "aac" -> "audio/aac"
-    "flac" -> "audio/flac"
-    "wav" -> "audio/wav"
-    else -> "audio/mpeg"
-  }
+  private fun mimeTypeForExt(ext: String): String =
+    SincAudioContainer.mimeForExtension(ext)
 
   /**
    * Fetches the track artwork for embedding. Best-effort: null when offline,
@@ -2388,86 +2838,37 @@ class SincYtModule(reactContext: ReactApplicationContext) :
   /** Frustration cap: even a slow mobile link finishes a song in this budget. */
   private val downloadTimeoutMs = 900_000L
 
-  /**
-   * Runs the bundled ffmpeg directly (ffmpeg is not a python zipapp, so the
-   * generic run() helper — which always execs python3 + yt-dlp.zipapp — cannot
-   * be used here).
-   */
+  /** Shared runner; the direct downloader uses the same binary/libs. */
   private fun runFfmpeg(args: List<String>, timeoutMs: Long, gate: Semaphore): RunResult {
-    val first = runFfmpegOnce(args, timeoutMs, gate, preloadShim = false)
-    val stderr = first.stderr.trim()
-    if (first.code != 0 && stderr.contains("CANNOT LINK")) {
-      // Vendor libs pulled transitively (e.g. libhwui → libmediandk) match
-      // needed children by DT_SONAME under bionic. Preload the platform
-      // namespace shim first so the forwarding stubs bind before anything
-      // scans them.
-      Log.w(LOG_TAG, "ffmpeg link partial; retrying with platform-ns shim: ${stderr.take(300)}")
-      val second = runFfmpegOnce(args, timeoutMs, gate, preloadShim = true)
-      if (second.code == 0) {
-        return second
-      }
-      // Last resort: the pre-fix environment (app lib dir only), which is the
-      // configuration the stub set was originally laid out for.
-      Log.w(LOG_TAG, "shim retry failed; retrying with app-libdir-only LD_LIBRARY_PATH")
-      return runFfmpegOnce(args, timeoutMs, gate, preloadShim = false, appLibDirOnly = true)
-    }
-    return first
-  }
-
-  private fun runFfmpegOnce(
-    args: List<String>,
-    timeoutMs: Long,
-    gate: Semaphore,
-    preloadShim: Boolean,
-    appLibDirOnly: Boolean = false,
-  ): RunResult {
-    gate.acquire()
-    return try {
-      val pb = ProcessBuilder(listOf(ffmpegBinary().absolutePath) + args)
-      pb.redirectErrorStream(false)
-      pb.environment().apply {
-        // The bundled termux-style libs resolve their siblings from the app
-        // lib dir; system paths only satisfy leaf platform expects. App libs
-        // stay FIRST so the forwarding stubs (libmediandk.so etc.) are what
-        // the linker binds — the real platform copies live in a namespace
-        // the exec cannot reach.
-        put(
-          "LD_LIBRARY_PATH",
-          if (appLibDirOnly) libDir().absolutePath else
-            "${libDir().absolutePath}:/system/lib64:/system_ext/lib64:/vendor/lib64",
-        )
-        if (preloadShim) {
-          put("LD_PRELOAD", File(libDir(), "libtermux-platform-ns.so").absolutePath)
-        }
-        put("PATH", "${abiDir().absolutePath}:/system/bin:/system/xbin")
-      }
-      val process = pb.start()
-      val stdout = ProcessStreamReader(process.inputStream)
-      val stderr = ProcessStreamReader(process.errorStream)
-      val finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
-      if (!finished) {
-        process.destroyForcibly()
-        throw IllegalStateException("ffmpeg timed out")
-      }
-      RunResult(stdout.read(), stderr.read(), process.exitValue())
-    } catch (e: InterruptedException) {
-      Thread.currentThread().interrupt()
-      throw IllegalStateException("ffmpeg interrupted")
-    } finally {
-      gate.release()
-    }
+    val result = SincFfmpeg.run(args, timeoutMs, gate)
+    return RunResult(result.stdout, result.stderr, result.code)
   }
 
   private fun onDownloadProgress(jobId: String?, line: String) {
     if (jobId == null) return
-    val match = Regex("\\[download\\]\\s+([0-9.]+)%").find(line)
-    val pct = match?.groupValues?.getOrNull(1)?.toDoubleOrNull()?.toInt() ?: return
-    // yt-dlp --newline lines look like:
-    // `[download] 12.4% of 8.32MiB at 214.55KiB/s ETA 00:34`
-    val speed = Regex("at\\s+([0-9.]+\\s*[KMGT]?i?B/s)").find(line)?.groupValues?.getOrNull(1)
-    Log.d(LOG_TAG, "yt progress jobId=$jobId pct=$pct speed=$speed")
-    SincDownloads.update(jobId, pct)
-    SincDownloads.emitYtProgress(jobId, pct, speed?.replace("\\s+".toRegex(), " "))
+    val update = SincProgressParser.parse(line) ?: return
+    val speedText = update.speedText
+      ?: update.speedBytesPerSec?.let { formatSpeedText(it) }
+    if (update.percent == null) {
+      // The server never sent a length. Keep the row/notification honest
+      // instead of treating "unknown" as 1 byte and jumping to 99%.
+      SincDownloads.updateUnknown(jobId)
+    } else {
+      SincDownloads.update(jobId, update.percent)
+    }
+    Log.d(
+      LOG_TAG,
+      "yt progress jobId=$jobId pct=${update.percent ?: "unknown"} speed=$speedText " +
+        "bytes=${update.bytesDownloaded ?: "?"}/${update.bytesTotal ?: "?"}",
+    )
+    SincDownloads.emitYtProgress(
+      jobId,
+      update.percent,
+      speedText,
+      update.bytesDownloaded,
+      update.bytesTotal,
+      update.percent == null,
+    )
   }
 
   // ---------------------------------------------------------------------

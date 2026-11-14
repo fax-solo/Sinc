@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Pressable, StyleSheet, TextInput, View } from 'react-native';
 import Ionicons from '@react-native-vector-icons/ionicons';
-import { AppText } from '../../components/AppText';
-import { AppButton } from '../../components/AppButton';
-import { useTheme } from '../../theme';
+import { Text } from '../../ui/components/Text';
+import { PrimaryButton } from '../../ui/components/Buttons';
+import { colors, radii, spacing } from '../../ui/theme';
 import { useLockStore } from './lockStore';
-import { verifyBiometric, biometricSupported } from '../../services/security/biometric';
+import {
+  verifyBiometric,
+  biometricSupported,
+  biometricSecretExists,
+} from '../../services/security/biometric';
 import {
   MAX_ATTEMPTS,
   getFailedAttempts,
@@ -21,7 +25,6 @@ function mmss(ms: number): string {
 }
 
 export function LockScreen() {
-  const { colors, spacing, radii } = useTheme();
   const verifyPin = useLockStore((s) => s.verifyPin);
   const unlock = useLockStore((s) => s.unlock);
 
@@ -48,12 +51,15 @@ export function LockScreen() {
     return () => clearInterval(tick);
   }, [locked]);
 
-  // Probe for biometric availability once, lazily.
+  // Offer biometric unlock only when the device supports it AND the user has
+  // actually enrolled a secret; hardware support alone would be a dead button.
   useEffect(() => {
     let cancelled = false;
-    void biometricSupported().then((ok) => {
-      if (!cancelled) setBioAvailable(ok);
-    });
+    void Promise.all([biometricSupported(), biometricSecretExists()]).then(
+      ([supported, secretExists]) => {
+        if (!cancelled) setBioAvailable(supported && secretExists);
+      }
+    );
     return () => {
       cancelled = true;
     };
@@ -101,13 +107,25 @@ export function LockScreen() {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <View style={styles.icon}>
-        <Ionicons name="musical-notes" size={44} color={colors.accent} />
+      <View
+        style={{
+          width: 78,
+          height: 78,
+          borderRadius: 39,
+          backgroundColor: colors.accentSoft,
+          borderWidth: 1,
+          borderColor: 'rgba(30, 215, 96, 0.24)',
+          alignItems: 'center',
+          justifyContent: 'center',
+          marginBottom: spacing.lg,
+        }}
+      >
+        <Ionicons name="musical-notes" size={38} color={colors.accent} />
       </View>
-      <AppText variant="display">Sinc</AppText>
-      <AppText variant="body" color="textSecondary" style={{ marginTop: spacing.xs }}>
+      <Text variant="display">Sinc</Text>
+      <Text variant="body" color="textSecondary" style={{ marginTop: spacing.xs }}>
         Enter your PIN to continue
-      </AppText>
+      </Text>
 
       <TextInput
         value={pin}
@@ -125,25 +143,26 @@ export function LockScreen() {
         style={[
           styles.pinInput,
           {
-            backgroundColor: colors.surfaceElevated,
+            backgroundColor: colors.input,
             borderRadius: radii.md,
-            color: colors.textPrimary,
-            borderColor: error ? colors.error : 'transparent',
+            color: colors.text,
+            borderColor: error ? colors.error : colors.border,
           },
         ]}
       />
 
       {error ? (
-        <AppText variant="body" color="error" style={{ marginTop: spacing.sm }}>
+        <Text variant="body" style={{ color: colors.error, marginTop: spacing.sm }}>
           {error}
-        </AppText>
+        </Text>
       ) : null}
 
-      <AppButton
+      <PrimaryButton
         label={locked ? `Locked (${mmss(lockMs)})` : 'Unlock'}
         onPress={() => void attemptPin()}
-        disabled={busy || locked}
-        style={{ marginTop: spacing.lg }}
+        disabled={locked}
+        loading={busy}
+        style={{ alignSelf: 'stretch', marginTop: spacing.lg }}
       />
 
       {bioAvailable && !locked ? (
@@ -153,9 +172,20 @@ export function LockScreen() {
           hitSlop={8}
           accessibilityRole="button"
           accessibilityLabel="Unlock with biometrics"
-          style={{ marginTop: spacing.md }}
+          style={{
+            marginTop: spacing.md,
+            width: 46,
+            height: 46,
+            borderRadius: 23,
+            borderWidth: 1,
+            borderColor: colors.border,
+            backgroundColor: colors.card,
+            alignItems: 'center',
+            justifyContent: 'center',
+            opacity: busy ? 0.5 : 1,
+          }}
         >
-          <Ionicons name="finger-print" size={28} color={colors.accent} />
+          <Ionicons name="finger-print" size={25} color={colors.accentBright} />
         </Pressable>
       ) : null}
     </View>
@@ -168,9 +198,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
-  },
-  icon: {
-    marginBottom: 16,
   },
   pinInput: {
     alignSelf: 'stretch',

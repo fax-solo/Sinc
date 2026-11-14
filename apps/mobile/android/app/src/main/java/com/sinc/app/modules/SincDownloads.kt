@@ -25,6 +25,7 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.sinc.app.R
 import java.io.File
 import java.io.IOException
+import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -45,13 +46,21 @@ object SincDownloads {
   const val CHANNEL_ID = "sinc_downloads"
   const val NOTIF_ID = 94000
 
-  private data class Job(val title: String, val kill: () -> Unit)
+  private data class Job(
+    val title: String,
+    val kill: () -> Unit,
+    val cleanup: () -> Unit,
+  )
 
   /** Transferring jobs. */
   private val active = ConcurrentHashMap<String, Job>()
   /** Paused (yt-dlp) jobs kept around so resume finds them. */
   private val paused = ConcurrentHashMap<String, Job>()
   private val progress = ConcurrentHashMap<String, Int>()
+  /** Post-transfer stage ("processing", "tagging", "validating"). */
+  private val stages = ConcurrentHashMap<String, String>()
+  /** Jobs whose total byte count is unknown; never render these as a percent. */
+  private val indeterminate = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
   private val serviceStarted = AtomicBoolean(false)
 
   @Volatile
@@ -62,16 +71,42 @@ object SincDownloads {
     react = ctx
   }
 
-  fun begin(jobId: String, title: String, kill: () -> Unit) {
-    active[jobId] = Job(title, kill)
+  fun begin(
+    jobId: String,
+    title: String,
+    kill: () -> Unit,
+    cleanup: () -> Unit = {},
+  ) {
+    // A re-entrant start for the same job must stop the old transfer before it
+    // replaces the handle; otherwise the old process can keep writing/publish
+    // after the new attempt has taken over the job id.
+    active.put(jobId, Job(title, kill, cleanup))?.let { previous ->
+      try {
+        previous.kill()
+      } catch (_: Exception) {
+      }
+    }
+    // A resume replaces the paused handle with the new attempt; leaving the
+    // old entry behind made a later cancel hit only one of the two maps.
+    paused.remove(jobId)
     progress[jobId] = 0
+    stages.remove(jobId)
+    indeterminate.remove(jobId)
     ensureServiceRunning()
     refresh()
   }
 
   fun update(jobId: String, percent: Int) {
     if (!active.containsKey(jobId)) return
+    indeterminate.remove(jobId)
     progress[jobId] = percent.coerceIn(0, 99)
+    refresh()
+  }
+
+  /** The transfer is running but the server did not provide a total size. */
+  fun updateUnknown(jobId: String) {
+    if (!active.containsKey(jobId)) return
+    indeterminate.add(jobId)
     refresh()
   }
 
@@ -79,6 +114,13 @@ object SincDownloads {
     val job = active[jobId] ?: paused[jobId] ?: return
     if (active.containsKey(jobId)) active[jobId] = job.copy(kill = kill)
     if (paused.containsKey(jobId)) paused[jobId] = job.copy(kill = kill)
+  }
+
+  /** Attaches a best-effort cleanup for files created after the job began. */
+  fun attachCleanup(jobId: String, cleanup: () -> Unit) {
+    val job = active[jobId] ?: paused[jobId] ?: return
+    if (active.containsKey(jobId)) active[jobId] = job.copy(cleanup = cleanup)
+    if (paused.containsKey(jobId)) paused[jobId] = job.copy(cleanup = cleanup)
   }
 
   fun pause(jobId: String) {
@@ -92,14 +134,45 @@ object SincDownloads {
   fun cancel(jobId: String) {
     val job = active.remove(jobId) ?: paused.remove(jobId) ?: return
     progress.remove(jobId)
+    stages.remove(jobId)
+    indeterminate.remove(jobId)
     job.kill()
+    // Cancel means "remove the partial too". Pause deliberately does not run
+    // this: its `.part` is what the resume request continues from.
+    try {
+      job.cleanup()
+    } catch (_: Exception) {
+    }
     postAction(jobId, "cancelled")
+    refresh()
+  }
+
+  /**
+   * Stops a job and deletes its artifacts without emitting a user action.
+   * Used for internal fallbacks (e.g. a rejected direct match) where the JS
+   * orchestration must continue to the next tier instead of treating the job
+   * as user-cancelled.
+   */
+  fun discard(jobId: String) {
+    val job = active.remove(jobId) ?: paused.remove(jobId) ?: return
+    progress.remove(jobId)
+    stages.remove(jobId)
+    indeterminate.remove(jobId)
+    try {
+      job.kill()
+    } catch (_: Exception) {
+    }
+    try {
+      job.cleanup()
+    } catch (_: Exception) {
+    }
     refresh()
   }
 
   fun resume(jobId: String) {
     val job = paused.remove(jobId) ?: return
     progress[jobId] = progress[jobId] ?: 0
+    stages.remove(jobId)
     active[jobId] = job.copy(kill = {})
     postAction(jobId, "resume")
     refresh()
@@ -110,6 +183,8 @@ object SincDownloads {
     active.remove(jobId)
     paused.remove(jobId)
     progress.remove(jobId)
+    stages.remove(jobId)
+    indeterminate.remove(jobId)
     refresh()
   }
 
@@ -195,17 +270,8 @@ object SincDownloads {
     }
   }
 
-  private fun mimeForFileName(name: String): String {
-    val lower = name.lowercase()
-    return when {
-      lower.endsWith(".ogg") || lower.endsWith(".oga") || lower.endsWith(".opus") -> "audio/ogg"
-      lower.endsWith(".m4a") || lower.endsWith(".mp4") -> "audio/mp4"
-      lower.endsWith(".webm") -> "audio/webm"
-      lower.endsWith(".flac") -> "audio/flac"
-      lower.endsWith(".wav") -> "audio/wav"
-      else -> "audio/mpeg"
-    }
-  }
+  private fun mimeForFileName(name: String): String =
+    SincAudioContainer.mimeForExtension(File(name).extension)
 
   /**
    * Deletes a previously published Music/Sinc (or legacy Downloads/Sinc)
@@ -256,13 +322,23 @@ object SincDownloads {
     )
   }
 
-  fun emitYtProgress(jobId: String, percent: Int, speedText: String? = null) {
+  fun emitYtProgress(
+    jobId: String,
+    percent: Int?,
+    speedText: String? = null,
+    bytesDownloaded: Long? = null,
+    bytesTotal: Long? = null,
+    indeterminate: Boolean = percent == null,
+  ) {
     emit(
       "SincYtProgress",
       Arguments.createMap().apply {
         putString("jobId", jobId)
-        putDouble("percent", percent.toDouble())
+        if (percent != null) putDouble("percent", percent.toDouble())
+        putBoolean("indeterminate", indeterminate)
         if (!speedText.isNullOrBlank()) putString("speed", speedText)
+        if (bytesDownloaded != null) putDouble("bytesDownloaded", bytesDownloaded.toDouble())
+        if (bytesTotal != null && bytesTotal > 0L) putDouble("bytesTotal", bytesTotal.toDouble())
       },
     )
   }
@@ -272,7 +348,27 @@ object SincDownloads {
    * progress bar right at `download start` instead of after up to several
    * buffered seconds of stderr output. */
   fun postTransferStarted(jobId: String) {
+    stages.remove(jobId)
     postAction(jobId, "transfer")
+  }
+
+  /**
+   * Reports real post-transfer work so JS and the notification can say
+   * "Processing audio…", "Writing tags…" or "Verifying audio…" instead of a
+   * frozen / misleading 100% download bar.
+   */
+  fun postStage(jobId: String, stage: String) {
+    if (!active.containsKey(jobId)) return
+    if (stage != "processing" && stage != "tagging" && stage != "validating") return
+    stages[jobId] = stage
+    emit(
+      "SincDownloadStage",
+      Arguments.createMap().apply {
+        putString("jobId", jobId)
+        putString("stage", stage)
+      },
+    )
+    refresh()
   }
 
   private val mainHandler = Handler(Looper.getMainLooper())
@@ -334,15 +430,29 @@ object SincDownloads {
   // Foreground notification
   // ---------------------------------------------------------------------
 
-  private data class NotifInfo(val title: String, val jobId: String?, val pct: Int, val paused: Boolean)
+  private data class NotifInfo(
+    val title: String,
+    val jobId: String?,
+    val pct: Int,
+    val paused: Boolean,
+    val indeterminate: Boolean,
+    val stage: String?,
+  )
 
   private fun describe(): NotifInfo {
-    if (count() == 0) return NotifInfo("Downloads", null, 0, false)
+    if (count() == 0) return NotifInfo("Downloads", null, 0, false, false, null)
     val ids = active.keys + paused.keys
     val jobId = ids.last()
     val isPaused = paused.containsKey(jobId)
     val label = if (isPaused) paused[jobId]?.title else active[jobId]?.title
-    return NotifInfo(label ?: "Downloading", jobId, progress[jobId] ?: 0, isPaused)
+    return NotifInfo(
+      label ?: "Downloading",
+      jobId,
+      progress[jobId] ?: 0,
+      isPaused,
+      indeterminate.contains(jobId),
+      stages[jobId],
+    )
   }
 
   fun ensureChannel(context: Context) {
@@ -376,16 +486,30 @@ object SincDownloads {
 
   private fun build(context: Context, info: NotifInfo): Notification {
     ensureChannel(context)
+    val stageText = when (info.stage) {
+      "processing" -> "Processing audio…"
+      "tagging" -> "Writing tags…"
+      "validating" -> "Verifying audio…"
+      else -> null
+    }
+    val text = when {
+      info.paused -> "Paused ${info.pct}% — tap Resume"
+      stageText != null -> stageText
+      info.indeterminate -> "Downloading…"
+      else -> "Downloading ${info.pct}%"
+    }
     val builder = NotificationCompat.Builder(context, CHANNEL_ID)
       .setContentTitle(info.title)
-      .setContentText(
-        if (info.paused) "Paused ${info.pct}% — tap Resume" else "Downloading ${info.pct}%"
-      )
+      .setContentText(text)
       .setOngoing(true)
       .setSmallIcon(R.mipmap.ic_launcher)
       .setCategory(NotificationCompat.CATEGORY_PROGRESS)
       .setOnlyAlertOnce(true)
-      .setProgress(100, if (info.paused) 0 else info.pct, info.paused)
+      .setProgress(
+        100,
+        if (info.paused) 0 else info.pct,
+        info.paused || info.indeterminate,
+      )
       .setContentIntent(openAppIntent(context))
       .setPriority(NotificationCompat.PRIORITY_LOW)
     info.jobId?.let { addActions(builder, it) }

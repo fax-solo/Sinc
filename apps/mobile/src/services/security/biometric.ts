@@ -36,6 +36,15 @@ export async function saveBiometricSecret(): Promise<boolean> {
   }
 }
 
+/** True when biometric unlock was previously enabled for this install. */
+export async function biometricSecretExists(): Promise<boolean> {
+  try {
+    return await Keychain.hasGenericPassword({ service: SERVICE });
+  } catch {
+    return false;
+  }
+}
+
 /** Prompts for the biometric and resolves to true on success. */
 export async function verifyBiometric(): Promise<boolean> {
   try {

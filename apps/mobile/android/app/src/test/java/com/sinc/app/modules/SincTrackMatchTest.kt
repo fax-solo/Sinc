@@ -120,6 +120,7 @@ class SincTrackMatchTest {
   fun `forbidden variants win only when explicitly requested`() {
     val query = "Anti Hero Taylor Swift"
     assertTrue(hasForbiddenVariant(query, "Anti Hero (sped up)"))
+    assertTrue(hasForbiddenVariant(query, "A Tribute to Taylor Swift - Anti Hero"))
     assertFalse(hasForbiddenVariant("Anti Hero (sped up)", "Anti Hero (sped up version)"))
   }
 
@@ -194,6 +195,62 @@ class SincTrackMatchTest {
       strict = true,
     )
     assertEquals("signed-url", best?.url)
+  }
+
+  @Test
+  fun `strict download refuses an unrequested remix`() {
+    val best = bestMatch(
+      title = "Levitating",
+      artist = "Dua Lipa",
+      durationMs = 203_000,
+      candidates = listOf(
+        cand(title = "Levitating (Remix)", artist = "Dua Lipa", durationMs = 203_500),
+      ),
+      strict = true,
+    )
+    assertNull(best)
+  }
+
+  @Test
+  fun `strict download accepts a remix the title explicitly asked for`() {
+    val best = bestMatch(
+      title = "Levitating (Remix)",
+      artist = "Dua Lipa",
+      durationMs = 203_000,
+      candidates = listOf(
+        cand(title = "Levitating (Remix)", artist = "Dua Lipa", durationMs = 203_500),
+      ),
+      strict = true,
+    )
+    assertEquals("https://example.test/Levitating (Remix)", best?.url)
+  }
+
+  @Test
+  fun `strict download refuses a plain file when the title asked for a remix`() {
+    val best = bestMatch(
+      title = "Levitating (Remix)",
+      artist = "Dua Lipa",
+      durationMs = 203_000,
+      candidates = listOf(
+        cand(title = "Levitating", artist = "Dua Lipa", durationMs = 203_000),
+      ),
+      strict = true,
+    )
+    assertNull(best)
+  }
+
+  @Test
+  fun `lenient playback may still fall back to a remix`() {
+    val best = bestMatch(
+      title = "Levitating",
+      artist = "Dua Lipa",
+      durationMs = 203_000,
+      candidates = listOf(
+        cand(title = "Levitating (Remix)", artist = "Dua Lipa", durationMs = 203_500),
+      ),
+      strict = false,
+    )
+    assertEquals("https://example.test/Levitating (Remix)", best?.url)
   }
 
   // -------------------------------------------------------------------
@@ -295,6 +352,26 @@ class SincTrackMatchTest {
     assertEquals("Song (Alternate Version)", searchTitle("Song (Alternate Version)"))
     assertEquals("Song", searchTitle("Song (feat. Someone)"))
     assertEquals("Song", searchTitle("Song [Official Audio]"))
+  }
+
+  @Test
+  fun `searchTitle preserves live radio and bracketed variants`() {
+    assertEquals("Song (Live)", searchTitle("Song (Live)"))
+    assertEquals("Song [Live]", searchTitle("Song [Live]"))
+    assertEquals("Song (Radio Edit)", searchTitle("Song (Radio Edit)"))
+    assertEquals("Song [Radio Edit]", searchTitle("Song [Radio Edit]"))
+    assertEquals("Song [Remix]", searchTitle("Song [Remix]"))
+    assertEquals("Song (Live at Wembley)", searchTitle("Song (Live at Wembley)"))
+    assertEquals("Song (Remixes)", searchTitle("Song (Remixes)"))
+    assertEquals("Song - Live", searchTitle("Song - Live"))
+  }
+
+  @Test
+  fun `searchTitle drops bracketed noise anywhere and keeps requested variants`() {
+    assertEquals("Song (Live)", searchTitle("Song (Live) [Official Audio]"))
+    assertEquals("Song", searchTitle("Song [Official Audio]"))
+    assertEquals("Song", searchTitle("Song (feat. Someone)"))
+    assertEquals("Song", searchTitle("Song (Alive)"))
   }
 
   @Test

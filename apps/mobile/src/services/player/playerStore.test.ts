@@ -101,6 +101,31 @@ describe('playerStore', () => {
     expect(usePlayerStore.getState().currentIndex).not.toBe(first);
   });
 
+  it('shuffle with repeat off plays each track once and then ends', () => {
+    usePlayerStore.getState().playQueue([t1, t2, t3, t4], 0);
+    usePlayerStore.getState().toggleShuffle();
+    expect(usePlayerStore.getState().shuffle).toBe('on');
+
+    const visited = [usePlayerStore.getState().currentIndex];
+    for (let index = 0; index < 3; index += 1) {
+      usePlayerStore.getState().next();
+      const current = usePlayerStore.getState().currentIndex;
+      expect(visited).not.toContain(current);
+      visited.push(current);
+    }
+
+    usePlayerStore.getState().next();
+    expect(usePlayerStore.getState().status).toBe('ended');
+    expect(new Set(visited).size).toBe(4);
+  });
+
+  it('shuffle with a single track respects repeat off', () => {
+    usePlayerStore.getState().playQueue([t1], 0);
+    usePlayerStore.getState().toggleShuffle();
+    usePlayerStore.getState().next();
+    expect(usePlayerStore.getState().status).toBe('ended');
+  });
+
   it('previous clamps at the first track', () => {
     usePlayerStore.getState().playQueue([t1, t2, t3], 2);
     usePlayerStore.getState().previous();
@@ -135,5 +160,66 @@ describe('playerStore', () => {
     expect(state.queue).toEqual([]);
     expect(state.currentIndex).toBe(-1);
     expect(state.status).toBe('idle');
+  });
+
+  it('addToQueue appends and ignores duplicate ids', () => {
+    usePlayerStore.getState().playQueue([t1], 0);
+    expect(usePlayerStore.getState().addToQueue(t2)).toBe(true);
+    expect(usePlayerStore.getState().addToQueue(t2)).toBe(false);
+    expect(usePlayerStore.getState().queue.map((t) => t.id)).toEqual([
+      'itunes:1',
+      'itunes:2',
+    ]);
+    expect(usePlayerStore.getState().currentIndex).toBe(0);
+  });
+
+  it('addTracksToQueue de-duplicates and starts an empty queue', () => {
+    expect(usePlayerStore.getState().addTracksToQueue([t1, t2, t1])).toBe(2);
+    expect(usePlayerStore.getState().currentIndex).toBe(0);
+    expect(usePlayerStore.getState().status).toBe('loading');
+    expect(usePlayerStore.getState().queue.map((t) => t.id)).toEqual([
+      'itunes:1',
+      'itunes:2',
+    ]);
+  });
+
+  it('playNext inserts after the current track, not at the queue end', () => {
+    usePlayerStore.getState().playQueue([t1, t2, t3], 0);
+    expect(usePlayerStore.getState().playNext(t4)).toBe(true);
+    expect(usePlayerStore.getState().queue.map((t) => t.id)).toEqual([
+      'itunes:1',
+      'itunes:4',
+      'itunes:2',
+      'itunes:3',
+    ]);
+    expect(usePlayerStore.getState().currentIndex).toBe(0);
+  });
+
+  it('removing and reordering upcoming tracks keeps the current track stable', () => {
+    usePlayerStore.getState().playQueue([t1, t2, t3, t4], 0);
+    expect(usePlayerStore.getState().removeFromQueue(0)).toBe(false);
+    expect(usePlayerStore.getState().removeFromQueue(1)).toBe(true);
+    expect(usePlayerStore.getState().queue.map((t) => t.id)).toEqual([
+      'itunes:1',
+      'itunes:3',
+      'itunes:4',
+    ]);
+    expect(usePlayerStore.getState().reorderQueue(2, 1)).toBe(true);
+    expect(usePlayerStore.getState().queue.map((t) => t.id)).toEqual([
+      'itunes:1',
+      'itunes:4',
+      'itunes:3',
+    ]);
+    expect(usePlayerStore.getState().currentIndex).toBe(0);
+    expect(selectCurrentTrack(usePlayerStore.getState())?.id).toBe('itunes:1');
+    expect(usePlayerStore.getState().reorderQueue(0, 1)).toBe(false);
+  });
+
+  it('jumpTo loads another queue item without replacing the queue', () => {
+    usePlayerStore.getState().playQueue([t1, t2, t3], 0);
+    expect(usePlayerStore.getState().jumpTo(2)).toBe(true);
+    expect(usePlayerStore.getState().currentIndex).toBe(2);
+    expect(usePlayerStore.getState().queue).toHaveLength(3);
+    expect(usePlayerStore.getState().jumpTo(9)).toBe(false);
   });
 });

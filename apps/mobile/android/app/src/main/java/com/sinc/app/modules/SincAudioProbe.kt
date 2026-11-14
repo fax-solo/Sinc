@@ -10,8 +10,9 @@ import java.util.concurrent.TimeUnit
  * from a bundled-ffmpeg `-i` header dump. Shared by the yt module (its
  * post-download guard) and the OkHttp downloader (direct-source validation),
  * so every saved file is length-checked no matter which transfer path
- * produced it. Returns 0 when unconfigured or unreadable — callers treat 0 as
- * "unknown", not as a failure.
+ * produced it. Returns 0 when unconfigured or unreadable. Download callers fail
+ * closed on 0 when the catalog length is known rather than publishing an
+ * unverified file.
  */
 object SincAudioProbe {
   private const val LOG_TAG = "SincAudioProbe"

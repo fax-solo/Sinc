@@ -2,13 +2,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CanonicalTrack } from '@sinc/shared';
 import type {
   NativeDownloaderModule,
-  NativePlayerCommand,
+  NativePlaybackState,
+  NativePlayerCommandEvent,
   NativePlayerModule,
   NativeProgressEvent,
 } from '../native/types';
 import { playerService } from './PlayerService';
 import { usePlayerStore } from './playerStore';
 import { usePlayerProgressStore } from './playerProgressStore';
+import { useLibraryStore } from '../library/libraryStore';
 import { storage, STORAGE_KEYS } from '../../utils/storage';
 
 // The native keystore is unavailable under Node; keep anything that reaches
@@ -24,12 +26,14 @@ vi.mock('react-native-keychain', () => ({
 type ProgressListener = (event: NativeProgressEvent) => void;
 type CompletionListener = (trackId: string) => void;
 type ErrorListener = (message: string) => void;
-type CommandListener = (command: NativePlayerCommand) => void;
+type StateListener = (event: NativePlaybackState) => void;
+type CommandListener = (event: NativePlayerCommandEvent) => void;
 
 const {
   progressListeners,
   completionListeners,
   errorListeners,
+  stateListeners,
   commandListeners,
   fakePlayer,
   fakeDownloader,
@@ -39,6 +43,7 @@ const {
   const progressListeners: ProgressListener[] = [];
   const completionListeners: CompletionListener[] = [];
   const errorListeners: ErrorListener[] = [];
+  const stateListeners: StateListener[] = [];
   const commandListeners: CommandListener[] = [];
   const resolvePlayback = vi.fn();
 
@@ -61,11 +66,26 @@ const {
       errorListeners.push(listener);
       return () => {};
     },
+    addStateListener: (listener) => {
+      stateListeners.push(listener);
+      return () => {};
+    },
     addCommandListener: (listener) => {
       commandListeners.push(listener);
       return () => {};
     },
     requestNotificationPermission: vi.fn(async () => {}),
+    getState: vi.fn(async () => ({
+      trackId: null,
+      isPlaying: false,
+      playbackState: 'idle' as const,
+      positionMs: 0,
+      durationMs: 0,
+      favorite: false,
+      shuffle: false,
+      repeat: 'off' as const,
+    })),
+    setFavorite: vi.fn(async () => {}),
   };
 
   const fakeDownloader: NativeDownloaderModule = {
@@ -89,6 +109,7 @@ const {
     progressListeners,
     completionListeners,
     errorListeners,
+    stateListeners,
     commandListeners,
     fakePlayer,
     fakeDownloader,
@@ -171,6 +192,8 @@ beforeEach(() => {
   vi.mocked(fakePlayer.pause).mockClear();
   vi.mocked(fakePlayer.stop).mockClear();
   vi.mocked(fakePlayer.seekTo).mockClear();
+  vi.mocked(fakePlayer.getState).mockClear();
+  vi.mocked(fakePlayer.setFavorite).mockClear();
   usePlayerStore.setState({
     status: 'idle',
     queue: [],
@@ -180,6 +203,14 @@ beforeEach(() => {
     errorMessage: null,
   });
   usePlayerProgressStore.setState({ positionMs: 0, durationMs: 0 });
+  useLibraryStore.setState({
+    favoriteTracks: [],
+    favoriteIds: new Set<string>(),
+    skipStats: {},
+  });
+  // Zustand store reset above is a test artifact; it must not count as a real
+  // library favorite change.
+  vi.mocked(fakePlayer.setFavorite).mockClear();
 });
 
 describe('playerService', () => {
@@ -198,9 +229,12 @@ describe('playerService', () => {
       'application/vnd.apple.mpegurl',
       undefined,
       {
+        albumTitle: undefined,
         title: 'Track itunes:1',
         artist: 'Artist',
         artworkUrl: undefined,
+        durationMs: 1000,
+        favorite: false,
       }
     );
     expect(vi.mocked(fakePlayer.play)).toHaveBeenCalledTimes(1);
@@ -247,6 +281,70 @@ describe('playerService', () => {
     );
 
     expect(usePlayerStore.getState().status).toBe('playing');
+  });
+
+  it('native transport snapshots sync notification pauses into the store', async () => {
+    stubResolvePlayback([track('itunes:1')]);
+    await playerService.playQueue([track('itunes:1')]);
+    expect(usePlayerStore.getState().status).toBe('playing');
+
+    stateListeners.forEach((l) =>
+      l({
+        trackId: 'itunes:1',
+        isPlaying: false,
+        playbackState: 'ready',
+        positionMs: 250,
+        durationMs: 1000,
+      })
+    );
+
+    expect(usePlayerStore.getState().status).toBe('paused');
+    expect(usePlayerProgressStore.getState().positionMs).toBe(250);
+  });
+
+  it('native transport snapshots sync notification playback into the store', async () => {
+    stubResolvePlayback([track('itunes:1')]);
+    await playerService.playQueue([track('itunes:1')]);
+    usePlayerStore.setState({ status: 'paused' });
+
+    stateListeners.forEach((l) =>
+      l({
+        trackId: 'itunes:1',
+        isPlaying: true,
+        playbackState: 'ready',
+        positionMs: 250,
+        durationMs: 1000,
+      })
+    );
+
+    expect(usePlayerStore.getState().status).toBe('playing');
+  });
+
+  it('notification favorite toggles the library store and mirrors the heart', async () => {
+    stubResolvePlayback([track('itunes:1')]);
+    await playerService.playQueue([track('itunes:1')]);
+    expect(useLibraryStore.getState().isFavorite('itunes:1')).toBe(false);
+
+    commandListeners.forEach((l) => l({ command: 'favorite', trackId: 'itunes:1' }));
+    await flush();
+
+    expect(useLibraryStore.getState().isFavorite('itunes:1')).toBe(true);
+    expect(vi.mocked(fakePlayer.setFavorite)).toHaveBeenCalledWith(true);
+  });
+
+  it('ignores favorite commands from a superseded track', async () => {
+    const tracks = [track('itunes:1'), track('itunes:2')];
+    stubResolvePlayback(tracks);
+    await playerService.playQueue(tracks);
+    await playerService.next();
+    expect(useLibraryStore.getState().isFavorite('itunes:2')).toBe(false);
+
+    commandListeners.forEach((l) => l({ command: 'favorite', trackId: 'itunes:1' }));
+    await flush();
+
+    expect(useLibraryStore.getState().isFavorite('itunes:2')).toBe(false);
+    expect(useLibraryStore.getState().isFavorite('itunes:1')).toBe(false);
+    expect(vi.mocked(fakePlayer.setFavorite)).not.toHaveBeenCalled();
   });
 
   it('completion advances to the next track in the queue', async () => {
@@ -345,13 +443,28 @@ describe('playerService', () => {
     expect(vi.mocked(fakePlayer.load)).toHaveBeenCalledTimes(2);
   });
 
+  it('only records manual skips near the beginning of a track', async () => {
+    useLibraryStore.setState({ skipStats: {} });
+    const tracks = [track('itunes:1'), track('itunes:2')];
+    stubResolvePlayback(tracks);
+    await playerService.playQueue(tracks);
+
+    usePlayerProgressStore.setState({ positionMs: 500, durationMs: 200_000 });
+    await playerService.next();
+    expect(useLibraryStore.getState().skipStats['itunes:1']).toBe(1);
+
+    usePlayerProgressStore.setState({ positionMs: 190_000, durationMs: 200_000 });
+    await playerService.next();
+    expect(useLibraryStore.getState().skipStats['itunes:2']).toBeUndefined();
+  });
+
   it('a lock-screen next command advances the queue', async () => {
     const tracks = [track('itunes:1'), track('itunes:2')];
     stubResolvePlayback(tracks);
     await playerService.playQueue(tracks);
     emitStartedPlaying();
 
-    commandListeners.forEach((l) => l('next'));
+    commandListeners.forEach((l) => l({ command: 'next' }));
     await flush();
 
     expect(usePlayerStore.getState().currentIndex).toBe(1);
@@ -364,7 +477,7 @@ describe('playerService', () => {
     await playerService.playQueue(tracks, 1);
     emitStartedPlaying();
 
-    commandListeners.forEach((l) => l('previous'));
+    commandListeners.forEach((l) => l({ command: 'previous' }));
     await flush();
 
     expect(usePlayerStore.getState().currentIndex).toBe(0);

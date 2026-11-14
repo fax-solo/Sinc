@@ -4,6 +4,8 @@ import { AppProviders } from './providers';
 import { RootNavigator } from './navigation/RootNavigator';
 import { useLockStore } from '../features/lock/lockStore';
 import { useUpdateStore } from '../features/updates/updateStore';
+import { initNotificationCenter } from '../features/notifications/notificationCenter';
+import { playerService } from '../services/player/PlayerService';
 
 /**
  * Root component. The app boots into the local profile immediately; the only
@@ -14,6 +16,10 @@ export default function App() {
   // Check for a newer release on cold start, then again whenever the app
   // returns to the foreground (bounded by the store's check cooldown).
   useEffect(() => {
+    initNotificationCenter();
+    // Reconcile with a service that may still be playing after a JS reload,
+    // and attach native listeners before the user's first playback action.
+    playerService.initialize();
     void useUpdateStore.getState().check();
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') {

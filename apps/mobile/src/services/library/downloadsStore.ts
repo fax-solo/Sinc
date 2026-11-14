@@ -16,19 +16,63 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import type { CanonicalTrack } from '@sinc/shared';
 import { config } from '../../app/config';
 import { nativeBridge } from '../native';
+import type { NativeDownloadStage } from '../native/types';
 import { useLyricsStore } from '../lyrics/lyricsStore';
 import { track as trackAnalytics } from '../analytics/analytics';
 import { storage, STORAGE_KEYS } from '../../utils/storage';
 import { useDownloadProgressStore } from './downloadProgressStore';
 import {
   findArchiveSource,
+  extensionForDownloadSource,
   findFmaSource,
   findJamendoSource,
   searchTitle,
   type LocalDownloadSource,
 } from '../providers/download-source';
+import { resolvePreviewUrl } from '../providers/preview';
 
-export type DownloadPhase = 'source' | 'transfer' | 'completed' | 'failed';
+export type DownloadPhase =
+  | 'queued'
+  | 'source'
+  | 'transfer'
+  | 'processing'
+  | 'tagging'
+  | 'validating'
+  | 'completed'
+  | 'failed';
+
+/** User taps jump bulk imports; restart resumes queue behind both. */
+export type DownloadPriority = 'user' | 'resume' | 'bulk';
+
+/** True while a record still owns a queue slot or a native transfer. */
+export function isDownloadInProgress(phase: DownloadPhase): boolean {
+  return (
+    phase === 'queued' ||
+    phase === 'source' ||
+    phase === 'transfer' ||
+    phase === 'processing' ||
+    phase === 'tagging' ||
+    phase === 'validating'
+  );
+}
+
+/** Monotonic native stages: late/duplicate events must not move backwards. */
+const DOWNLOAD_STAGE_RANK: Record<NativeDownloadStage, number> = {
+  processing: 2,
+  tagging: 3,
+  validating: 4,
+};
+
+const IN_PROGRESS_RANK: Partial<Record<DownloadPhase, number>> = {
+  transfer: 1,
+  processing: 2,
+  tagging: 3,
+  validating: 4,
+};
+
+function isNativeDownloadStage(value: unknown): value is NativeDownloadStage {
+  return value === 'processing' || value === 'tagging' || value === 'validating';
+}
 
 export interface DownloadRecord {
   jobId: string;
@@ -41,6 +85,12 @@ export interface DownloadRecord {
   error?: string;
   createdAt: number;
   completedAt?: number;
+  /** Consecutive automatic transfer attempts, persisted across restarts. */
+  attempts?: number;
+  /** Epoch ms before which an automatic retry must not start. */
+  retryAt?: number;
+  /** Whether this task may fall back to the on-device yt-dlp engine. */
+  allowEngine?: boolean;
   /** Actual Music/Sinc display name; may differ from publicFileName (m4a/webm). */
   publishedName?: string;
 }
@@ -51,7 +101,10 @@ interface DownloadsState {
   pausedIds: ReadonlySet<string>;
   isDownloaded: (trackId: string) => boolean;
   getDownload: (trackId: string) => DownloadRecord | undefined;
-  downloadTrack: (track: CanonicalTrack, opts?: { resumePart?: boolean }) => Promise<void>;
+  downloadTrack: (
+    track: CanonicalTrack,
+    opts?: { resumePart?: boolean; priority?: DownloadPriority; allowEngine?: boolean }
+  ) => Promise<void>;
   pauseDownload: (jobId: string) => Promise<void>;
   resumeDownload: (jobId: string) => Promise<void>;
   cancelDownload: (jobId: string) => Promise<void>;
@@ -66,38 +119,232 @@ interface DownloadsState {
 
 const PROGRESS_THROTTLE_MS = 250;
 
-/** Job ids currently being transferred this session (blocks duplicate taps). */
-const activeJobs = new Set<string>();
-/** Parallel resume lane count: resumes overlap instead of summing minutes. */
-const RESUME_CONCURRENCY = 2;
+/** Automatic transfer retries: two waits before the job is marked failed. */
+const RETRY_DELAYS_MS = [5_000, 15_000] as const;
 
-async function runWithConcurrency<T>(
-  items: T[],
-  limit: number,
-  task: (item: T, index: number) => Promise<void>
-): Promise<void> {
-  let next = 0;
-  const lanes = Math.max(1, Math.min(limit, items.length));
-  await Promise.all(
-    Array.from({ length: lanes }, async () => {
-      while (next < items.length) {
-        const index = next;
-        next += 1;
-        try {
-          await task(items[index], index);
-        } catch {
-          // Individual failures must not abort the batch.
-        }
-      }
-    })
-  );
+/**
+ * Two transfers at a time matches the native yt-dlp pool. More than that
+ * saturates phone I/O and made every job slower; fewer leaves the engine idle.
+ */
+export const MAX_CONCURRENT_DOWNLOADS = 2;
+
+const PRIORITY_RANK: Record<DownloadPriority, number> = {
+  user: 0,
+  resume: 1,
+  bulk: 2,
+};
+
+interface QueuedDownload {
+  jobId: string;
+  priority: DownloadPriority;
+  order: number;
+  run: () => Promise<void>;
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+  cancelled: boolean;
 }
+
+const downloadQueue: QueuedDownload[] = [];
+const queuedDownloads = new Map<string, QueuedDownload>();
+const runningDownloads = new Map<string, Promise<void>>();
+let runningDownloadCount = 0;
+let queueOrder = 0;
+
+function hasScheduledDownload(jobId: string): boolean {
+  return queuedDownloads.has(jobId) || runningDownloads.has(jobId);
+}
+
+function hasRunningDownload(jobId: string): boolean {
+  return runningDownloads.has(jobId);
+}
+
+function pumpDownloadQueue(): void {
+  while (runningDownloadCount < MAX_CONCURRENT_DOWNLOADS && downloadQueue.length > 0) {
+    const entry = downloadQueue.shift();
+    if (!entry) return;
+    queuedDownloads.delete(entry.jobId);
+    if (entry.cancelled) {
+      entry.resolve();
+      continue;
+    }
+    runningDownloadCount += 1;
+    const running = (async () => {
+      try {
+        await entry.run();
+        entry.resolve();
+      } catch (error) {
+        entry.reject(error);
+      } finally {
+        runningDownloadCount = Math.max(0, runningDownloadCount - 1);
+        runningDownloads.delete(entry.jobId);
+        pumpDownloadQueue();
+      }
+    })();
+    runningDownloads.set(entry.jobId, running);
+  }
+}
+
+/**
+ * Enqueues one job and resolves only when its run settles. A duplicate call
+ * returns the existing queued/running promise instead of starting a second
+ * native transfer or resetting the row.
+ */
+function scheduleDownload(
+  jobId: string,
+  priority: DownloadPriority,
+  run: () => Promise<void>
+): Promise<void> {
+  const queued = queuedDownloads.get(jobId);
+  if (queued) return queued.promise;
+  const running = runningDownloads.get(jobId);
+  if (running) return running;
+
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  const entry: QueuedDownload = {
+    jobId,
+    priority,
+    order: queueOrder,
+    run,
+    promise,
+    resolve,
+    reject,
+    cancelled: false,
+  };
+  queueOrder += 1;
+  queuedDownloads.set(jobId, entry);
+  downloadQueue.push(entry);
+  // Stable priority order: a later user tap starts before an earlier bulk item.
+  downloadQueue.sort(
+    (a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || a.order - b.order
+  );
+  pumpDownloadQueue();
+  return promise;
+}
+
+/** Drops a not-yet-started job; active jobs are stopped through the native bridge. */
+function cancelQueuedDownload(jobId: string): boolean {
+  const entry = queuedDownloads.get(jobId);
+  if (!entry) return false;
+  entry.cancelled = true;
+  queuedDownloads.delete(jobId);
+  entry.resolve();
+  pumpDownloadQueue();
+  return true;
+}
+
 /** Session tokens so a killed run's rejection can't clobber a newer launch. */
 const launchToken = new Map<string, number>();
+
+/** Test isolation: callers must have settled real runs before resetting. */
+export function resetDownloadQueueForTests(): void {
+  for (const entry of [...queuedDownloads.values()]) {
+    entry.cancelled = true;
+    entry.resolve();
+  }
+  downloadQueue.length = 0;
+  queuedDownloads.clear();
+  runningDownloads.clear();
+  runningDownloadCount = 0;
+  launchToken.clear();
+  for (const timer of retryTimers.values()) clearTimeout(timer);
+  retryTimers.clear();
+  pendingCleanup.clear();
+}
 
 /** Finds the persisted record for a native event by jobId, if any. */
 function recordByJobId(jobId: string): DownloadRecord | undefined {
   return useDownloadsStore.getState().downloads.find((d) => d.jobId === jobId);
+}
+
+/** Timers for persisted backoff windows; re-armable after a process restart. */
+const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearRetryTimer(jobId: string): void {
+  const timer = retryTimers.get(jobId);
+  if (!timer) return;
+  clearTimeout(timer);
+  retryTimers.delete(jobId);
+}
+
+/**
+ * Waits out a persisted retry window. A restart before `retryAt` re-arms the
+ * same wait instead of hammering the host or skipping the backoff.
+ */
+function scheduleRetryResume(record: DownloadRecord): void {
+  const delayMs = Math.max(0, (record.retryAt ?? 0) - Date.now());
+  clearRetryTimer(record.jobId);
+  const timer = setTimeout(() => {
+    retryTimers.delete(record.jobId);
+    const current = recordByJobId(record.jobId);
+    if (!current || !isDownloadInProgress(current.phase)) return;
+    if (useDownloadsStore.getState().pausedIds.has(record.jobId)) return;
+    // A new process cannot prove which source produced the old partial.
+    void useDownloadsStore.getState().downloadTrack(current.track, {
+      resumePart: false,
+      priority: 'resume',
+      allowEngine: current.allowEngine ?? false,
+    });
+  }, delayMs);
+  (timer as unknown as { unref?: () => void }).unref?.();
+  retryTimers.set(record.jobId, timer);
+}
+
+/**
+ * Removes a job's private artifacts even when the transfer never completed and
+ * therefore has no `localUri`. Cancelling only the native process left `.part`
+ * files (and, for the engine, eventually a tagged file) on disk forever.
+ */
+async function removeNativeArtifacts(record: DownloadRecord): Promise<void> {
+  const fileName = record.localUri?.split('/').pop() ?? safeFileName(record.track);
+  const published = record.publishedName ?? publicFileName(record.track);
+  const engineSource =
+    record.localUri?.includes('/sinc_yt/') ||
+    record.provider === 'youtube' ||
+    record.provider === 'soundcloud';
+  try {
+    if (engineSource) {
+      await nativeBridge.yt.remove?.(fileName, published);
+    } else if (record.localUri) {
+      await nativeBridge.downloader.remove(record.jobId, fileName, published);
+    } else {
+      // The job was cancelled before it recorded a provider. Try both
+      // module-owned directories; each cleanup is confined to its own dir.
+      await nativeBridge.yt.remove?.(fileName, published);
+      await nativeBridge.downloader.remove(record.jobId, fileName, published);
+    }
+  } catch {
+    // Local cleanup is best-effort; the store record is what matters.
+  }
+}
+
+/**
+ * Native cleanup is keyed by the track-derived job id. If the user cancels
+ * and immediately re-downloads, the old cleanup must finish before the new
+ * transfer starts — otherwise it can discard the new job's partial/output.
+ */
+const pendingCleanup = new Map<string, Promise<void>>();
+
+function queueCleanupTask(jobId: string, task: () => Promise<void>): Promise<void> {
+  const previous = pendingCleanup.get(jobId) ?? Promise.resolve();
+  const current = previous
+    .catch(() => undefined)
+    .then(task)
+    .catch(() => undefined);
+  pendingCleanup.set(jobId, current);
+  void current.finally(() => {
+    if (pendingCleanup.get(jobId) === current) pendingCleanup.delete(jobId);
+  });
+  return current;
+}
+
+function queueNativeCleanup(record: DownloadRecord): Promise<void> {
+  return queueCleanupTask(record.jobId, () => removeNativeArtifacts(record));
 }
 
 function shortHash(input: string): string {
@@ -120,23 +367,25 @@ export function mimeForLocalUri(uri: string): string {
   return 'audio/mpeg';
 }
 
-export function safeFileName(track: CanonicalTrack): string {
+export function safeFileName(track: CanonicalTrack, extension = 'mp3'): string {
   const raw = `${track.artists[0]?.name ?? 'unknown'}-${track.title}`
     .replace(/[^\p{L}\p{N}._-]+/gu, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 80);
-  return `${raw || 'track'}-${shortHash(track.id)}.mp3`;
+  const ext = extension.replace(/[^a-z0-9]/gi, '').toLowerCase() || 'mp3';
+  return `${raw || 'track'}-${shortHash(track.id)}.${ext}`;
 }
 
 /** Display name for the published copy in Music/Sinc: just the song title. */
-export function publicFileName(track: CanonicalTrack): string {
+export function publicFileName(track: CanonicalTrack, extension = 'mp3'): string {
   const raw = track.title
     .replace(/[/\\:*?"<>|]+/gu, ' ')
     .replace(/\s+/gu, ' ')
     .trim()
     .replace(/[. ]+$/g, '')
     .slice(0, 100);
-  return `${raw || 'song'}.mp3`;
+  const ext = extension.replace(/[^a-z0-9]/gi, '').toLowerCase() || 'mp3';
+  return `${raw || 'song'}.${ext}`;
 }
 
 function idsOf(items: Array<{ id?: string; track?: { id: string } }>): Set<string> {
@@ -171,6 +420,15 @@ const DIRECT_MISS_TTL_MS = 20 * 60 * 1000;
 /** trackId → when the direct-tier probes last came up empty. */
 const directMissAt = new Map<string, number>();
 
+/**
+ * jobId → the direct source chosen for the current attempt. A paused/retried
+ * direct transfer must resume the SAME URL: re-running the provider search can
+ * return a different file, and appending its bytes to the old `.part` would
+ * produce a corrupt/mixed song. In-memory only: after an app restart the part
+ * is discarded and the source is re-selected.
+ */
+const directJobSources = new Map<string, LocalDownloadSource>();
+
 /** Cache-aware miss wrapper: a track with no direct source must not re-probe
  * for 20 minutes — retries and re-taps go straight to the yt-dlp engine. */
 export async function findDirectSource(track: CanonicalTrack): Promise<LocalDownloadSource | null> {
@@ -182,13 +440,10 @@ export async function findDirectSource(track: CanonicalTrack): Promise<LocalDown
   return source;
 }
 
-/** Clears the direct-tier miss cache (test isolation; module state by design). */
+/** Clears the direct-tier caches (test isolation; module state by design). */
 export function resetDirectSourceMissCache(): void {
   directMissAt.clear();
-}
-
-function providerForMediaUrl(url: string): string {
-  return url.includes('soundcloud.com') ? 'soundcloud' : 'youtube';
+  directJobSources.clear();
 }
 
 /** Human-readable transfer rate: "512 B/s", "214 KiB/s", "3.2 MiB/s". */
@@ -289,25 +544,31 @@ async function isDeviceOnline(): Promise<boolean> {
 /** Post-transfer length guards shared by both transfer paths. */
 const MIN_FULL_TRACK_MS = 45_000;
 const MAX_UNKNOWN_TRACK_MS = 20 * 60 * 1000;
-const MIN_TRACK_RATIO = 0.8;
-const MAX_TRACK_RATIO = 1.25;
+const MIN_DURATION_TOLERANCE_MS = 5_000;
+const DURATION_TOLERANCE_RATIO = 0.03;
 
 /**
  * A finished direct-source file whose probed length is this far off the
- * expected track is a preview/compilation segment or the wrong song: reject
- * (0 = probe unavailable, always accepted).
+ * expected track is a preview/compilation segment or the wrong song: reject.
+ * The old 0.8-1.25x window accepted a 3:35 cover as a 2:55 song; this gate is
+ * tight enough to catch a different recording while allowing a few seconds of
+ * intro/outro silence.
+ *
+ * An unreadable probe (0) fails closed when the catalog length is known: an
+ * unverified file is not saved as the song.
  */
 export function isBadDownloadDuration(
   durationMs: number,
   expectedDurationMs: number | null | undefined
 ): boolean {
-  if (!durationMs || durationMs <= 0) return false;
+  if (!durationMs || durationMs <= 0) return Boolean(expectedDurationMs && expectedDurationMs > 0);
   if (durationMs < MIN_FULL_TRACK_MS) return true;
   if (!expectedDurationMs || expectedDurationMs <= 0) return durationMs > MAX_UNKNOWN_TRACK_MS;
-  return (
-    durationMs < expectedDurationMs * MIN_TRACK_RATIO ||
-    durationMs > expectedDurationMs * MAX_TRACK_RATIO
+  const tolerance = Math.max(
+    MIN_DURATION_TOLERANCE_MS,
+    expectedDurationMs * DURATION_TOLERANCE_RATIO
   );
+  return Math.abs(durationMs - expectedDurationMs) > tolerance;
 }
 
 /**
@@ -334,8 +595,46 @@ export function isTransientDownloadError(err: unknown): boolean {
   );
 }
 
+/**
+ * Content verification failures are not network failures: the file was
+ * fetched, but it was the wrong recording (or the preview reference could not
+ * be fetched). Retry once with a freshly resolved source instead of parking or
+ * surfacing the first candidate's mismatch.
+ */
+export function isFingerprintError(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code ?? '';
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return /^DOWNLOAD_FINGERPRINT_/.test(code) || /DOWNLOAD_FINGERPRINT_/.test(message);
+}
+
+/** A code-only bridge rejection still needs a useful message for the user. */
+function fingerprintFailureMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message.trim() : '';
+  if (message) return message;
+  const code = (err as { code?: string } | null)?.code ?? '';
+  return /UNAVAILABLE/.test(code)
+    ? 'Could not verify the downloaded audio against the catalog preview. Please try again.'
+    : 'The downloaded audio did not match the selected song. Please try again.';
+}
+
+/** A pause/cancel can beat the native action event to JS; never mark it failed. */
+export function isCancelledDownloadError(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code ?? '';
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return code === 'DOWNLOAD_CANCELLED' || /DOWNLOAD_CANCELLED/.test(message);
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Wakes promptly when a pause/cancel invalidates the retry wait. */
+async function sleepUnlessStopped(ms: number, stopped: () => boolean): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (stopped()) return;
+    await sleep(Math.min(250, deadline - Date.now()));
+  }
 }
 
 // App-foreground resume: a reconnect *event* can be missed when NetInfo was
@@ -421,14 +720,46 @@ export const useDownloadsStore = create<DownloadsState>()(
           lastProgressAt.set(e.jobId, now);
           const record = get().downloads.find((d) => d.jobId === e.jobId);
           if (record && record.phase === 'transfer') {
-            const total = e.bytesTotal > 0 ? e.bytesTotal : 1;
             const progressStore = useDownloadProgressStore.getState();
-            progressStore.setProgress(
-              e.jobId,
-              Math.min(99, Math.round((e.bytesDownloaded / total) * 100))
-            );
+            if (e.bytesTotal > 0) {
+              progressStore.setProgress(
+                e.jobId,
+                Math.min(99, Math.round((e.bytesDownloaded / e.bytesTotal) * 100))
+              );
+            } else {
+              // Unknown length is not 99% complete. Keep the row indeterminate
+              // and only show the measured transfer rate.
+              progressStore.setIndeterminate(e.jobId, true);
+            }
             progressStore.setSpeed(e.jobId, formatSpeed(e.speedBytesPerSec));
           }
+        });
+      }
+
+      // Native emits these only after the transfer is complete. They are
+      // monotonic: a duplicate, late, or malformed event cannot move a row
+      // backwards (or revive a completed/failed row).
+      if (nativeBridge.downloads.available()) {
+        nativeBridge.downloads.addStageListener((event) => {
+          if (!event || typeof event.jobId !== 'string' || !isNativeDownloadStage(event.stage)) {
+            return;
+          }
+          const record = recordByJobId(event.jobId);
+          if (!record || !isDownloadInProgress(record.phase)) return;
+          const currentRank = IN_PROGRESS_RANK[record.phase];
+          const nextRank = DOWNLOAD_STAGE_RANK[event.stage];
+          if (currentRank == null || nextRank <= currentRank) return;
+          // Reaching the first post-transfer stage proves the transfer
+          // attempt succeeded, so a later restart gets a fresh retry budget.
+          const patch: Partial<DownloadRecord> = { phase: event.stage, error: undefined };
+          if (event.stage === 'processing') {
+            patch.attempts = 0;
+            patch.retryAt = undefined;
+          }
+          upsert(event.jobId, patch);
+          // A stale byte rate from the transfer must not sit next to
+          // "Processing audio…" / "Verifying audio…".
+          useDownloadProgressStore.getState().setSpeed(event.jobId, null);
         });
       }
 
@@ -444,15 +775,41 @@ export const useDownloadsStore = create<DownloadsState>()(
         downloadTrack: async (track, opts) => {
           const jobId = jobIdForTrack(track);
           const existing = get().getDownload(track.id);
+          // An explicit tap/resume replaces the persisted backoff timer.
+          clearRetryTimer(jobId);
           if (existing?.phase === 'completed') return;
-          if (activeJobs.has(jobId)) return;
-          activeJobs.add(jobId);
+          if (hasScheduledDownload(jobId)) return;
           // Retries and resumes continue from any surviving `.part` rather
           // than trashing bytes the first attempt already transferred.
           let resumeNext = Boolean(opts?.resumePart);
+          // After content verification rejects the audio, do not retry the
+          // same direct source on the next attempt; go straight to the engine,
+          // which re-searches with a fresh candidate.
+          let skipDirectAfterFingerprint = false;
+
+          // Keep the automatic-retry budget across a pause/restart, but a
+          // manual retry of a hard-failed row starts a fresh budget. A
+          // process death mid-transfer must not hand the job unlimited
+          // retries just because the backoff deadline was already cleared.
+          const carriedAttempts =
+            existing && existing.phase !== 'failed' ? (existing.attempts ?? 0) : 0;
+
+          // Bulk imports only use licensed/direct sources. The engine fallback
+          // is reserved for an explicit individual download or retry.
+          const priority = opts?.priority ?? 'user';
+          const allowEngine = opts?.allowEngine ?? priority !== 'bulk';
 
           const downloads = [
-            { jobId, track, phase: 'source' as DownloadPhase, progress: 0, createdAt: Date.now() },
+            {
+              jobId,
+              track,
+              phase: 'queued' as DownloadPhase,
+              progress: 0,
+              createdAt: Date.now(),
+              attempts: carriedAttempts,
+              retryAt: undefined,
+              allowEngine,
+            },
             ...get().downloads.filter((d) => d.jobId !== jobId),
           ];
           set({ downloads, downloadedIds: deriveDownloadedIds(downloads) });
@@ -461,17 +818,46 @@ export const useDownloadsStore = create<DownloadsState>()(
           set({ pausedIds });
           const progressStore = useDownloadProgressStore.getState();
           progressStore.setProgress(jobId, 0);
+          progressStore.setIndeterminate(jobId, false);
           progressStore.setSpeed(jobId, null);
           waitingForConnection.delete(jobId);
           const token = (launchToken.get(jobId) ?? 0) + 1;
           launchToken.set(jobId, token);
+          const stopped = () => launchToken.get(jobId) !== token || get().pausedIds.has(jobId);
+
+          // Resolved below, once per job, before the first attempt. Catalogue
+          // rows already carry it; legacy rows are looked up by provider id or
+          // strict text search. A missing preview is not fatal here, but the
+          // downloader then has no content-level reference and falls back to its
+          // metadata/length gates.
+          let previewUrl: string | null = null;
 
           /** Runs one full attempt: direct tier first, then yt-dlp. */
           const attempt = async (): Promise<void> => {
-            // Fast path: a direct, downloadable file URL.
-            const direct = await findDirectSource(track);
+            // A pause/cancel during a slow provider search must not start a
+            // fresh native transfer afterwards.
+            if (stopped()) throw new Error('Download stopped');
+            // Fast path: a direct, downloadable file URL. On a resume/retry,
+            // reuse the exact URL that produced the surviving `.part`; only a
+            // fresh attempt may run the provider search again.
+            const cachedDirect = resumeNext ? directJobSources.get(jobId) : undefined;
+            const direct = skipDirectAfterFingerprint
+              ? null
+              : (cachedDirect ?? (await findDirectSource(track)));
+            if (stopped()) throw new Error('Download stopped');
+            if (direct && !cachedDirect) directJobSources.set(jobId, direct);
             if (direct) {
-              upsert(jobId, { phase: 'transfer', progress: 5, provider: direct.provider });
+              const resumeDirect = Boolean(cachedDirect && cachedDirect.url === direct.url);
+              const extension = extensionForDownloadSource(direct);
+              const privateName = safeFileName(track, extension);
+              const publicName = publicFileName(track, extension);
+              upsert(jobId, {
+                phase: 'transfer',
+                progress: 5,
+                provider: direct.provider,
+                error: undefined,
+              });
+              useDownloadProgressStore.getState().setIndeterminate(jobId, true);
               let result: Awaited<ReturnType<typeof nativeBridge.downloader.download>> | null =
                 null;
               try {
@@ -479,15 +865,17 @@ export const useDownloadsStore = create<DownloadsState>()(
                   jobId,
                   direct.url,
                   undefined,
-                  safeFileName(track),
+                  privateName,
                   {
                     title: track.title,
                     artist: track.artists[0]?.name ?? 'Unknown Artist',
                     album: track.album?.title,
-                    publicFileName: publicFileName(track),
+                    artworkUrl: track.artworkUrl,
+                    publicFileName: publicName,
                     expectedDurationMs: direct.expectedDurationMs,
+                    previewUrl: previewUrl ?? undefined,
                   },
-                  resumeNext
+                  resumeDirect
                 );
               } catch (directErr) {
                 if (launchToken.get(jobId) !== token) return;
@@ -498,11 +886,24 @@ export const useDownloadsStore = create<DownloadsState>()(
                 const message = (
                   directErr instanceof Error ? directErr.message : String(directErr ?? '')
                 ).trim();
-                if (!/^HTTP_/.test(code) && !/^HTTP_/.test(message)) throw directErr; // network errors: retry/park loop keeps the resume
+                const fingerprintRejected = isFingerprintError(directErr);
+                const rejectedSource =
+                  /^HTTP_/.test(code) ||
+                  /^HTTP_/.test(message) ||
+                  code === 'DOWNLOAD_UNVERIFIED' ||
+                  /^DOWNLOAD_UNVERIFIED/.test(message) ||
+                  fingerprintRejected;
+                if (!rejectedSource) throw directErr; // network errors: retry/park loop keeps the resume
                 // A `HTTP_<code>` means the file host rejected THIS url
-                // (401/403 auth, 404 taken-down, 5xx): the track may still be
-                // engine-fetchable, so degrade to the yt-dlp tier instead of
-                // failing the whole job.
+                // (401/403 auth, 404 taken-down, 5xx). `DOWNLOAD_UNVERIFIED`
+                // means the native layer probed the finished file and its
+                // length did not match the chosen track (it deletes the file
+                // before publishing). `DOWNLOAD_FINGERPRINT_*` means it fetched
+                // audio but the bytes did not match the catalog preview, or the
+                // preview could not be checked. In every case the track may
+                // still be engine-fetchable, so degrade to the yt-dlp tier.
+                if (fingerprintRejected) skipDirectAfterFingerprint = true;
+                directJobSources.delete(jobId);
                 console.warn('Sinc direct source rejected, falling back:', jobId, code || message);
               }
               if (result) {
@@ -512,13 +913,11 @@ export const useDownloadsStore = create<DownloadsState>()(
                 // compilation segment must fall through to the yt-dlp path
                 // instead of being saved as the song.
                 if (isBadDownloadDuration(result.durationMs ?? 0, direct.expectedDurationMs)) {
-                  await nativeBridge.downloader.remove(
-                    jobId,
-                    safeFileName(track),
-                    publicFileName(track)
-                  );
+                  await nativeBridge.downloader.remove(jobId, privateName, publicName);
+                  directJobSources.delete(jobId);
                   // fall through to the yt-dlp tier below
                 } else {
+                  directJobSources.delete(jobId);
                   waitingForConnection.delete(jobId);
                   useDownloadProgressStore.getState().clearProgress(jobId);
                   upsert(jobId, {
@@ -528,33 +927,53 @@ export const useDownloadsStore = create<DownloadsState>()(
                     sizeBytes: result.sizeBytes,
                     provider: direct.provider,
                     completedAt: Date.now(),
+                    attempts: 0,
+                    retryAt: undefined,
+                    publishedName: result.publishedName ?? publicName,
                   });
                   return;
                 }
               }
             }
-            // yt-dlp path: reuse a known soundcloud/youtube result, else search
-            // (also the fallback when a direct source downloaded garbage).
+            // yt-dlp path: always resolve through the strict artist+title
+            // search. Provider IDs are not trusted as download sources: a
+            // catalog id can point at a cover, a re-upload or a stale video,
+            // and the native URL path cannot compare it to the chosen track.
+            // Searching lets the engine apply the title/artist/duration gates.
+            if (stopped()) throw new Error('Download stopped');
+            if (!allowEngine) {
+              throw new Error(
+                'No licensed source found. Bulk downloads do not use the on-device engine; open this song to download it individually.'
+              );
+            }
             if (!nativeBridge.yt.available()) {
               throw new Error('The on-device media engine is not linked (yt-dlp).');
             }
-            upsert(jobId, { phase: 'source', progress: 10 });
-            const mediaUrl = track.providerIds.soundcloud ?? track.providerIds.youtube ?? null;
-            const query = mediaUrl
-              ? mediaUrl
-              : `${track.artists[0]?.name ?? 'unknown'} - ${searchTitle(track.title)}`;
+            // Explicit disclosure for the individual fallback. The row shows
+            // this until the native transfer-reported stage replaces it. The
+            // provider is rewritten too: any earlier direct probe failed, so
+            // the completed row must not claim the audio came from that source.
+            upsert(jobId, {
+              phase: 'source',
+              progress: 10,
+              provider: 'youtube',
+              error:
+                'No licensed source found — using the on-device engine for this individual download…',
+            });
+            const query = `${track.artists[0]?.name ?? 'unknown'} - ${searchTitle(track.title)}`;
             const result = await nativeBridge.yt.download(
               jobId,
-              mediaUrl ? '' : query,
+              query,
               safeFileName(track),
               track.durationMs > 0 ? track.durationMs : null,
-              mediaUrl,
+              null,
               track.title,
               resumeNext,
               track.artists[0]?.name ?? null,
               track.album?.title ?? null,
               track.artworkUrl ?? null,
-              publicFileName(track)
+              publicFileName(track),
+              previewUrl
             );
             if (launchToken.get(jobId) !== token) return;
             if (!result) {
@@ -567,16 +986,25 @@ export const useDownloadsStore = create<DownloadsState>()(
               progress: 100,
               localUri: result.localUri,
               sizeBytes: 0,
-              provider: mediaUrl
-                ? providerForMediaUrl(mediaUrl)
-                : (recordByJobId(jobId)?.provider ?? 'youtube'),
+              provider: recordByJobId(jobId)?.provider ?? 'youtube',
               completedAt: Date.now(),
+              attempts: 0,
+              retryAt: undefined,
               publishedName: result.publishedName ?? publicFileName(track),
             });
           };
 
-          try {
-            for (let attemptIndex = 0; ; attemptIndex += 1) {
+          const run = async (): Promise<void> => {
+            // The scheduler may start this run after other queued jobs.
+            // Cancellation/pause can also win the race while it waits.
+            const cleanup = pendingCleanup.get(jobId);
+            if (cleanup) await cleanup;
+            if (stopped()) return;
+            upsert(jobId, { phase: 'source', progress: 0, error: undefined });
+            previewUrl = await resolvePreviewUrl(track).catch(() => null);
+            if (launchToken.get(jobId) !== token) return;
+            if (get().pausedIds.has(jobId)) return;
+            for (let attemptIndex = carriedAttempts; ; attemptIndex += 1) {
               try {
                 await attempt();
                 trackAnalytics('download:complete', track.id, {
@@ -590,6 +1018,25 @@ export const useDownloadsStore = create<DownloadsState>()(
                 // failed (or burn retries on it).
                 if (launchToken.get(jobId) !== token) return;
                 if (get().pausedIds.has(jobId)) return;
+                // A native notification pause/cancel can reject before its
+                // action event reaches this store. Leave the row resumable
+                // instead of surfacing a user-initiated stop as a failure.
+                if (isCancelledDownloadError(err)) return;
+                // The source downloaded successfully but its bytes are not the
+                // selected recording (or the preview reference was
+                // unavailable). The direct tier already fell through to the
+                // engine; give the engine one fresh candidate, skipping the
+                // rejected direct source entirely.
+                if (attemptIndex < 1 && isFingerprintError(err)) {
+                  skipDirectAfterFingerprint = true;
+                  resumeNext = false;
+                  upsert(jobId, {
+                    phase: 'source',
+                    error: 'Trying a different source…',
+                    retryAt: undefined,
+                  });
+                  continue;
+                }
                 // Connection loss or a degraded link is not a failure: park
                 // the job in `source` so it never shows "failed" and
                 // auto-resumes when the link is back (reconnect event, the
@@ -599,6 +1046,7 @@ export const useDownloadsStore = create<DownloadsState>()(
                   upsert(jobId, {
                     phase: 'source',
                     error: 'Waiting for connection…',
+                    retryAt: undefined,
                   });
                   useDownloadProgressStore.getState().setSpeed(jobId, null);
                   ensureParkPoller();
@@ -606,25 +1054,38 @@ export const useDownloadsStore = create<DownloadsState>()(
                 }
                 // Transient transfer errors get automatic retries with
                 // backoff; each retry resumes from the surviving `.part`.
-                if (attemptIndex < 2 && isTransientDownloadError(err)) {
-                  const delayMs = [5_000, 15_000][attemptIndex];
+                // The attempt count and retry deadline are persisted, so a
+                // process death during the wait does not reset or skip it.
+                if (attemptIndex < RETRY_DELAYS_MS.length && isTransientDownloadError(err)) {
+                  const delayMs = RETRY_DELAYS_MS[attemptIndex] ?? RETRY_DELAYS_MS[0];
+                  const nextAttempt = attemptIndex + 1;
                   upsert(jobId, {
                     phase: 'source',
                     error: `Retrying in ${Math.round(delayMs / 1000)}s…`,
+                    attempts: nextAttempt,
+                    retryAt: Date.now() + delayMs,
                   });
-                  await sleep(delayMs);
+                  await sleepUnlessStopped(delayMs, stopped);
                   if (launchToken.get(jobId) !== token) return;
                   if (get().pausedIds.has(jobId)) return;
+                  upsert(jobId, { retryAt: undefined });
                   resumeNext = true;
                   continue;
                 }
                 waitingForConnection.delete(jobId);
+                directJobSources.delete(jobId);
                 useDownloadProgressStore.getState().clearProgress(jobId);
-                const message = err instanceof Error ? err.message : 'Download failed';
+                const message = isFingerprintError(err)
+                  ? fingerprintFailureMessage(err)
+                  : err instanceof Error
+                    ? err.message
+                    : 'Download failed';
                 upsert(jobId, {
                   phase: 'failed',
                   progress: 0,
                   error: message,
+                  attempts: 0,
+                  retryAt: undefined,
                 });
                 trackAnalytics('download:failed', track.id, {
                   provider: get().getDownload(track.id)?.provider ?? 'unknown',
@@ -634,21 +1095,21 @@ export const useDownloadsStore = create<DownloadsState>()(
                 return;
               }
             }
-          } finally {
-            activeJobs.delete(jobId);
-          }
+          };
+          return scheduleDownload(jobId, opts?.priority ?? 'user', run);
         },
 
         pauseDownload: async (jobId) => {
           const record = recordByJobId(jobId);
           if (!record) return;
           if (record.phase === 'completed' || record.phase === 'failed') return;
-          // Parked jobs ("Waiting for connection…") have NO active worker —
-          // the old activeJobs guard made Pause a dead button on those rows
-          // while the park poller kept auto-reviving them against the user's
-          // wishes. Paused ids are honored by every resume path.
+          // Parked jobs ("Waiting for connection…") have NO active worker;
+          // queued jobs have not started either. Both must still be pausable,
+          // and the queue entry must be dropped so the scheduler cannot start
+          // them behind the user's back.
           const wasPaused = get().pausedIds.has(jobId);
-          activeJobs.delete(jobId);
+          const wasQueued = cancelQueuedDownload(jobId);
+          clearRetryTimer(jobId);
           launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
           waitingForConnection.delete(jobId);
           if (!wasPaused) {
@@ -656,6 +1117,7 @@ export const useDownloadsStore = create<DownloadsState>()(
             pausedIds.add(jobId);
             set({ pausedIds });
           }
+          if (wasQueued) return;
           try {
             await nativeBridge.downloads.pause(jobId);
           } catch {
@@ -672,11 +1134,25 @@ export const useDownloadsStore = create<DownloadsState>()(
           pausedIds.delete(jobId);
           set({ pausedIds });
           launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
-          await get().downloadTrack(record.track, { resumePart: true });
+          // A native pause rejects asynchronously. Let the old run release
+          // its scheduler slot before queuing the resume, otherwise the same
+          // job id would be treated as a duplicate and never restart.
+          const interrupted = runningDownloads.get(jobId);
+          if (interrupted) await interrupted;
+          if (get().pausedIds.has(jobId)) return;
+          await get().downloadTrack(record.track, {
+            resumePart: true,
+            priority: 'resume',
+            allowEngine: record.allowEngine ?? false,
+          });
         },
 
         cancelDownload: async (jobId) => {
-          activeJobs.delete(jobId);
+          const record = recordByJobId(jobId);
+          const wasQueued = cancelQueuedDownload(jobId);
+          const wasRunning = hasRunningDownload(jobId) || waitingForConnection.has(jobId);
+          clearRetryTimer(jobId);
+          directJobSources.delete(jobId);
           launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
           const pausedIds = new Set(get().pausedIds);
           pausedIds.delete(jobId);
@@ -686,11 +1162,19 @@ export const useDownloadsStore = create<DownloadsState>()(
           set({ downloads, downloadedIds: deriveDownloadedIds(downloads), pausedIds });
           waitingForConnection.delete(jobId);
           useDownloadProgressStore.getState().clearProgress(jobId);
-          try {
-            await nativeBridge.downloads.cancel(jobId);
-          } catch {
-            // Native already gone; state is what matters here.
-          }
+          // Register the cleanup before awaiting the native cancel. A quick
+          // re-download then waits for this chain instead of racing it.
+          const cleanup = queueCleanupTask(jobId, async () => {
+            if (!wasQueued && wasRunning) {
+              try {
+                await nativeBridge.downloads.cancel(jobId);
+              } catch {
+                // Native already gone; state is what matters here.
+              }
+            }
+            if (record) await removeNativeArtifacts(record);
+          });
+          await cleanup;
         },
 
         retryDownload: async (jobId) => {
@@ -699,28 +1183,65 @@ export const useDownloadsStore = create<DownloadsState>()(
           if (record.phase !== 'failed') return;
           // Transient errors already auto-retry; this is the manual path for
           // definitive failures (extraction blocked, no validated source…).
-          await get().downloadTrack(record.track, { resumePart: true });
+          // Retry is an explicit individual action, so it may use the engine
+          // fallback even when the original task came from a bulk import.
+          await get().downloadTrack(record.track, {
+            resumePart: true,
+            priority: 'user',
+            allowEngine: true,
+          });
         },
 
         setPhaseTransfer: (jobId) => {
           const record = recordByJobId(jobId);
-          if (!record || record.phase !== 'source') return;
-          upsert(jobId, { phase: 'transfer', provider: record.provider ?? 'youtube' });
+          // The engine can re-resolve a stale stream and start a second
+          // transfer for the same job after a processing/tagging/validating
+          // stage. That transfer action is authoritative and must reset the
+          // stages instead of leaving the row stuck on "Writing tags…".
+          if (
+            !record ||
+            (record.phase !== 'source' &&
+              record.phase !== 'processing' &&
+              record.phase !== 'tagging' &&
+              record.phase !== 'validating')
+          ) {
+            return;
+          }
+          upsert(jobId, {
+            phase: 'transfer',
+            provider: record.provider ?? 'youtube',
+            error: undefined,
+          });
+          // No progress sample yet: show "Downloading…" rather than a stale
+          // 0%/source percentage until the first measured byte arrives.
+          useDownloadProgressStore.getState().setIndeterminate(jobId, true);
         },
 
         resumeInFlight: async () => {
           const inFlight = get()
-            .downloads.filter((d) => d.phase === 'source' || d.phase === 'transfer')
+            .downloads.filter((d) => isDownloadInProgress(d.phase))
             .sort((a, b) => b.createdAt - a.createdAt);
-          await runWithConcurrency(inFlight, RESUME_CONCURRENCY, async (record, index) => {
-            if (get().pausedIds.has(record.jobId)) return;
-            // Staggered starts: the newest job — the one the user most likely
-            // just tapped — hits the lookup gates NOW; older jobs enter
-            // seconds apart instead of all queueing behind each other at boot
-            // (that pile-up is what made every resume feel 1-3 minutes slow).
-            await new Promise((r) => setTimeout(r, index * 7_000));
-            await get().downloadTrack(record.track, { resumePart: true });
-          });
+          // A new process has no in-memory source/target map. Appending new
+          // source bytes to a partial from the previous process can silently
+          // corrupt the file, so restart with a fresh transfer. Same-session
+          // pause/retry still resumes the original `.part`.
+          const pendingResumes: Array<Promise<void>> = [];
+          for (const record of inFlight) {
+            if (get().pausedIds.has(record.jobId)) continue;
+            if (record.retryAt && record.retryAt > Date.now()) {
+              // A restart during backoff must not skip the wait.
+              scheduleRetryResume(record);
+              continue;
+            }
+            pendingResumes.push(
+              get().downloadTrack(record.track, {
+                resumePart: false,
+                priority: 'resume',
+                allowEngine: record.allowEngine ?? false,
+              })
+            );
+          }
+          await Promise.allSettled(pendingResumes);
         },
 
         resumeWaiting: async () => {
@@ -735,53 +1256,49 @@ export const useDownloadsStore = create<DownloadsState>()(
             records.push(record);
           }
           records.sort((a, b) => b.createdAt - a.createdAt);
-          await runWithConcurrency(records, RESUME_CONCURRENCY, async (record, index) => {
-            await new Promise((r) => setTimeout(r, index * 7_000));
-            await get().downloadTrack(record.track, { resumePart: true });
-          });
+          const pendingResumes: Array<Promise<void>> = [];
+          for (const record of records) {
+            if (record.retryAt && record.retryAt > Date.now()) {
+              scheduleRetryResume(record);
+              continue;
+            }
+            pendingResumes.push(
+              get().downloadTrack(record.track, {
+                resumePart: true,
+                priority: 'resume',
+                allowEngine: record.allowEngine ?? false,
+              })
+            );
+          }
+          await Promise.allSettled(pendingResumes);
         },
 
         removeDownload: async (jobId) => {
           const record = get().downloads.find((d) => d.jobId === jobId);
           if (!record) return;
+          clearRetryTimer(jobId);
+          directJobSources.delete(jobId);
           // Stop any in-flight transfer or park loop FIRST. The old code only
           // cleaned up completed files — an in-flight job kept transferring,
           // and on finish published the "deleted" song into Music/Sinc. After
           // a token bump any running worker's checkpoints become stale and it
           // exits without upserting a finished record for the removed row.
-          const wasInFlight = activeJobs.has(jobId) || waitingForConnection.has(jobId);
+          const wasQueued = cancelQueuedDownload(jobId);
+          const wasInFlight =
+            !wasQueued && (hasRunningDownload(jobId) || waitingForConnection.has(jobId));
+          launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
+          waitingForConnection.delete(jobId);
           if (wasInFlight) {
-            activeJobs.delete(jobId);
-            launchToken.set(jobId, (launchToken.get(jobId) ?? 0) + 1);
-            waitingForConnection.delete(jobId);
             try {
               await nativeBridge.downloads.cancel(jobId);
             } catch {
               // Native job already gone; state is what matters here.
             }
           }
-          if (record.localUri) {
-            const fileName = record.localUri.split('/').pop();
-            try {
-              // yt-dlp downloads live in the yt module's `sinc_yt` dir, which
-              // the generic downloader module never touches — route cleanup to
-              // the module that owns the file (feature-detected for old builds).
-              if (
-                fileName &&
-                record.localUri.includes('/sinc_yt/') &&
-                typeof nativeBridge.yt.remove === 'function'
-              ) {
-                await nativeBridge.yt.remove(
-                  fileName,
-                  record.publishedName ?? publicFileName(record.track)
-                );
-              } else {
-                await nativeBridge.downloader.remove(jobId, fileName, publicFileName(record.track));
-              }
-            } catch {
-              // Local cleanup is best-effort.
-            }
-          }
+          // yt-dlp downloads live in the yt module's `sinc_yt` dir, which the
+          // generic downloader module never touches — route cleanup to the
+          // module that owns the file (feature-detected for old builds).
+          await queueNativeCleanup(record);
           const downloads = get().downloads.filter((d) => d.jobId !== jobId);
           set({ downloads, downloadedIds: deriveDownloadedIds(downloads) });
           useDownloadProgressStore.getState().clearProgress(jobId);
@@ -829,7 +1346,7 @@ if (nativeBridge.downloads.available()) {
     const store = useDownloadsStore.getState();
     if (action === 'cancelled') {
       const record = recordByJobId(jobId);
-      if (record && (record.phase === 'source' || record.phase === 'transfer')) {
+      if (record && isDownloadInProgress(record.phase)) {
         void store.cancelDownload(jobId);
       }
     } else if (action === 'paused') {
@@ -841,20 +1358,36 @@ if (nativeBridge.downloads.available()) {
       // "resolving source" state immediately (the first % line can lag
       // behind whole seconds of buffered yt-dlp output on slow links).
       const record = recordByJobId(jobId);
-      if (record && record.phase === 'source') store.setPhaseTransfer(jobId);
+      if (
+        record &&
+        (record.phase === 'source' ||
+          record.phase === 'processing' ||
+          record.phase === 'tagging' ||
+          record.phase === 'validating')
+      ) {
+        store.setPhaseTransfer(jobId);
+      }
     }
   });
 
-  nativeBridge.downloads.addYtProgressListener(({ jobId, percent, speed }) => {
+  nativeBridge.downloads.addYtProgressListener((event) => {
+    const { jobId, percent, speed } = event;
     const store = useDownloadsStore.getState();
     const record = recordByJobId(jobId);
     if (!record || (record.phase !== 'source' && record.phase !== 'transfer')) return;
+    const known = percent != null && Number.isFinite(percent) && !event.indeterminate;
     if (__DEV__) {
-      console.log(`Sinc yt progress ${jobId} ${Math.round(percent)}% ${speed ?? ''}`);
+      console.log(
+        `Sinc yt progress ${jobId} ${known && percent != null ? `${Math.round(percent)}%` : 'unknown'} ${speed ?? ''}`
+      );
     }
     if (record.phase === 'source') store.setPhaseTransfer(jobId);
     const progressStore = useDownloadProgressStore.getState();
-    progressStore.setProgress(jobId, Math.min(99, percent));
+    if (known && percent != null) {
+      progressStore.setProgress(jobId, Math.min(99, percent));
+    } else {
+      progressStore.setIndeterminate(jobId, true);
+    }
     progressStore.setSpeed(jobId, formatYtSpeed(speed));
   });
 }

@@ -36,6 +36,7 @@ interface DeezerTrack {
   duration?: number;
   release_date?: string;
   explicit_lyrics?: boolean;
+  preview?: string;
   artist?: DeezerArtist;
   album?: DeezerAlbum & { release_date?: string };
 }
@@ -124,6 +125,7 @@ function toTrack(t: DeezerTrack): CanonicalTrack {
     },
     durationMs: (t.duration ?? 0) * 1000,
     artworkUrl: t.album?.cover_medium ?? t.album?.cover_big,
+    previewUrl: t.preview,
     providerIds: { deezer: String(t.id) },
     releaseDate: t.release_date,
     explicit: t.explicit_lyrics === true,
@@ -265,9 +267,7 @@ export const deezer = {
     return { album: toAlbum(json), tracks };
   },
 
-  async lookupArtist(
-    artistId: string
-  ): Promise<{
+  async lookupArtist(artistId: string): Promise<{
     artist: CanonicalArtist;
     albums: CanonicalAlbum[];
     topTracks: CanonicalTrack[];

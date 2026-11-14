@@ -3,9 +3,14 @@ import type {
   NativeBridge,
   NativeDownloadActionEvent,
   NativeDownloadActionsModule,
+  NativeDownloadStageEvent,
   NativeDownloaderModule,
+  NativePlaybackState,
   NativePlayerCommand,
+  NativePlayerCommandEvent,
   NativePlayerModule,
+  NativeAudioOutputModule,
+  AudioOutputDevice,
   NativeProgressEvent,
   NativeDownloadProgress,
   NativeHttpModule,
@@ -30,9 +35,12 @@ function createUnavailablePlayer(): NativePlayerModule {
     seekTo: unavailable('player.seekTo'),
     stop: unavailable('player.stop'),
     requestNotificationPermission: unavailable('player.requestNotificationPermission'),
+    getState: unavailable('player.getState'),
+    setFavorite: unavailable('player.setFavorite'),
     addProgressListener: () => () => {},
     addCompletionListener: () => () => {},
     addErrorListener: () => () => {},
+    addStateListener: () => () => {},
     addCommandListener: () => () => {},
   };
 }
@@ -60,6 +68,8 @@ function createPlayer(): NativePlayerModule {
     seekTo: (positionMs) => module.seekTo(positionMs),
     stop: () => module.stop(),
     requestNotificationPermission: () => module.requestNotificationPermission(),
+    getState: () => module.getState(),
+    setFavorite: (favorite) => module.setFavorite(favorite),
     addProgressListener: (listener: (e: NativeProgressEvent) => void) => {
       const sub = emitter.addListener('SincPlayerProgress', listener);
       return () => sub.remove();
@@ -78,9 +88,15 @@ function createPlayer(): NativePlayerModule {
       );
       return () => sub.remove();
     },
-    addCommandListener: (listener: (command: NativePlayerCommand) => void) => {
-      const sub = emitter.addListener('SincPlayerCommand', (event: { command: string }) =>
-        listener(event.command as NativePlayerCommand)
+    addStateListener: (listener: (event: NativePlaybackState) => void) => {
+      const sub = emitter.addListener('SincPlayerState', listener);
+      return () => sub.remove();
+    },
+    addCommandListener: (listener: (event: NativePlayerCommandEvent) => void) => {
+      const sub = emitter.addListener(
+        'SincPlayerCommand',
+        (event: { command: string; trackId?: string }) =>
+          listener({ command: event.command as NativePlayerCommand, trackId: event.trackId })
       );
       return () => sub.remove();
     },
@@ -143,7 +159,8 @@ function createYt(): NativeYtModule {
       artist?: string | null,
       album?: string | null,
       artworkUrl?: string | null,
-      publicFileName?: string | null
+      publicFileName?: string | null,
+      previewUrl?: string | null
     ) =>
       module.download(
         jobId,
@@ -156,7 +173,8 @@ function createYt(): NativeYtModule {
         artist ?? null,
         album ?? null,
         artworkUrl ?? null,
-        publicFileName ?? null
+        publicFileName ?? null,
+        previewUrl ?? null
       ),
     // Older native builds lack `remove`; JS feature-detects before calling.
     remove:
@@ -174,6 +192,7 @@ function createUnavailableDownloadActions(): NativeDownloadActionsModule {
     cancel: unavailable('downloads.cancel'),
     addActionListener: () => () => {},
     addYtProgressListener: () => () => {},
+    addStageListener: () => () => {},
   };
 }
 
@@ -193,6 +212,10 @@ function createDownloadActions(): NativeDownloadActionsModule {
       const sub = emitter.addListener('SincYtProgress', listener);
       return () => sub.remove();
     },
+    addStageListener: (listener: (event: NativeDownloadStageEvent) => void) => {
+      const sub = emitter.addListener('SincDownloadStage', listener);
+      return () => sub.remove();
+    },
   };
 }
 
@@ -206,7 +229,29 @@ function createHttp(): NativeHttpModule {
   }
   return {
     available: () => true,
-    get: (url, userAgent, accept) => module.get(url, userAgent, accept ?? null),
+    get: (url, userAgent, accept, timeoutMs) =>
+      module.get(url, userAgent, accept ?? null, timeoutMs ?? 10_000),
+  };
+}
+
+function createAudioOutput(): NativeAudioOutputModule {
+  const module = NativeModules.SincAudioOutput;
+  if (!module) {
+    return {
+      available: () => false,
+      getOutputs: unavailable('audioOutput.getOutputs'),
+      setOutput: unavailable('audioOutput.setOutput'),
+    };
+  }
+  return {
+    available: () => true,
+    getOutputs: async () => {
+      const raw = (await module.getOutputs()) as AudioOutputDevice[];
+      // Native returns a WritableArray that arrives as an array-like with a
+      // non-standard prototype in some bridge modes; copy into a plain array.
+      return Array.from(raw ?? []);
+    },
+    setOutput: (deviceId) => module.setOutput(deviceId),
   };
 }
 
@@ -220,4 +265,5 @@ export const nativeBridge: NativeBridge = {
   yt: createYt(),
   downloads: createDownloadActions(),
   http: createHttp(),
+  audioOutput: createAudioOutput(),
 };

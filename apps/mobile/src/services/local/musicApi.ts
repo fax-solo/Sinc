@@ -38,7 +38,15 @@ import {
   type AffinityEvidence,
   type ArtistAffinity,
 } from './affinity';
-import { MIX_SIZE, MOOD_POOL, pickMoodsForDay, selectMixTracks } from './mixSelection';
+import {
+  freshRatioFor,
+  MIN_MIX_SIZE,
+  MIX_SIZE,
+  MOOD_POOL,
+  pickMoodsForDay,
+  selectFreshAwareMixTracks,
+  selectMixTracks,
+} from './mixSelection';
 
 export interface SearchResults {
   tracks?: { data: Array<{ track: CanonicalTrack; score: number }>; meta: unknown };
@@ -176,6 +184,56 @@ function mergeTrackResults(a: CanonicalTrack[], b: CanonicalTrack[]): CanonicalT
   return merged;
 }
 
+function playlistScore(query: string, playlist: CanonicalPlaylist): number {
+  const q = normalizeText(query);
+  const name = normalizeText(playlist.name);
+  let s = 0;
+  if (name === q) s += 100;
+  else if (name.startsWith(q)) s += 80;
+  else if (name.includes(q)) s += 60;
+  if (normalizeText(playlist.owner.name).includes(q)) s += 20;
+  return s;
+}
+
+function rankPlaylists(list: CanonicalPlaylist[], query: string): CanonicalPlaylist[] {
+  return list
+    .map((playlist, index) => ({
+      playlist,
+      index,
+      score: playlistScore(query, playlist),
+    }))
+    .sort((x, y) => y.score - x.score || x.index - y.index)
+    .map((entry) => entry.playlist);
+}
+
+/**
+ * Merge playlist search results from both providers. Alternating the ranked
+ * lists guarantees the second provider is visible even when the first returns
+ * a full page of similarly relevant names (and it keeps each provider's own
+ * relevance order). IDs are provider-prefixed, so they cannot collide.
+ */
+function mergePlaylistResults(
+  a: CanonicalPlaylist[],
+  b: CanonicalPlaylist[],
+  query: string,
+  limit: number
+): CanonicalPlaylist[] {
+  const first = rankPlaylists(a, query);
+  const second = rankPlaylists(b, query);
+  const merged: CanonicalPlaylist[] = [];
+  const seen = new Set<string>();
+  const rounds = Math.max(first.length, second.length);
+  for (let index = 0; index < rounds && merged.length < limit; index += 1) {
+    for (const playlist of [first[index], second[index]]) {
+      if (!playlist || seen.has(playlist.id)) continue;
+      seen.add(playlist.id);
+      merged.push(playlist);
+      if (merged.length >= limit) break;
+    }
+  }
+  return merged;
+}
+
 /** --- daily mix building (deterministic; see mixSelection.ts) --------------- */
 
 /**
@@ -184,12 +242,27 @@ function mergeTrackResults(a: CanonicalTrack[], b: CanonicalTrack[]): CanonicalT
  * the same four hardcoded moods every single day. Selection itself is
  * seeded, so the mixes are stable within the day and change tomorrow.
  */
-export async function buildStarterMixes(nowMs?: number): Promise<DailyMix[]> {
+export interface StarterMixExclusions {
+  /** Tracks the listener hid or thumbs-downed. */
+  trackIds?: ReadonlySet<string>;
+  /** Lower-cased artist names the listener hid. */
+  artistNames?: ReadonlySet<string>;
+}
+
+export async function buildStarterMixes(
+  nowMs?: number,
+  exclusions: StarterMixExclusions = {}
+): Promise<DailyMix[]> {
   const dayKey = localDayKey(nowMs ?? Date.now());
-  const rand = mulberry32(hashString(`sinc-starter:${dayKey}`));
   const moods = pickMoodsForDay(MOOD_POOL, hashString(dayKey), 4);
   const mixes = await Promise.all(
     moods.map(async (mood): Promise<DailyMix | null> => {
+      // A per-mood seed keeps each mix stable even though the four pools are
+      // fetched concurrently. A shared generator was consumed in network
+      // completion order, which reshuffled "stable" starter mixes.
+      const rand = mulberry32(
+        hashString(`sinc-starter:${dayKey}:${mood.genreId}:${mood.name}`)
+      );
       try {
         let pool = await deezer
           .genreChartTracks(mood.genreId, 50)
@@ -200,15 +273,23 @@ export async function buildStarterMixes(nowMs?: number): Promise<DailyMix[]> {
             .catch(() => [] as CanonicalTrack[]);
           pool = dedupePool([...pool, ...extra]);
         }
-        if (pool.length < 5) return null;
+        if (exclusions.trackIds || exclusions.artistNames) {
+          pool = pool.filter((track) => {
+            if (exclusions.trackIds?.has(track.id)) return false;
+            const lead = (track.artists[0]?.name ?? '').toLowerCase();
+            return !lead || !exclusions.artistNames?.has(lead);
+          });
+        }
+        if (pool.length < MIN_MIX_SIZE) return null;
         const tracks = selectMixTracks(shuffled(pool, rand), MIX_SIZE, () => 0);
-        if (tracks.length === 0) return null;
+        if (tracks.length < MIN_MIX_SIZE) return null;
         return {
           id: `mix:starter:${mood.name.toLowerCase().replace(/\s+/g, '-')}`,
           name: `${mood.name}`,
           kind: 'mood' as MixKind,
           genre: mood.name,
           description: `The best of ${mood.name.toLowerCase()} today`,
+          artworkUrl: tracks.find((track) => track.artworkUrl)?.artworkUrl,
           trackCount: tracks.length,
           tracks,
         };
@@ -359,6 +440,28 @@ const GENRE_IDS: Record<string, number> = {
   jpop: 156,
 };
 
+/** Human labels for Deezer ids returned by genreForArtist() when Apple can't
+ *  map the artist. Kept close to the chart names used elsewhere in this file. */
+const GENRE_LABELS: Record<number, string> = {
+  0: 'Trending',
+  62: 'Jazz',
+  85: 'Alternative',
+  99: 'Classical',
+  106: 'Electronic',
+  113: 'Dance',
+  116: 'Hip-Hop',
+  124: 'Folk',
+  129: 'Jazz',
+  132: 'Pop',
+  152: 'Rock',
+  155: 'K-Pop',
+  156: 'J-Pop',
+  165: 'R&B',
+  166: 'Reggae',
+  173: 'Party',
+  197: 'Latin',
+};
+
 /** Genre-id lookup that tolerates naming variants ("hip-hop/rap", "Pop Rock"). */
 function genreIdFor(genreName: string): number | null {
   const key = genreName.toLowerCase().trim();
@@ -409,13 +512,19 @@ function buildLocalEvidence(nowMs: number): LocalEvidence {
     ...new Set(
       library.favoriteTracks.map((t) => t.artists[0]?.name ?? '').filter(Boolean) as string[]
     ),
-  ].filter((n) => !familiarArtistNames.includes(n));
+  ];
+  const downloadedArtistNames = [
+    ...new Set(
+      downloads.map((d) => d.track.artists[0]?.name ?? '').filter(Boolean) as string[]
+    ),
+  ];
 
   return {
     trackArtists,
     knownTracks,
     familiarArtistNames,
     favoriteArtistNames,
+    downloadedArtistNames,
     recentTracks: library.recentlyPlayed,
     favoriteTracks: library.favoriteTracks,
     downloadedTracks: downloads.map((d) => d.track),
@@ -423,14 +532,25 @@ function buildLocalEvidence(nowMs: number): LocalEvidence {
   };
 }
 
-/** Session cache for the Apple genre lookup — repeated per-day rebuilds
- *  used to hit iTunes for every top artist on each feed refresh. */
-const artistGenreCache = new Map<string, { label: string; id: number } | null>();
+/** Session cache for artist genres — repeated per-day rebuilds used to hit
+ *  providers for every top artist on each feed refresh. Successful lookups
+ *  are kept for the session; misses are retried after a short cooldown so an
+ *  offline minute doesn't permanently hide an artist from mixes. */
+interface CachedGenre {
+  value: { label: string; id: number } | null;
+  at: number;
+}
+const artistGenreCache = new Map<string, CachedGenre>();
+const ARTIST_GENRE_MISS_TTL_MS = 5 * 60 * 1000;
 
 async function artistGenre(name: string): Promise<{ label: string; id: number } | null> {
   const key = name.toLowerCase();
   const cached = artistGenreCache.get(key);
-  if (cached !== undefined) return cached;
+  if (cached) {
+    if (cached.value) return cached.value;
+    if (Date.now() - cached.at < ARTIST_GENRE_MISS_TTL_MS) return null;
+  }
+
   let mapped: { label: string; id: number } | null = null;
   try {
     const artist = await itunes.findArtist(name);
@@ -438,10 +558,72 @@ async function artistGenre(name: string): Promise<{ label: string; id: number } 
   } catch {
     mapped = null;
   }
-  artistGenreCache.set(key, mapped);
+  if (!mapped) {
+    // Apple's genre vocabulary is narrower than Deezer's catalog. Ask Deezer
+    // directly before dropping the artist from mix generation.
+    try {
+      const genreId = await deezer.genreForArtist(name);
+      if (genreId != null) {
+        mapped = { label: GENRE_LABELS[genreId] ?? 'Mix', id: genreId };
+      }
+    } catch {
+      mapped = null;
+    }
+  }
+  artistGenreCache.set(key, { value: mapped, at: Date.now() });
   return mapped;
 }
 
+interface GenreCluster {
+  id: number;
+  label: string;
+  artists: string[];
+}
+
+/** Groups the listener's top artists by genre. Runs the lookups in parallel
+ *  and preserves affinity order, so mix order stays deterministic. */
+async function buildGenreClusters(affinity: ArtistAffinity[]): Promise<GenreCluster[]> {
+  const top = affinity.filter((artist) => artist.score > 0).slice(0, 6);
+  const mapped = await Promise.all(
+    top.map(async (artist) => ({
+      artist,
+      genre: await artistGenre(artist.name),
+    }))
+  );
+  const clusters = new Map<number, GenreCluster>();
+  for (const { artist, genre } of mapped) {
+    if (!genre) continue;
+    const cluster = clusters.get(genre.id);
+    if (cluster) {
+      if (cluster.artists.length < 2) cluster.artists.push(artist.name);
+    } else {
+      clusters.set(genre.id, { id: genre.id, label: genre.label, artists: [artist.name] });
+    }
+  }
+  return [...clusters.values()].slice(0, 4);
+}
+
+function mixArtwork(tracks: CanonicalTrack[]): string | undefined {
+  return tracks.find((track) => Boolean(track.artworkUrl))?.artworkUrl;
+}
+
+function leadArtistName(track: CanonicalTrack): string {
+  return track.artists[0]?.name ?? '';
+}
+
+/** One mix per family keeps Home fast and varied: favorites, a daily genre,
+ *  an artist, and discovery. Extra clusters/seeds are fallbacks when a pool
+ *  comes back too thin. */
+const MAX_MIXES = 4;
+const MAX_DAILY_MIXES = 1;
+const MAX_ARTIST_MIXES = 1;
+
+/**
+ * Builds the four mix families: favorites, daily genre mixes, artist mixes,
+ * and a discovery mix. Tracks are excluded across mixes so the rail doesn't
+ * repeat the same song four times — favorites are built first, like the
+ * server engine, so they are never starved by the daily pools.
+ */
 async function buildMixesFromSignals(
   affinity: ArtistAffinity[],
   signals: LibrarySignals | undefined,
@@ -453,65 +635,210 @@ async function buildMixesFromSignals(
   const rand = mulberry32(hashString(`sinc-mix:${localDayKey(local.nowMs)}`));
   const blocked = blacklistedTrackIds(signals);
   const hiddenLower = new Set((signals?.hiddenArtistNames ?? []).map((h) => h.toLowerCase()));
-  const scoreByName = new Map(affinity.map((a) => [a.name.toLowerCase(), a.score]));
-
-  // Group the top (recency-aware) artists into genre clusters; the seed
-  // artist names the cluster, and at most 2 artists per cluster contribute
-  // candidate pools.
-  const clusters = new Map<number, { label: string; artists: string[] }>();
-  for (const a of affinity.slice(0, 6)) {
-    if (a.score <= 0) continue;
-    const genre = await artistGenre(a.name);
-    if (!genre) continue;
-    const cluster = clusters.get(genre.id);
-    if (cluster) {
-      if (cluster.artists.length < 2) cluster.artists.push(a.name);
-    } else {
-      clusters.set(genre.id, { label: genre.label, artists: [a.name] });
-    }
-  }
-
+  const knownArtists = new Set(
+    affinity
+      .filter((artist) => artist.evidence !== 0 || artist.familiar)
+      .map((artist) => artist.name.toLowerCase())
+  );
+  const favoriteArtists = new Set(
+    (local.favoriteArtistNames ?? []).map((name) => name.toLowerCase())
+  );
+  const downloadedArtists = new Set(
+    (local.downloadedArtistNames ?? []).map((name) => name.toLowerCase())
+  );
+  const scoreByName = new Map(affinity.map((artist) => [artist.name.toLowerCase(), artist.score]));
+  const thumbsUpIds = new Set(
+    (signals?.thumbs ?? [])
+      .filter((thumb) => thumb.value === 'up')
+      .map((thumb) => thumb.targetId)
+  );
+  const recommendableAffinity = affinity.filter(
+    (artist) => !hiddenLower.has(artist.name.toLowerCase())
+  );
+  const used = new Set<string>();
+  const usable = (track: CanonicalTrack): boolean => {
+    if (blocked.has(track.id) || used.has(track.id)) return false;
+    const lead = leadArtistName(track);
+    return lead.length > 0 && !hiddenLower.has(lead.toLowerCase());
+  };
+  const scoreOf = (track: CanonicalTrack): number => {
+    const lead = leadArtistName(track).toLowerCase();
+    return (
+      (scoreByName.get(lead) ?? 0) +
+      (favoriteArtists.has(lead) ? 0.4 : 0) +
+      (downloadedArtists.has(lead) ? 0.2 : 0) +
+      (thumbsUpIds.has(track.id) ? 1.5 : 0)
+    );
+  };
+  const remember = (tracks: CanonicalTrack[]) => {
+    for (const track of tracks) used.add(track.id);
+  };
+  const freshRatio = freshRatioFor(discovery);
   const mixes: DailyMix[] = [];
-  for (const [genreId, info] of clusters) {
-    if (mixes.length >= 4) break;
-    try {
-      let pool = await deezer.genreChartTracks(genreId, 50);
-      for (const artistName of info.artists) {
-        const extra = await deezer
-          .searchTracks(`artist:"${artistName}"`, 15)
-          .catch(() => [] as CanonicalTrack[]);
-        pool = dedupePool([...pool, ...extra]);
-      }
-      const filtered = pool.filter((t) => {
-        if (blocked.has(t.id)) return false;
-        const lead = t.artists[0]?.name ?? '';
-        return lead.length > 0 && !hiddenLower.has(lead.toLowerCase());
-      });
-      if (filtered.length < 5) continue;
-      const liked = new Set(info.artists.map((n) => n.toLowerCase()));
-      const tracks = selectMixTracks(shuffled(filtered, rand), MIX_SIZE, (t) => {
-        const lead = (t.artists[0]?.name ?? '').toLowerCase();
-        const affinityScore = scoreByName.get(lead) ?? 0;
-        if (liked.has(lead)) return Math.max(affinityScore, 1.2);
-        // Unknown artists: near-zero affinity — the discovery slider is
-        // what lets them in, so stopping playback of the slider still
-        // biases mixes toward familiar artists.
-        return affinityScore * 0.4 + discovery;
-      });
-      if (tracks.length < 5) continue;
+
+  // 1) Favorites mix — zero-network and always relevant when the listener has
+  //    liked enough songs, even if they have never finished a play.
+  const favoritePool = shuffled(
+    local.favoriteTracks.filter((track) => {
+      const lead = leadArtistName(track);
+      return !blocked.has(track.id) && lead.length > 0 && !hiddenLower.has(lead.toLowerCase());
+    }),
+    rand
+  );
+  if (favoritePool.length >= MIN_MIX_SIZE) {
+    // Favorites are explicit likes, so the exploration diversity cap does not
+    // apply here; a listener who loves one artist should still get that mix.
+    const tracks = selectMixTracks(favoritePool, MIX_SIZE, scoreOf, 99);
+    if (tracks.length >= MIN_MIX_SIZE) {
       mixes.push({
-        id: `mix:${genreId}`,
-        name: `Made for you: ${info.label}`,
-        kind: 'daily' as MixKind,
-        genre: info.label,
+        id: 'mix:favorites',
+        name: 'Made for you: Favorites',
+        kind: 'favorites' as MixKind,
+        genre: 'Your favorites',
+        description: 'The songs you keep coming back to.',
+        artworkUrl: mixArtwork(tracks),
         trackCount: tracks.length,
         tracks,
       });
+      remember(tracks);
+    }
+  }
+
+  // 2) Daily genre mixes — the classic "Made for you" core.
+  const clusters = await buildGenreClusters(recommendableAffinity);
+  for (const info of clusters) {
+    const dailyCount = mixes.filter((mix) => mix.kind === 'daily').length;
+    if (mixes.length >= MAX_MIXES || dailyCount >= MAX_DAILY_MIXES) break;
+    try {
+      const [chart, ...extras] = await Promise.all([
+        deezer.genreChartTracks(info.id, 50).catch(() => [] as CanonicalTrack[]),
+        ...info.artists.map((artistName) =>
+          deezer
+            .searchTracks(`artist:"${artistName}"`, 15)
+            .catch(() => [] as CanonicalTrack[])
+        ),
+      ]);
+      const pool = dedupePool([...chart, ...extras.flat()]).filter(usable);
+      if (pool.length < MIN_MIX_SIZE) continue;
+      const tracks = selectFreshAwareMixTracks(shuffled(pool, rand), MIX_SIZE, {
+        freshRatio,
+        knownArtistNames: knownArtists,
+        scoreOf,
+      });
+      if (tracks.length < MIN_MIX_SIZE) continue;
+      const dailyNumber = mixes.filter((mix) => mix.kind === 'daily').length + 1;
+      const label = info.label === 'Mix' ? `Mix ${dailyNumber}` : info.label;
+      mixes.push({
+        id: `mix:${info.id}`,
+        name: `Made for you: ${label}`,
+        kind: 'daily' as MixKind,
+        genre: info.label,
+        description: `${label} picks shaped by your listening.`,
+        artworkUrl: mixArtwork(tracks),
+        trackCount: tracks.length,
+        tracks,
+      });
+      remember(tracks);
     } catch {
       continue;
     }
   }
-  return mixes.slice(0, 4);
+
+  // 3) Artist mixes — do not depend on genre mapping at all. They also top up
+  //    the rail when the listener's taste is too narrow for genre mixes.
+  if (mixes.length < MAX_MIXES) {
+    const seeds = recommendableAffinity
+      .filter((artist) => artist.score > 0.08)
+      .slice(0, 4);
+    let artistCount = 0;
+    for (const seed of seeds) {
+      if (artistCount >= MAX_ARTIST_MIXES || mixes.length >= MAX_MIXES) break;
+      try {
+        const seedLower = seed.name.toLowerCase();
+        const [ownPool, genre] = await Promise.all([
+          deezer
+            .searchTracks(`artist:"${seed.name}"`, 15)
+            .catch(() => [] as CanonicalTrack[]),
+          artistGenre(seed.name),
+        ]);
+        // A handful of tracks by the artist is the core of an artist mix, so
+        // the per-artist diversity cap does not apply to these tracks.
+        const ownTracks = selectMixTracks(
+          dedupePool(ownPool).filter(
+            (track) =>
+              usable(track) && leadArtistName(track).toLowerCase() === seedLower
+          ),
+          8,
+          scoreOf,
+          99
+        );
+        if (ownTracks.length < 3) continue;
+
+        const fillPool = genre
+          ? await deezer
+              .genreChartTracks(genre.id, 50)
+              .catch(() => [] as CanonicalTrack[])
+          : await deezer
+              .searchTracks(seed.name, 25)
+              .catch(() => [] as CanonicalTrack[]);
+        const fillCandidates = dedupePool(fillPool).filter(
+          (track) =>
+            usable(track) &&
+            leadArtistName(track).toLowerCase() !== seedLower
+        );
+        const fill = selectFreshAwareMixTracks(
+          shuffled(fillCandidates, rand),
+          MIX_SIZE - ownTracks.length,
+          { freshRatio, knownArtistNames: knownArtists, scoreOf }
+        );
+        const tracks = [...ownTracks, ...fill].slice(0, MIX_SIZE);
+        if (tracks.length < MIN_MIX_SIZE) continue;
+        mixes.push({
+          id: `mix:artist:${hashString(seed.name).toString(36)}`,
+          name: `Made for you: ${seed.name}`,
+          kind: 'artist' as MixKind,
+          genre: seed.name,
+          description: `More from ${seed.name}, plus a few kindred picks.`,
+          artworkUrl: mixArtwork(tracks),
+          trackCount: tracks.length,
+          tracks,
+        });
+        remember(tracks);
+        artistCount += 1;
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  // 4) Discovery mix — unfamiliar artists only. This is the top end of the
+  //    taste slider, so it stays out of the way when the listener wants
+  //    familiar music.
+  if (mixes.length < MAX_MIXES && discovery >= 0.35) {
+    const chart = await deezer.chartTracks(50).catch(() => [] as CanonicalTrack[]);
+    const freshPool = dedupePool(chart).filter((track) => {
+      if (!usable(track)) return false;
+      return !knownArtists.has(leadArtistName(track).toLowerCase());
+    });
+    if (freshPool.length >= MIN_MIX_SIZE) {
+      const tracks = selectMixTracks(shuffled(freshPool, rand), MIX_SIZE, scoreOf);
+      if (tracks.length >= MIN_MIX_SIZE) {
+        mixes.push({
+          id: 'mix:discovery',
+          name: 'Discover mix',
+          kind: 'discovery' as MixKind,
+          genre: 'Fresh picks',
+          description: 'New artists outside your usual orbit.',
+          artworkUrl: mixArtwork(tracks),
+          trackCount: tracks.length,
+          tracks,
+        });
+        remember(tracks);
+      }
+    }
+  }
+
+  return mixes.slice(0, MAX_MIXES);
 }
 
 /** Builds "Made for you" + recommendations. Now driven by the full signal
@@ -533,11 +860,29 @@ async function buildPersonalizedSections(
     const lead = t.artists[0]?.name ?? '';
     return lead.length > 0 && !hiddenLower.has(lead.toLowerCase());
   };
+  const knownArtistNames = new Set(
+    [
+      ...local.familiarArtistNames,
+      ...(local.favoriteArtistNames ?? []),
+      ...(local.downloadedArtistNames ?? []),
+      ...affinity.map((artist) => artist.name),
+    ].map((name) => name.toLowerCase())
+  );
+  // Hidden artists must not seed a "Because you listen to" or album rail even
+  // though their affinity still exists in the score map.
+  const recommendableAffinity = affinity.filter(
+    (artist) => !hiddenLower.has(artist.name.toLowerCase())
+  );
 
-  // 1) Daily mixes (or rotating starters for cold-start listeners).
+  // 1) Personal mixes. Always fall back to rotating starters when every
+  //    personal pool came back thin — previously an unmappable genre left
+  //    listeners with no "Made for you" rail at all.
   let mixes = await buildMixesFromSignals(affinity, signals, local, discovery);
-  if (mixes.length === 0 && !hasUsefulAffinity(affinity)) {
-    mixes = await buildStarterMixes(local.nowMs);
+  if (mixes.length === 0) {
+    mixes = await buildStarterMixes(local.nowMs, {
+      trackIds: blocked,
+      artistNames: hiddenLower,
+    });
   }
   if (mixes.length > 0) {
     sections.push({ kind: 'mixes', title: 'Made for you', mixes });
@@ -558,24 +903,29 @@ async function buildPersonalizedSections(
   }
 
   // 3) "Because you listen to" rails, ranked by affinity, not raw count.
-  for (const a of affinity.slice(0, 2)) {
+  for (const a of recommendableAffinity.slice(0, 2)) {
     try {
-      const tracks = (
-        await deezer.searchTracks(`artist:"${a.name}"`, 15).catch(() => [] as CanonicalTrack[])
-      )
-        .filter(usable)
-        .slice(0, 12);
-      if (tracks.length > 0) {
+      const [tracks, albums] = await Promise.all([
+        deezer
+          .searchTracks(`artist:"${a.name}"`, 15)
+          .catch(() => [] as CanonicalTrack[]),
+        itunes.searchAlbums(a.name, 4).catch(() => [] as CanonicalAlbum[]),
+      ]);
+      const usableTracks = tracks.filter(usable).slice(0, 12);
+      if (usableTracks.length > 0) {
         sections.push({
           kind: 'tracks',
           title: 'Because you listen to',
           explanation: a.name,
-          tracks,
+          tracks: usableTracks,
         });
       }
-      const albums = await itunes.searchAlbums(a.name, 4).catch(() => [] as CanonicalAlbum[]);
       if (albums.length > 0) {
-        sections.push({ kind: 'albums', title: `From ${a.name}`, albums: albums.slice(0, 10) });
+        sections.push({
+          kind: 'albums',
+          title: `From ${a.name}`,
+          albums: albums.slice(0, 10),
+        });
       }
     } catch {
       continue;
@@ -586,11 +936,10 @@ async function buildPersonalizedSections(
   //    artists the listener has no history with.
   if (discovery >= 0.45) {
     try {
-      const familiar = new Set(affinity.slice(0, 12).map((a) => a.name.toLowerCase()));
       const fresh = (await deezer.chartTracks(40).catch(() => [] as CanonicalTrack[]))
         .filter((t) => {
           if (!usable(t)) return false;
-          return !familiar.has((t.artists[0]?.name ?? '').toLowerCase());
+          return !knownArtistNames.has((t.artists[0]?.name ?? '').toLowerCase());
         })
         .slice(0, 12);
       if (fresh.length >= 5) {
@@ -607,11 +956,19 @@ async function buildPersonalizedSections(
   }
 
   try {
-    const trending = await deezer.chartTracks(20).catch(() => [] as CanonicalTrack[]);
+    const trending = (await deezer.chartTracks(20).catch(() => [] as CanonicalTrack[])).filter(
+      usable
+    );
     if (trending.length > 0) {
-      sections.push({ kind: 'tracks', title: 'Trending songs', tracks: trending.slice(0, 12) });
+      sections.push({
+        kind: 'tracks',
+        title: 'Trending songs',
+        tracks: trending.slice(0, 12),
+      });
     }
-    const artists = await deezer.chartArtists(10).catch(() => [] as CanonicalArtist[]);
+    const artists = (
+      await deezer.chartArtists(10).catch(() => [] as CanonicalArtist[])
+    ).filter((artist) => !hiddenLower.has(artist.name.toLowerCase()));
     if (artists.length > 0) {
       sections.push({ kind: 'artists', title: 'Trending artists', artists: artists.slice(0, 10) });
     }
@@ -649,18 +1006,37 @@ export const musicApi = {
     const affinity = computeArtistAffinity(signals, {
       trackArtists: local.trackArtists,
       familiarArtistNames: local.familiarArtistNames,
+      favoriteArtistNames: local.favoriteArtistNames,
+      downloadedArtistNames: local.downloadedArtistNames,
       knownTracks: local.knownTracks,
+      // Top of Recently played approximates the current session; the full
+      // list is history, not fresh evidence.
+      recentTracks: local.recentTracks.slice(0, 20),
       nowMs: local.nowMs,
     });
     const discovery = Math.min(1, Math.max(0, signals?.discoveryPreference ?? 0.5));
     let sections = await buildPersonalizedSections(affinity, signals, local, discovery);
-    // Last-resort zero-network fallback: still show something sensible.
+    // Last-resort zero-network fallback: still show something sensible, while
+    // honoring hides/thumbs-down so controls work even when providers fail.
     if (sections.length === 0 && local.favoriteTracks.length > 0) {
-      sections.push({
-        kind: 'tracks',
-        title: 'Jump back in',
-        tracks: local.favoriteTracks.slice(0, 12),
-      });
+      const blocked = blacklistedTrackIds(signals);
+      const hiddenLower = new Set(
+        (signals?.hiddenArtistNames ?? []).map((name) => name.toLowerCase())
+      );
+      const fallbackTracks = local.favoriteTracks
+        .filter((track) => {
+          if (blocked.has(track.id)) return false;
+          const lead = track.artists[0]?.name ?? '';
+          return lead.length > 0 && !hiddenLower.has(lead.toLowerCase());
+        })
+        .slice(0, 12);
+      if (fallbackTracks.length > 0) {
+        sections.push({
+          kind: 'tracks',
+          title: 'Jump back in',
+          tracks: fallbackTracks,
+        });
+      }
     }
     sections = sections.slice(0, MAX_SECTIONS);
     return { sections: dedupeSections(sections), personalized: hasUsefulAffinity(affinity) };
@@ -675,28 +1051,41 @@ export const musicApi = {
     if (!trimmed) return {};
     const fetchLimit = SEARCH_FETCH_LIMIT;
     const needTracks = type === 'all' || type === 'tracks';
-    const [itunesTracks, deezerTracks, itunesArtists, itunesAlbums, itunesPlaylists] =
-      await Promise.all([
-        needTracks
-          ? itunes.searchTracks(trimmed, fetchLimit).catch(() => [] as CanonicalTrack[])
-          : Promise.resolve([]),
-        needTracks
-          ? deezer.searchTracks(trimmed, fetchLimit).catch(() => [] as CanonicalTrack[])
-          : Promise.resolve([]),
-        type === 'all' || type === 'artists'
-          ? itunes.searchArtists(trimmed, fetchLimit).catch(() => [] as CanonicalArtist[])
-          : Promise.resolve([]),
-        type === 'all' || type === 'albums'
-          ? itunes.searchAlbums(trimmed, fetchLimit).catch(() => [] as CanonicalAlbum[])
-          : Promise.resolve([]),
-        type === 'all' || type === 'playlists'
-          ? itunes.searchPlaylists(trimmed, fetchLimit).catch(() => [] as CanonicalPlaylist[])
-          : Promise.resolve([]),
-      ]);
+    const needPlaylists = type === 'all' || type === 'playlists';
+    const [
+      itunesTracks,
+      deezerTracks,
+      itunesArtists,
+      itunesAlbums,
+      itunesPlaylists,
+      deezerPlaylists,
+    ] = await Promise.all([
+      needTracks
+        ? itunes.searchTracks(trimmed, fetchLimit).catch(() => [] as CanonicalTrack[])
+        : Promise.resolve([]),
+      needTracks
+        ? deezer.searchTracks(trimmed, fetchLimit).catch(() => [] as CanonicalTrack[])
+        : Promise.resolve([]),
+      type === 'all' || type === 'artists'
+        ? itunes.searchArtists(trimmed, fetchLimit).catch(() => [] as CanonicalArtist[])
+        : Promise.resolve([]),
+      type === 'all' || type === 'albums'
+        ? itunes.searchAlbums(trimmed, fetchLimit).catch(() => [] as CanonicalAlbum[])
+        : Promise.resolve([]),
+      needPlaylists
+        ? itunes.searchPlaylists(trimmed, fetchLimit).catch(() => [] as CanonicalPlaylist[])
+        : Promise.resolve([]),
+      needPlaylists
+        ? deezer.searchPlaylists(trimmed, fetchLimit).catch(() => [] as CanonicalPlaylist[])
+        : Promise.resolve([]),
+    ]);
 
     const merged = isNonLatin(trimmed)
       ? mergeTrackResults(deezerTracks, itunesTracks)
       : mergeTrackResults(itunesTracks, deezerTracks);
+    const mergedPlaylists = isNonLatin(trimmed)
+      ? mergePlaylistResults(deezerPlaylists, itunesPlaylists, trimmed, fetchLimit)
+      : mergePlaylistResults(itunesPlaylists, deezerPlaylists, trimmed, fetchLimit);
 
     return {
       tracks: {
@@ -715,8 +1104,8 @@ export const musicApi = {
         meta: { page: 1, limit: 25, total: itunesAlbums.length, totalPages: 1 },
       },
       playlists: {
-        data: itunesPlaylists.slice(0, 25),
-        meta: { page: 1, limit: 25, total: itunesPlaylists.length, totalPages: 1 },
+        data: mergedPlaylists,
+        meta: { page: 1, limit: 25, total: mergedPlaylists.length, totalPages: 1 },
       },
     };
   },

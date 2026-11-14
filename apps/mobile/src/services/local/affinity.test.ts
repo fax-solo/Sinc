@@ -136,6 +136,24 @@ describe('computeArtistAffinity', () => {
     expect(followed!.score).toBeGreaterThan(0);
   });
 
+  it('uses favorites and downloads before the first play', () => {
+    // A listener can have taste intent (likes/downloads) without any play
+    // stats. Those artists must still drive their mixes.
+    const affinity = computeArtistAffinity(
+      undefined,
+      evidence({
+        favoriteArtistNames: ['Liked Artist'],
+        downloadedArtistNames: ['Downloaded Artist'],
+      })
+    );
+    const byName = new Map(affinity.map((a) => [a.name, a]));
+    expect(byName.get('Liked Artist')!.score).toBeGreaterThan(
+      byName.get('Downloaded Artist')!.score
+    );
+    expect(byName.get('Downloaded Artist')!.score).toBeGreaterThan(0);
+    expect(byName.get('Liked Artist')!.familiar).toBe(true);
+  });
+
   it('resolves thumbs through known tracks', () => {
     const knownTracks = new Map<
       string,
@@ -162,7 +180,7 @@ describe('computeArtistAffinity', () => {
 });
 
 describe('blacklistedTrackIds', () => {
-  it('includes hidden tracks and heavily skipped ones', () => {
+  it('includes hidden, thumbs-down, and heavily skipped tracks', () => {
     const signals: LibrarySignals = {
       playCounts: [],
       artistPlayCounts: [],
@@ -172,7 +190,10 @@ describe('blacklistedTrackIds', () => {
         { trackId: 's3', count: 9 },
       ],
       completedCounts: [],
-      thumbs: [],
+      thumbs: [
+        { targetId: 'd1', value: 'down' },
+        { targetId: 'artist:Some Artist', value: 'down' },
+      ],
       hiddenTrackIds: ['h1'],
       hiddenArtistNames: [],
       discoveryPreference: 0.5,
@@ -182,6 +203,8 @@ describe('blacklistedTrackIds', () => {
     expect(blocked.has('s2')).toBe(false); // 2 skips is under the threshold
     expect(blocked.has('s3')).toBe(true);
     expect(blocked.has('h1')).toBe(true);
+    expect(blocked.has('d1')).toBe(true);
+    expect(blocked.has('artist:Some Artist')).toBe(false);
   });
 });
 

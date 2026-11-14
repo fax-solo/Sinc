@@ -1,65 +1,181 @@
-# Download pipeline QA checklist
+# Download pipeline device acceptance
 
-Fixes implemented (2026-10): wrong-song matching gates, transfer reliability,
-background liveness, failure observability. Automated coverage lives in
-`SincTrackMatchTest` (14 fixtures), `download-source.test.ts`,
-`downloadsStore.test.ts` (retry/regression fixtures). The items below exercise
-the device-only paths and should be walked once on a real phone before release.
+Final manual gate for the P0/P1 download reliability work. Automated tests cover
+matching, progress parsing, queueing, retries, cancellation state, stages,
+containers and metadata. The items below exercise paths that only a real Android
+device and MediaStore can prove.
 
-Run with: `cd apps/mobile/android && ./gradlew :app:testDebugUnitTest --tests "com.sinc.app.modules.SincTrackMatchTest"`.
+Run the automated gates first:
 
-## 1. Wrong-song gates (native matching)
+```bash
+npm run typecheck -w @sinc/mobile
+npm run test -w @sinc/mobile
+cd apps/mobile/android
+./gradlew :app:testDebugUnitTest
+```
 
-- [ ] Download a chart-topping track (e.g. a pop single) with airplane data ON:
-      the saved file must be the actual single — verify by comparing the length
-      and intro seconds before/after.
-- [ ] Pick a track whose catalog has no direct source and whose only YouTube
-      results are covers/sped-up edits: the download must now FAIL honestly
-      ("No downloadable source…") instead of saving a cover. Playback of the
-      same track must still play (lenient path).
-- [ ] Retry the same track after toggling a VPN region: repeated downloads
-      should resolve identically when a good source exists (strict resolver +
-      one-shot artist gate).
+Build and install a release-path APK from the repo instructions in
+[`RELEASING.md`](RELEASING.md). For a local check, `:app:assembleRelease` is
+enough; the CI workflow supplies the real signing key.
 
-## 2. Resume / reliability
+Useful while testing:
 
-- [ ] Start a large (>10 MB) download on Wi-Fi, force-kill the app mid
-      transfer, relaunch → resume must continue from the interrupted offset
-      (`%` jumps, not from 0; `.part` reused through OkHttp Range requests).
-- [ ] Same kill test on the yt-dlp path: relaunch must continue and reuse the
-      SAME resolved source (per-job resolved-target cache).
-- [ ] Toggle airplane mode mid download: the job must park as
-      "Waiting for connection…" (NOT failed). Reconnect (or re-checks every
-      60 s / on app foreground) auto-resumes it.
-- [ ] Throttle the link (airplane + flaky LTE): transient timeouts must
-      auto-retry twice (5 s/15 s backoff, shown as "Retrying in Xs…") before a
-      permanent failure.
-- [ ] Stale-URL case: leave the app open > 6 h on a paused yt-dlp job, resume
-      → googlevideo URL must re-resolve instead of a raw 403.
+```bash
+adb logcat -s ReactNativeJS SincDownloads SincDownloaderModule SincYtModule
+```
 
-## 3. Direct-source duration guard
+Record the device model, Android version, source (Wi-Fi/mobile), track name and
+approximate file size for every failure.
 
-- [ ] Find a track where Archive/Jamendo serves a short preview: the guard must
-      reject the file, clean up (no orphan in Music/Sinc), fall through to the
-      yt-dlp path and complete correctly.
-- [ ] Verify the published Music/Sinc copy is named after the song title and
-      carries the right artist/album tags.
-- [ ] Delete the download afterwards: BOTH the app-private file and the
-      Music/Sinc MediaStore entry must disappear (ghost-entry bug fix).
+## 1. Authorized sources and matching
 
-## 4. UI
+- [ ] An Internet Archive track downloads through the native direct path and
+      publishes to `Music/Sinc`.
+- [ ] A Jamendo/FMA track with configured keys uses the direct path.
+- [ ] A track with no authorized direct source downloads through the bundled
+      yt-dlp fallback **only after an individual user action**.
+- [ ] A bulk import never silently falls back to yt-dlp. Individual rows may
+      show the fallback explanation and proceed only when the user starts them.
+- [ ] A pop single whose only search results are covers, sped-up edits, live
+      re-uploads or wrong-length videos fails honestly instead of saving the
+      wrong audio. Playback for the same track still works leniently.
+- [ ] A request for a live/radio variant returns a live/radio result when the
+      catalog has one; it is not collapsed to the studio recording.
+- [ ] No DRM-protected, paywalled, authenticated or provider-restricted content
+      is downloaded by bypassing a restriction.
 
-- [ ] A failed download row shows the error text plus Retry / Cancel actions;
-      Retry must re-run (not duplicate) the job.
-- [ ] Lock-screen/notification controls still work during a download
-      (foreground service unaffected by the new probe step).
-- [ ] Notification progress reflects Range-resume percentages correctly.
+## 2. Queue, concurrency and duplicates
 
-## Notes
+- [ ] Three or more downloads show at most **two** active transfers at once;
+      the rest remain visibly `Queued`.
+- [ ] A new user tap jumps ahead of a pending bulk import. A resumed job is
+      behind a user tap but ahead of bulk work.
+- [ ] Tapping download twice for the same track, or importing a track that is
+      already queued, does not create a second job or a duplicate file.
+- [ ] Pausing a `Queued` row prevents it from starting later on its own.
+- [ ] Cancelling a `Queued` row removes it without touching the current
+      transfers.
+- [ ] Force-kill and relaunch with queued/running rows: the queue recovers
+      without duplicate native jobs and completed rows stay completed.
 
-- The bundled ffmpeg now also runs a duration probe on every direct download;
-  a probe returning 0 (unreadable) is treated as "unknown — accept".
-- Keep the SELinux-safe binary layout (`nativeLibraryDir` fake `.so` files)
-  when touching any engine code.
-- Server-side `apps/server/src/lib/track-match.ts` intentionally keeps the old
-  (lenient) scoring: local mode is the only affected surface.
+## 3. Progress and stage honesty
+
+- [ ] The row/notification progresses through the real stages:
+      `Queued` → finding the source → `Downloading` → `Processing audio…` →
+      `Writing tags…` → `Verifying audio…` → completed.
+- [ ] A source without `Content-Length` shows an indeterminate download and the
+      measured byte rate, not a fake 99%.
+- [ ] Post-transfer stages do not show a stale byte speed or a jumping
+      download percentage.
+- [ ] A late/duplicate stage event cannot move a row backwards, and the final
+      stage is not shown before the file is actually finalized.
+- [ ] The foreground notification uses the same stage wording as the in-app
+      row.
+- [ ] If the engine re-resolves an expired stream and restarts its transfer,
+      the row returns to the transfer stage instead of staying on "Writing
+      tags…" while bytes move again.
+
+## 4. Pause, resume, restart and backoff
+
+- [ ] Pause a large direct download, wait, then Resume in the same app session:
+      it continues from the surviving `.part` instead of restarting at 0%.
+- [ ] Do the same for a yt-dlp job: it reuses the same resolved source and
+      continues the existing `.part`.
+- [ ] Force-kill the app mid-transfer, then relaunch. The job restarts as a
+      **fresh transfer**; the old partial is discarded rather than appended to
+      a possibly different source. The final file must be playable and the
+      duration/tags correct.
+- [ ] While a transient error is showing "Retrying in 5s…" or "Retrying in
+      15s…", force-kill and relaunch. The retry waits out the remaining
+      backoff instead of firing immediately.
+- [ ] After the retried transfer succeeds, a later restart gets a fresh retry
+      budget (the old transient failures must not permanently consume it).
+- [ ] Toggle airplane mode mid-download: the row parks as "Waiting for
+      connection…" and is not marked failed. Reconnect, foreground the app, or
+      wait for the 60-second poller; it resumes.
+- [ ] Leave a paused yt-dlp job for longer than the stream URL lifetime, then
+      resume. An expired `googlevideo`/403 target must re-resolve once instead
+      of failing permanently.
+- [ ] A hard 403/404 or exhausted retry budget fails with a clear message and
+      leaves Retry/Cancel available.
+
+## 5. Cancellation, cleanup and deletion
+
+- [ ] Cancel an active direct transfer from the app: the native transfer stops,
+      the row disappears, and no `.part`/target file remains in app storage.
+- [ ] Cancel an active yt-dlp transfer from the notification: the process
+      stops and no private or published copy remains.
+- [ ] Cancel during `Processing audio…`, `Writing tags…` or `Verifying audio…`:
+      the job must not publish afterwards.
+- [ ] Cancel, then immediately re-download the same track. The new download must
+      survive; the old cleanup must not delete its partial or final file.
+- [ ] Delete a completed download: both the app-private copy and the
+      `Music/Sinc` MediaStore entry disappear. No ghost row remains in other
+      music players.
+- [ ] Delete a queued or failed row: no orphan files are left behind.
+
+## 6. Files, containers and metadata
+
+- [ ] A direct MP3 publishes as `.mp3` with title, artist, album and embedded
+      artwork.
+- [ ] A direct OGG/Opus or FLAC source keeps a compatible container; it is not
+      mislabeled as `.mp3`.
+- [ ] A yt-dlp M4A/AAC result publishes as `.m4a` and is retagged losslessly.
+- [ ] An MP3 with cover art is finalized atomically; no partial file is ever
+      visible in `Music/Sinc` or playable before validation finishes.
+- [ ] Unicode and Arabic titles/artists produce valid filenames and tags.
+- [ ] A second player (YouTube Music, Samsung Music, VLC, etc.) shows the
+      correct title, artist, album and cover.
+- [ ] A direct source that returns a preview-length file is rejected, cleaned
+      up and retried through the alternate path — or fails honestly.
+- [ ] No success is reported unless the file exists, has an acceptable
+      duration, passes the fingerprint gate (when a preview is available) and
+      has been published.
+
+## 7. Background, restart and permissions
+
+- [ ] Start two downloads, background the app, and lock the screen. Transfers
+      continue and the foreground notification updates.
+- [ ] Notification Pause, Resume and Cancel each affect the correct job.
+- [ ] Android 13+ notification permission is requested once; denying it does
+      not stop downloads, but the notification may be absent.
+- [ ] Android 8/9 gets the legacy storage permission path; Android 10+ needs no
+      broad storage permission.
+- [ ] Force-stop during `Writing tags…`/`Verifying audio…`, then relaunch. The
+      job recovers without publishing two copies or leaving a partial in
+      `Music/Sinc`.
+- [ ] Reboot or let the OS kill the app with paused jobs: paused rows stay
+      paused and running rows resume according to the restart rules above.
+
+## 8. Storage and MediaStore
+
+- [ ] The app-private copy is under the app data directory and the public copy
+      is under `Music/Sinc`.
+- [ ] The published file is indexed immediately and appears in a fresh media
+      scan.
+- [ ] Removing the download removes the MediaStore row; it does not leave a
+      playable ghost entry.
+- [ ] A failed/cancelled job never leaves a `.part`, `.ytdl`, temporary tagged
+      file or stale published copy.
+- [ ] Low-storage failure is reported honestly; a partial output is not marked
+      completed.
+
+## Engine fallback policy
+
+- Licensed/direct providers are always tried first.
+- An individual download may fall back to the on-device yt-dlp engine. While it
+  resolves, the row says that no licensed source was found and that the
+  on-device engine is being used; completed fallback rows keep an
+  `on-device engine` label.
+- Bulk jobs never fall back. They fail with an explanation and must be opened
+  individually to use the engine.
+- Automatic restarts/resumes keep the original policy. An explicit Retry is an
+  individual action and may opt into the engine.
+
+## Intended restart rule
+
+A force-kill loses the in-memory source-to-partial mapping. Restarting a direct
+or yt-dlp transfer therefore discards the old partial and starts fresh — this is
+deliberate corruption protection. Same-session pause/resume does continue from
+the existing `.part`, because the original URL/resolved target is still known.
+Any checklist claim of byte-range resume after a process kill is obsolete.

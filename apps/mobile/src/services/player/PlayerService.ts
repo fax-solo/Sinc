@@ -23,7 +23,7 @@ import { recordPlay } from '../library/sync';
 import { useDownloadsStore, mimeForLocalUri } from '../library/downloadsStore';
 import { useLyricsStore } from '../lyrics/lyricsStore';
 import { track } from '../analytics/analytics';
-import type { NativeProgressEvent } from '../native/types';
+import type { NativePlaybackState, NativeProgressEvent } from '../native/types';
 import { selectCurrentTrack, usePlayerStore } from './playerStore';
 import { usePlayerProgressStore } from './playerProgressStore';
 
@@ -110,12 +110,23 @@ class PlayerService {
       void this.enqueue(() => this.handleCompletion(trackId));
     });
     player.addErrorListener((message) => this.onError(message));
-    player.addCommandListener((command) => {
+    player.addStateListener((event) => this.onState(event));
+    player.addCommandListener((event) => {
       // next()/previous() serialize themselves through the command chain;
       // wrapping them in another enqueue here would deadlock the chain.
-      if (command === 'next') void this.next();
-      else if (command === 'previous') void this.previous();
+      if (event.command === 'next') void this.next();
+      else if (event.command === 'previous') void this.previous();
+      else if (event.command === 'favorite') void this.handleFavoriteCommand(event.trackId);
     });
+    useLibraryStore.subscribe((state, previous) => {
+      if (state.favoriteIds === previous.favoriteIds) return;
+      const current = selectCurrentTrack(usePlayerStore.getState());
+      if (!current) return;
+      void nativeBridge.player
+        .setFavorite(state.favoriteIds.has(current.id))
+        .catch(() => undefined);
+    });
+    void this.syncFromNative();
   }
 
   playQueue(tracks: CanonicalTrack[], startIndex = 0): Promise<void> {
@@ -127,6 +138,81 @@ class PlayerService {
   playTrack(track: CanonicalTrack): Promise<void> {
     this.initialize();
     usePlayerStore.getState().playTrack(track);
+    return this.enqueue(() => this.loadAndPlayCurrent());
+  }
+
+  /** Add a track after the queue. Starts playback if the queue was empty. */
+  addToQueue(track: CanonicalTrack): Promise<boolean> {
+    this.initialize();
+    const before = selectCurrentTrack(usePlayerStore.getState());
+    const added = usePlayerStore.getState().addToQueue(track);
+    if (!added) return Promise.resolve(false);
+    return before
+      ? Promise.resolve(true)
+      : this.enqueue(() => this.loadAndPlayCurrent()).then(() => true);
+  }
+
+  /** Append an album/playlist, skipping duplicates already in the queue. */
+  addTracksToQueue(tracks: CanonicalTrack[]): Promise<number> {
+    this.initialize();
+    const before = selectCurrentTrack(usePlayerStore.getState());
+    const added = usePlayerStore.getState().addTracksToQueue(tracks);
+    if (added === 0) return Promise.resolve(0);
+    if (before) return Promise.resolve(added);
+    return this.enqueue(() => this.loadAndPlayCurrent()).then(() => added);
+  }
+
+  /** Insert one track immediately after the current one. */
+  playNext(track: CanonicalTrack): Promise<boolean> {
+    this.initialize();
+    const before = selectCurrentTrack(usePlayerStore.getState());
+    const added = usePlayerStore.getState().playNext(track);
+    if (!added) return Promise.resolve(false);
+    return before
+      ? Promise.resolve(true)
+      : this.enqueue(() => this.loadAndPlayCurrent()).then(() => true);
+  }
+
+  /** Jump to an absolute index in the queue and start it. */
+  jumpToQueueIndex(index: number): Promise<void> {
+    this.initialize();
+    return this.enqueue(async () => {
+      const moved = usePlayerStore.getState().jumpTo(index);
+      if (!moved) return;
+      await this.loadAndPlayCurrent();
+    });
+  }
+
+  /** Removing/reordering upcoming items never touches the current audio. */
+  removeFromQueue(index: number): boolean {
+    return usePlayerStore.getState().removeFromQueue(index);
+  }
+
+  reorderQueue(fromIndex: number, toIndex: number): boolean {
+    return usePlayerStore.getState().reorderQueue(fromIndex, toIndex);
+  }
+
+  /** Stops audio and empties the queue. Callers should confirm first. */
+  clearQueue(): Promise<void> {
+    this.initialize();
+    return this.enqueue(async () => {
+      this.invalidateLoad();
+      await this.stopSoftly();
+      usePlayerStore.getState().clearQueue();
+    });
+  }
+
+  setShuffle(enabled: boolean): void {
+    usePlayerStore.getState().setShuffle(enabled ? 'on' : 'off');
+  }
+
+  setRepeatMode(mode: 'off' | 'one' | 'all'): void {
+    usePlayerStore.getState().setRepeat(mode);
+  }
+
+  /** Retry a failed load of the current queue item. */
+  retry(): Promise<void> {
+    this.initialize();
     return this.enqueue(() => this.loadAndPlayCurrent());
   }
 
@@ -185,6 +271,19 @@ class PlayerService {
     this.initialize();
     return this.enqueue(async () => {
       const store = usePlayerStore.getState();
+      const current = selectCurrentTrack(store);
+      const progress = usePlayerProgressStore.getState();
+      // Familiar player behaviour: inside the track, "previous" restarts it;
+      // only near the beginning does it move to the previous queue item.
+      if (
+        current &&
+        (store.status === 'playing' || store.status === 'paused') &&
+        progress.positionMs > 3_000
+      ) {
+        await nativeBridge.player.seekTo(0);
+        progress.setProgress(0, progress.durationMs);
+        return;
+      }
       this.recordSkipped(store);
       // previous() always lands on a valid index with status 'loading'
       // (playerStore.previous clamps at 0) — no end-of-queue branch exists.
@@ -197,11 +296,20 @@ class PlayerService {
     });
   }
 
-  /** A manual next/previous before the track ends counts as a skip. */
+  /**
+   * A manual next/previous counts as a skip only when it happens early. The
+   * old rule counted a tap at 95% (or after a pause near the end) too, which
+   * could blacklist songs the listener actually finished.
+   */
   private recordSkipped(store: ReturnType<typeof usePlayerStore.getState>): void {
     if (store.status !== 'playing' && store.status !== 'paused') return;
     const current = selectCurrentTrack(store);
-    if (current) useLibraryStore.getState().recordSkip(current);
+    if (!current) return;
+    const progress = usePlayerProgressStore.getState();
+    const duration = progress.durationMs;
+    const early =
+      progress.positionMs < 30_000 || (duration > 0 && progress.positionMs / duration < 0.25);
+    if (early) useLibraryStore.getState().recordSkip(current);
   }
 
   seekTo(positionMs: number): Promise<void> {
@@ -250,6 +358,62 @@ class PlayerService {
     if (event.isPlaying && store.status === 'loading') {
       store.setStatus('playing');
     }
+  }
+
+  /** Restores the store from the still-running service after app start/reload. */
+  private async syncFromNative(): Promise<void> {
+    try {
+      const snapshot = await nativeBridge.player.getState();
+      if (snapshot) this.onState(snapshot);
+    } catch {
+      // No native session yet; the store simply stays idle.
+    }
+  }
+
+  /**
+   * Native owns the actual transport; JS owns the queue/user intent. Progress
+   * events only ever promote `loading` to playing, but transport snapshots are
+   * authoritative when the change came from the notification or lockscreen.
+   */
+  private onState(event: NativePlaybackState): void {
+    const store = usePlayerStore.getState();
+    const current = selectCurrentTrack(store);
+    if (event.trackId && current && event.trackId !== current.id) {
+      // A stale snapshot from a track that no longer owns the session.
+      return;
+    }
+    usePlayerProgressStore.getState().setProgress(event.positionMs, event.durationMs);
+    if (event.isPlaying) this.hasStarted = true;
+
+    switch (event.playbackState) {
+      case 'ready':
+        if (event.isPlaying) {
+          if (store.status !== 'playing') store.setStatus('playing');
+        } else if (store.status === 'playing' || store.status === 'loading') {
+          store.setStatus('paused');
+        }
+        break;
+      case 'buffering':
+        if (store.status === 'idle' || store.status === 'ended') store.setStatus('loading');
+        break;
+      case 'ended':
+        if (store.status === 'playing' || store.status === 'paused') store.setStatus('ended');
+        break;
+      case 'idle':
+        if (store.status !== 'idle' && store.status !== 'error') store.setStatus('idle');
+        break;
+      default:
+        break;
+    }
+  }
+
+  /** Notification heart tap. The library store remains the favorite authority. */
+  private async handleFavoriteCommand(trackId?: string): Promise<void> {
+    const current = selectCurrentTrack(usePlayerStore.getState());
+    if (!current || (trackId && trackId !== current.id)) return;
+    // The library-store subscription registered in initialize() mirrors the
+    // new state to the native session, so no direct push is needed here.
+    useLibraryStore.getState().toggleFavorite(current);
   }
 
   private onError(message: string): void {
@@ -397,7 +561,10 @@ class PlayerService {
       await nativeBridge.player.load(track.id, uri, mimeType, undefined, {
         title: track.title,
         artist: track.artists.map((a) => a.name).join(', '),
+        albumTitle: track.album?.title,
         artworkUrl: track.artworkUrl,
+        durationMs: track.durationMs > 0 ? track.durationMs : undefined,
+        favorite: useLibraryStore.getState().favoriteIds.has(track.id),
       });
       if (generation !== this.generation) return;
       void nativeBridge.player.requestNotificationPermission();

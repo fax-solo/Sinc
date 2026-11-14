@@ -1,10 +1,105 @@
 import { describe, expect, it } from 'vitest';
+import type { CanonicalTrack } from '@sinc/shared';
 import {
+  extensionForDownloadSource,
   hasForbiddenVariant,
+  parseArchiveLength,
   pickArchiveFile,
+  pickArchiveTrack,
   scoreArchiveFile,
+  searchTitle,
+  validateDownloadHit,
   validateSearchHit,
 } from './download-source';
+
+function track(title: string, artist: string, durationMs: number): CanonicalTrack {
+  return {
+    id: `itunes:${title}`,
+    title,
+    durationMs,
+    artists: [{ id: `artist:${artist}`, name: artist, providerIds: {}, genres: [] }],
+    providerIds: {},
+    explicit: false,
+  };
+}
+
+describe('extensionForDownloadSource', () => {
+  it('preserves the audio container served by the provider', () => {
+    expect(
+      extensionForDownloadSource({
+        url: 'https://archive.org/download/item/song.ogg',
+        mimeType: 'audio/ogg',
+      })
+    ).toBe('ogg');
+    expect(
+      extensionForDownloadSource({
+        url: 'https://archive.org/download/item/song.flac?download=1',
+        mimeType: 'audio/flac',
+      })
+    ).toBe('flac');
+    expect(
+      extensionForDownloadSource({
+        url: 'https://archive.org/download/item/song.m4a',
+        mimeType: 'audio/mp4',
+      })
+    ).toBe('m4a');
+  });
+
+  it('falls back to MIME and canonicalizes audio-only mp4 names', () => {
+    expect(
+      extensionForDownloadSource({
+        url: 'https://example.test/download/123',
+        mimeType: 'audio/ogg; codecs=opus',
+      })
+    ).toBe('ogg');
+    expect(
+      extensionForDownloadSource({
+        url: 'https://example.test/download/clip.mp4',
+        mimeType: 'audio/mp4',
+      })
+    ).toBe('m4a');
+    expect(
+      extensionForDownloadSource({
+        url: 'https://example.test/download/unknown',
+        mimeType: 'application/octet-stream',
+      })
+    ).toBe('mp3');
+  });
+});
+
+describe('searchTitle', () => {
+  it('preserves requested live, radio and bracketed variants', () => {
+    expect(searchTitle('Song (Live)')).toBe('Song (Live)');
+    expect(searchTitle('Song [Live]')).toBe('Song [Live]');
+    expect(searchTitle('Song (Radio Edit)')).toBe('Song (Radio Edit)');
+    expect(searchTitle('Song [Radio Edit]')).toBe('Song [Radio Edit]');
+    expect(searchTitle('Song [Remix]')).toBe('Song [Remix]');
+    expect(searchTitle('Song (Live at Wembley)')).toBe('Song (Live at Wembley)');
+    expect(searchTitle('Song (Remixes)')).toBe('Song (Remixes)');
+    expect(searchTitle('Song - Live')).toBe('Song - Live');
+  });
+
+  it('still drops bracketed noise and alt titles anywhere in the title', () => {
+    expect(searchTitle('Song (Live) [Official Audio]')).toBe('Song (Live)');
+    expect(searchTitle('Song [Official Audio]')).toBe('Song');
+    expect(searchTitle('Song (feat. Someone)')).toBe('Song');
+    expect(searchTitle('Song (Alive)')).toBe('Song');
+  });
+
+  it('keeps the requested variant through download validation', () => {
+    const requested = searchTitle('Daylight (Live)');
+    expect(
+      validateDownloadHit(
+        requested,
+        'Ariana Grande',
+        'Daylight (Live)',
+        'Ariana Grande',
+        260_000,
+        260_000
+      )
+    ).toBe(true);
+  });
+});
 
 describe('pickArchiveFile', () => {
   it('accepts real Archive audio files (format "VBR MP3")', () => {
@@ -47,6 +142,171 @@ describe('pickArchiveFile', () => {
 describe('scoreArchiveFile', () => {
   it('ranks clean mp3s above samples', () => {
     expect(scoreArchiveFile('a.mp3')).toBeGreaterThan(scoreArchiveFile('a_64kb.mp3'));
+  });
+});
+
+describe('parseArchiveLength', () => {
+  it('parses seconds and clock formats', () => {
+    expect(parseArchiveLength('176.17')).toBe(176_170);
+    expect(parseArchiveLength(198.13)).toBe(198_130);
+    expect(parseArchiveLength('3:18')).toBe(198_000);
+    expect(parseArchiveLength('1:02:03')).toBe(3_723_000);
+    expect(parseArchiveLength(undefined)).toBe(0);
+    expect(parseArchiveLength('n/a')).toBe(0);
+  });
+});
+
+describe('validateDownloadHit', () => {
+  it('accepts a title/artist/duration match inside the tight window', () => {
+    expect(
+      validateDownloadHit(
+        'Daylight',
+        'Ariana Grande',
+        'Daylight (Album Version)',
+        'Ariana Grande',
+        210_000,
+        210_000
+      )
+    ).toBe(true);
+  });
+
+  it('rejects a same-title file by a different artist', () => {
+    expect(
+      validateDownloadHit(
+        'Birds of a Feather',
+        'Billie Eilish',
+        'Birds of a feather',
+        'All Star Trio and their Orchestra',
+        198_000,
+        210_000
+      )
+    ).toBe(false);
+  });
+
+  it('rejects a cover label even when the item creator matches the artist', () => {
+    expect(
+      validateDownloadHit(
+        'Espresso',
+        'Sabrina Carpenter',
+        'Espresso',
+        'Sabrina Carpenter',
+        176_000,
+        175_000,
+        ['Soundcloudaud.com Espresso Sabrina Carpenter ( Best Cover Ever )']
+      )
+    ).toBe(false);
+  });
+
+  it('rejects a near-exact title whose length is off by more than the tolerance', () => {
+    expect(
+      validateDownloadHit(
+        'Birds of a Feather',
+        'Billie Eilish',
+        'Birds of a Feather',
+        'Billie Eilish',
+        198_000,
+        210_000
+      )
+    ).toBe(false);
+  });
+
+  it('accepts a valid 4-second intro/outro difference', () => {
+    expect(
+      validateDownloadHit(
+        'Daylight',
+        'Ariana Grande',
+        'Daylight',
+        'Ariana Grande',
+        214_000,
+        210_000
+      )
+    ).toBe(true);
+  });
+});
+
+describe('pickArchiveTrack', () => {
+  it('selects the matching track from a multi-track album item', () => {
+    const picked = pickArchiveTrack(
+      [
+        {
+          name: '01 Intro.mp3',
+          format: 'VBR MP3',
+          title: 'Intro',
+          artist: 'Ariana Grande',
+          length: '0:30',
+        },
+        {
+          name: '05 Daylight.mp3',
+          format: 'VBR MP3',
+          title: 'Daylight',
+          artist: 'Ariana Grande',
+          length: '3:30',
+        },
+      ],
+      track('Daylight', 'Ariana Grande', 210_000)
+    );
+    expect(picked?.file.name).toBe('05 Daylight.mp3');
+  });
+
+  it('returns null instead of taking an unrelated track from the item', () => {
+    const picked = pickArchiveTrack(
+      [
+        {
+          name: '01 Intro.mp3',
+          format: 'VBR MP3',
+          title: 'Intro',
+          artist: 'Ariana Grande',
+          length: '0:30',
+        },
+      ],
+      track('Daylight', 'Ariana Grande', 210_000)
+    );
+    expect(picked).toBeNull();
+  });
+
+  it('rejects the Espresso cover item entirely', () => {
+    const picked = pickArchiveTrack(
+      [
+        {
+          name: 'soundcloudaud.com_Espresso - Sabrina Carpenter ( Best Cover Ever ).mp3',
+          format: 'VBR MP3',
+          artist: '',
+          length: '176.17',
+        },
+      ],
+      track('Espresso', 'Sabrina Carpenter', 175_000),
+      ['Soundcloudaud.com Espresso Sabrina Carpenter ( Best Cover Ever )'],
+      'Sabrina Carpenter'
+    );
+    expect(picked).toBeNull();
+  });
+
+  it('rejects the unrelated 1920s "Birds of a Feather" recording', () => {
+    const picked = pickArchiveTrack(
+      [
+        {
+          name: 'Birds of a feather - All Star Trio and their Orchestra.mp3',
+          format: 'VBR MP3',
+          title: 'Birds of a feather',
+          artist: 'All Star Trio and their Orchestra, J. MCGOWAN, E. MORAN',
+          length: '03:18',
+        },
+      ],
+      track('Birds of a Feather', 'Billie Eilish', 210_000),
+      ['Birds of a feather'],
+      'All Star Trio and their Orchestra'
+    );
+    expect(picked).toBeNull();
+  });
+
+  it('uses the item creator when file-level artist metadata is absent', () => {
+    const picked = pickArchiveTrack(
+      [{ name: 'Daylight.mp3', format: 'VBR MP3', title: 'Daylight', length: '3:30' }],
+      track('Daylight', 'Ariana Grande', 210_000),
+      [],
+      'Ariana Grande'
+    );
+    expect(picked?.file.name).toBe('Daylight.mp3');
   });
 });
 
@@ -168,7 +428,43 @@ describe('hasForbiddenVariant', () => {
   it('derivative spellings of forbidden tags still match', () => {
     expect(hasForbiddenVariant('Golden Hour', 'Golden Hour (Instrumentals)')).toBe(true);
     expect(hasForbiddenVariant('Rehab', 'Rehab 1 Hour Loop Version')).toBe(true);
+    expect(hasForbiddenVariant('Levitating', 'A Tribute to Dua Lipa - Levitating')).toBe(true);
     expect(hasForbiddenVariant("Stayin' Alive", "Stayin' Alive")).toBe(false);
     expect(hasForbiddenVariant('Golden Hour', 'Golden Hour (Album Version)')).toBe(false);
+  });
+
+  it('refuses an unrequested remix when saving, but allows a requested one', () => {
+    const request = { artist: 'Dua Lipa', durationMs: 203_000 };
+    expect(
+      validateDownloadHit(
+        'Levitating',
+        request.artist,
+        'Levitating (Remix)',
+        request.artist,
+        request.durationMs,
+        request.durationMs
+      )
+    ).toBe(false);
+    expect(
+      validateDownloadHit(
+        'Levitating (Remix)',
+        request.artist,
+        'Levitating (Remix)',
+        request.artist,
+        request.durationMs,
+        request.durationMs
+      )
+    ).toBe(true);
+    // The inverse: asking for the remix must not save the plain studio file.
+    expect(
+      validateDownloadHit(
+        'Levitating (Remix)',
+        request.artist,
+        'Levitating',
+        request.artist,
+        request.durationMs,
+        request.durationMs
+      )
+    ).toBe(false);
   });
 });

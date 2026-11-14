@@ -107,6 +107,35 @@ describe('libraryStore signals (v3)', () => {
     expect(useLibraryStore.getState().hiddenTrackIds[199]).toBe('h209');
   });
 
+  it('unhiding a song clears its thumbs-down feedback too', () => {
+    const store = useLibraryStore.getState();
+    store.setThumb('t1', 'down');
+    store.hideTrack('t1');
+
+    useLibraryStore.getState().unhideTrack('t1');
+
+    const after = useLibraryStore.getState();
+    expect(after.hiddenTrackIds).toEqual([]);
+    expect(after.thumbsDown['t1']).toBeUndefined();
+  });
+
+  it('clears recommendation feedback without touching listening history', () => {
+    const store = useLibraryStore.getState();
+    store.setThumb('t1', 'up');
+    store.hideTrack('t2');
+    store.hideArtist('Hidden Artist');
+    useLibraryStore.getState().recordPlayStarted(track('t1'));
+
+    useLibraryStore.getState().clearRecommendationFeedback();
+
+    const after = useLibraryStore.getState();
+    expect(after.thumbsUp).toEqual({});
+    expect(after.thumbsDown).toEqual({});
+    expect(after.hiddenTrackIds).toEqual([]);
+    expect(after.hiddenArtistNames).toEqual([]);
+    expect(after.playStats['t1']?.count).toBe(1);
+  });
+
   it('clamps discoveryPreference to [0,1]', () => {
     useLibraryStore.getState().setDiscoveryPreference(2);
     expect(useLibraryStore.getState().discoveryPreference).toBe(1);
@@ -114,5 +143,60 @@ describe('libraryStore signals (v3)', () => {
     expect(useLibraryStore.getState().discoveryPreference).toBe(0);
     useLibraryStore.getState().setDiscoveryPreference(0.42);
     expect(useLibraryStore.getState().discoveryPreference).toBe(0.42);
+  });
+});
+
+describe('libraryStore playlist management', () => {
+  beforeEach(() => {
+    useLibraryStore.setState({ playlists: [], recentlyPlayedPlaylistIds: [] });
+  });
+
+  it('creates a playlist with a description and edits its metadata', () => {
+    const id = useLibraryStore.getState().addPlaylist('Night drive', [], 'Slow songs');
+    const playlist = useLibraryStore.getState().playlists.find((p) => p.id === id);
+    expect(playlist?.name).toBe('Night drive');
+    expect(playlist?.description).toBe('Slow songs');
+
+    useLibraryStore.getState().updatePlaylist(id, {
+      name: 'Late drive',
+      description: 'Even slower',
+      coverArtworkUrl: 'https://example.test/cover.jpg',
+    });
+    const updated = useLibraryStore.getState().playlists.find((p) => p.id === id);
+    expect(updated?.name).toBe('Late drive');
+    expect(updated?.description).toBe('Even slower');
+    expect(updated?.coverArtworkUrl).toBe('https://example.test/cover.jpg');
+  });
+
+  it('adds tracks once and reorders them durably', () => {
+    const id = useLibraryStore.getState().addPlaylist('Mix');
+    const t1 = track('p1');
+    const t2 = track('p2');
+    const t3 = track('p3');
+    expect(useLibraryStore.getState().addTracksToPlaylist(id, [t1, t2, t2, t3])).toBe(3);
+    expect(useLibraryStore.getState().addTracksToPlaylist(id, [t2])).toBe(0);
+    expect(
+      useLibraryStore.getState().playlists.find((p) => p.id === id)?.tracks.map((t) => t.id)
+    ).toEqual(['p1', 'p2', 'p3']);
+
+    expect(useLibraryStore.getState().reorderPlaylistTracks(id, 2, 0)).toBe(true);
+    expect(
+      useLibraryStore.getState().playlists.find((p) => p.id === id)?.tracks.map((t) => t.id)
+    ).toEqual(['p3', 'p1', 'p2']);
+    expect(useLibraryStore.getState().reorderPlaylistTracks(id, 4, 0)).toBe(false);
+  });
+
+  it('duplicates a playlist without sharing its track array', () => {
+    const id = useLibraryStore.getState().addPlaylist('Original', [track('a')], 'Desc');
+    const copyId = useLibraryStore.getState().duplicatePlaylist(id);
+    expect(copyId).toBeTruthy();
+    const copy = useLibraryStore.getState().playlists.find((p) => p.id === copyId);
+    expect(copy?.name).toBe('Original copy');
+    expect(copy?.description).toBe('Desc');
+    expect(copy?.tracks.map((t) => t.id)).toEqual(['a']);
+    copy?.tracks.push(track('b'));
+    expect(
+      useLibraryStore.getState().playlists.find((p) => p.id === id)?.tracks.map((t) => t.id)
+    ).toEqual(['a']);
   });
 });

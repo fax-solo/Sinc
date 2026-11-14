@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { CanonicalTrack } from '@sinc/shared';
 import { mulberry32, shuffled } from './affinity';
-import { MAX_PER_ARTIST, pickMoodsForDay, selectMixTracks } from './mixSelection';
+import {
+  freshRatioFor,
+  MAX_PER_ARTIST,
+  pickMoodsForDay,
+  selectFreshAwareMixTracks,
+  selectMixTracks,
+} from './mixSelection';
 
 function track(id: string, artist: string, title: string): CanonicalTrack {
   return {
@@ -42,6 +48,14 @@ describe('selectMixTracks', () => {
     expect(countFor('Layla')).toBeLessThanOrEqual(MAX_PER_ARTIST);
   });
 
+  it('can lift the per-artist cap for an artist mix', () => {
+    const solo = Array.from({ length: 6 }, (_, index) =>
+      track(`solo-${index}`, 'Solo', `Solo Song ${index}`)
+    );
+    expect(selectMixTracks(solo, 6, () => 1)).toHaveLength(MAX_PER_ARTIST);
+    expect(selectMixTracks(solo, 6, () => 1, 99)).toHaveLength(6);
+  });
+
   it('prefers higher-scored candidates', () => {
     const scores: Record<string, number> = {
       t1: 0,
@@ -77,6 +91,61 @@ describe('selectMixTracks', () => {
     expect(result.length).toBe(7); // 3 + 2 + 2
     const janet = result.filter((t) => t.artists[0]?.name === 'Janet').length;
     expect(janet).toBe(MAX_PER_ARTIST);
+  });
+});
+
+describe('selectFreshAwareMixTracks', () => {
+  const known = ['janet', 'omar'];
+
+  it('maps the discovery slider to a fresh share with a familiar floor', () => {
+    expect(freshRatioFor(0)).toBeCloseTo(0.2);
+    expect(freshRatioFor(0.5)).toBeCloseTo(0.6);
+    expect(freshRatioFor(1)).toBeCloseTo(1);
+  });
+
+  it('splits known and fresh artists by the requested ratio', () => {
+    const result = selectFreshAwareMixTracks(POOL, 4, {
+      freshRatio: 0.5,
+      knownArtistNames: new Set(known),
+      scoreOf: () => 1,
+    });
+    const knownCount = result.filter((t) => known.includes(t.artists[0]!.name.toLowerCase()));
+    expect(result).toHaveLength(4);
+    expect(knownCount).toHaveLength(2);
+  });
+
+  it('never returns excluded tracks and fills a thin side from the other pool', () => {
+    const result = selectFreshAwareMixTracks(POOL, 6, {
+      freshRatio: 0.8,
+      knownArtistNames: new Set(['janet']),
+      scoreOf: () => 1,
+      excludeTrackIds: new Set(['t1', 't5', 't6']),
+    });
+    expect(result.map((t) => t.id)).not.toContain('t1');
+    expect(result.map((t) => t.id)).not.toContain('t5');
+    expect(result).toHaveLength(5); // Janet + Layla + 1 remaining Janet + 2 Omar... capped
+    const artists = result.map((t) => t.artists[0]!.name);
+    expect(artists).toContain('Layla');
+  });
+
+  it('keeps the per-artist cap while filling a thin side', () => {
+    const pool = [
+      ...Array.from({ length: 6 }, (_, index) =>
+        track(`janet-${index}`, 'Janet', `Janet Song ${index}`)
+      ),
+      track('layla-1', 'Layla', 'Layla One'),
+      track('layla-2', 'Layla', 'Layla Two'),
+    ];
+    const result = selectFreshAwareMixTracks(pool, 8, {
+      freshRatio: 0,
+      knownArtistNames: new Set(['janet']),
+      scoreOf: () => 1,
+    });
+    const janetCount = result.filter((t) => t.artists[0]!.name === 'Janet').length;
+    expect(janetCount).toBe(MAX_PER_ARTIST);
+    // Filling from the fresh side is allowed, but the familiar artist cannot
+    // exceed the cap just because both selection passes are short.
+    expect(result).toHaveLength(5);
   });
 });
 

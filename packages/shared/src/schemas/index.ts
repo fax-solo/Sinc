@@ -29,6 +29,8 @@ export const TrackSchema = z.object({
   durationMs: z.number(),
   trackNumber: z.number().optional(),
   artworkUrl: z.string().url().optional(),
+  /** Trusted short preview used for download fingerprint verification. */
+  previewUrl: z.string().url().optional(),
   providerIds: z.record(z.string()),
   releaseDate: z.string().optional(),
   popularityScore: z.number().optional(),
