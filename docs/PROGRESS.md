@@ -220,9 +220,9 @@ Bug found and fixed — **media session died at end of queue**:
 - Error-before-start deliberately still tears the session down.
 
 Checks: typecheck ✅, 315 vitest ✅ (2 new tests: session survives completion of last
-track; Next on last track pauses without `stop()`). Release APK rebuild for re-test:
-in progress at time of writing — the end-of-queue fix is compile/test-verified but not
-yet re-verified on the phone.
+track; Next on last track pauses without `stop()`). Release APK rebuilt and installed
+over the existing app at 15:04 (same debug signing key, user data preserved). Re-test
+of the end-of-queue behavior on the phone: pending user playback.
 
 ## Upcoming
 
