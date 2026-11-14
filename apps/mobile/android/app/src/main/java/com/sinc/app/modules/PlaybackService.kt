@@ -185,7 +185,7 @@ class PlaybackService : MediaSessionService() {
         .setNotificationId(DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID)
         .build()
     notificationProvider.setSmallIcon(R.drawable.ic_sinc_notification)
-    setMediaNotificationProvider(notificationProvider)
+    setMediaNotificationProvider(SincNotificationProvider(this, notificationProvider))
 
     val player = getPlayer(this)
 
@@ -283,12 +283,10 @@ class PlaybackService : MediaSessionService() {
   }
 
   private fun customLayout(): List<CommandButton> {
-    val lyricsButton =
-      CommandButton.Builder(CommandButton.ICON_UNDEFINED)
-        .setIconResId(R.drawable.ic_sinc_lyrics)
-        .setDisplayName("Show lyrics")
-        .setSessionCommand(SessionCommand(LYRICS_CUSTOM_ACTION, Bundle.EMPTY))
-        .build()
+    // "Show lyrics" is not a session button on purpose: it is added to the
+    // notification as an activity PendingIntent by SincNotificationProvider,
+    // because Android 14 blocks activity launches from a background media
+    // service. Favorite stays a session command (no activity launch needed).
     val favoriteButton =
       CommandButton.Builder(
         if (currentFavorite) CommandButton.ICON_HEART_FILLED else CommandButton.ICON_HEART_UNFILLED,
@@ -299,7 +297,7 @@ class PlaybackService : MediaSessionService() {
         .setEnabled(activeModule != null)
         .setSessionCommand(SessionCommand(FAVORITE_CUSTOM_ACTION, Bundle.EMPTY))
         .build()
-    return listOf(lyricsButton, favoriteButton)
+    return listOf(favoriteButton)
   }
 
   private fun refreshCustomLayout() {

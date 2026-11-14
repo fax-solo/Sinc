@@ -221,8 +221,25 @@ Bug found and fixed — **media session died at end of queue**:
 
 Checks: typecheck ✅, 315 vitest ✅ (2 new tests: session survives completion of last
 track; Next on last track pauses without `stop()`). Release APK rebuilt and installed
-over the existing app at 15:04 (same debug signing key, user data preserved). Re-test
-of the end-of-queue behavior on the phone: pending user playback.
+over the existing app at 15:04 (same debug signing key, user data preserved).
+End-of-queue re-tested on the phone: `state=ended` → no service destroy → play button
+restarted the track from 0. ✅
+
+Bug found and fixed — **Show Lyrics blocked by Android 14 BAL**:
+
+- Tapping Show Lyrics from the lockscreen while Sinc was backgrounded produced
+  `Background activity launch blocked! ... dat=sinc://lyrics ... FOREGROUND_SERVICE`.
+  The session-command handler called `PendingIntent.send()` from the service, which
+  Android 14 treats as a background app trying to launch an activity.
+- Fix: `SincNotificationProvider` wraps Media3's default provider and appends Show
+  Lyrics as a notification action whose PendingIntent targets `MainActivity` directly.
+  SystemUI sends notification PendingIntents, which are allowed to start activities.
+  The platform `Notification.Builder.recoverBuilder` restores the MediaStyle so the
+  transport/lockscreen treatment is preserved; below API 24 the extra action is
+  skipped rather than risking a broken notification.
+- The session custom layout now carries only Favorite; Show Lyrics is added by the
+  provider. On-device: Favorite works from the lockscreen expanded player (action
+  switched to "Remove from Liked Songs" with a filled heart).
 
 ## Upcoming
 
