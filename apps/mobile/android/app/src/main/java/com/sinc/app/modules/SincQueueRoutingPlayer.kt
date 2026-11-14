@@ -18,7 +18,7 @@ import androidx.media3.common.util.UnstableApi
  */
 @OptIn(UnstableApi::class)
 class SincQueueRoutingPlayer(
-  delegate: Player,
+  private val delegate: Player,
   private val onSkip: (String) -> Unit,
 ) : ForwardingPlayer(delegate) {
 
@@ -54,16 +54,16 @@ class SincQueueRoutingPlayer(
    * (and therefore the lockscreen controls) alive after a natural queue end.
    */
   override fun play() {
-    if (player.playbackState == Player.STATE_ENDED) {
-      player.seekTo(0)
+    if (delegate.playbackState == Player.STATE_ENDED) {
+      delegate.seekTo(0)
     }
     super.play()
   }
 
   /** Same guard for controllers that toggle playWhenReady directly. */
   override fun setPlayWhenReady(playWhenReady: Boolean) {
-    if (playWhenReady && player.playbackState == Player.STATE_ENDED) {
-      player.seekTo(0)
+    if (playWhenReady && delegate.playbackState == Player.STATE_ENDED) {
+      delegate.seekTo(0)
     }
     super.setPlayWhenReady(playWhenReady)
   }
