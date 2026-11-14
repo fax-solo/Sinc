@@ -380,6 +380,31 @@ describe('playerService', () => {
     expect(vi.mocked(fakePlayer.load)).toHaveBeenCalledTimes(2);
   });
 
+  it('completion of the last track keeps the session alive for the lockscreen', async () => {
+    stubResolvePlayback([track('itunes:1')]);
+    await playerService.playQueue([track('itunes:1')]);
+    emitStartedPlaying();
+
+    completionListeners.forEach((l) => l('itunes:1'));
+    await flush();
+
+    expect(usePlayerStore.getState().status).toBe('ended');
+    // Native must NOT tear down the service: the media session has to survive
+    // so the notification/lockscreen controls remain after the queue ends.
+    expect(vi.mocked(fakePlayer.stop)).not.toHaveBeenCalled();
+  });
+
+  it('next on the last track pauses but keeps the media session alive', async () => {
+    stubResolvePlayback([track('itunes:1')]);
+    await playerService.playQueue([track('itunes:1')]);
+
+    await playerService.next();
+
+    expect(usePlayerStore.getState().status).toBe('ended');
+    expect(vi.mocked(fakePlayer.pause)).toHaveBeenCalled();
+    expect(vi.mocked(fakePlayer.stop)).not.toHaveBeenCalled();
+  });
+
   it('completion before playback started surfaces an error instead of advancing', async () => {
     const tracks = [track('itunes:1'), track('itunes:2')];
     stubResolvePlayback(tracks);

@@ -195,6 +195,35 @@ Known limitations:
 - If a pinned device disconnects, Android falls back to default routing on its
   own; the picker refreshes its highlight the next time it is opened.
 
+## Device findings (Samsung Galaxy A05, Android 14, release build)
+
+Verified on hardware:
+
+- MediaSession is active, public, and holds the media-button session; the Samsung
+  lockscreen player shows artwork, title, Previous/Pause/Next, and its buttons change
+  real playback state (verified PLAYING → PAUSED → PLAYING via media keys).
+- The notification is a `sinc_playback` transport notification with 5 actions and
+  `vis=PUBLIC`; POST_NOTIFICATIONS is granted; the service runs in the foreground.
+
+Bug found and fixed — **media session died at end of queue**:
+
+- On natural completion (or Next on the last track) with repeat off, `PlayerService`
+  called `nativeBridge.player.stop()`, which released the ExoPlayer, destroyed the
+  `PlaybackService`, and removed the notification/lockscreen player entirely. The
+  lockscreen then fell back to Samsung Music.
+- Fix: end-of-queue now keeps the media session alive. Natural completion leaves the
+  player in `ENDED`; Next-past-the-end pauses it. In both cases the notification and
+  lockscreen controls remain showing the last track.
+- `SincQueueRoutingPlayer` now overrides `play()`/`setPlayWhenReady(true)`: when the
+  delegate is in `STATE_ENDED`, it rewinds to 0 first, so the lockscreen play button
+  replays the last track instead of being a no-op.
+- Error-before-start deliberately still tears the session down.
+
+Checks: typecheck ✅, 315 vitest ✅ (2 new tests: session survives completion of last
+track; Next on last track pauses without `stop()`). Release APK rebuild for re-test:
+in progress at time of writing — the end-of-queue fix is compile/test-verified but not
+yet re-verified on the phone.
+
 ## Upcoming
 
 - Phase 2: JS playback-state reconciliation and favorite bridge.

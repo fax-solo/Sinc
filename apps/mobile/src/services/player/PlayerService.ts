@@ -260,7 +260,13 @@ class PlayerService {
       store.next();
       // Snapshot caveat: re-read after the mutation (see handleCompletion).
       if (usePlayerStore.getState().status === 'ended') {
-        await this.stopSoftly();
+        // Exhausted queue: silence the audio but keep the media session so the
+        // notification and lockscreen controls stay available (resume/replay).
+        try {
+          await nativeBridge.player.pause();
+        } catch {
+          // Native may already be idle; the store status is still correct.
+        }
         return;
       }
       await this.loadAndPlayCurrent();
@@ -466,10 +472,10 @@ class PlayerService {
     track('playback:complete', trackId);
     store.next();
     // Re-read state: `store` is a snapshot — after next() the queue may have
-    // moved to 'ended' (repeat off, queue exhausted). Skipping this re-read
-    // made the stale check never fire and the last track loop forever.
+    // moved to 'ended' (repeat off, queue exhausted). Keep the media session
+    // alive on the last track so the notification/lockscreen controls remain:
+    // the native routing player rewinds to 0 when play is pressed from ENDED.
     if (usePlayerStore.getState().status === 'ended') {
-      await this.stopSoftly();
       return;
     }
     await this.loadAndPlayCurrent();
