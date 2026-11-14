@@ -118,7 +118,8 @@ export function AlbumScreen({
   const album = query.data?.album;
   const tracks = query.data?.tracks ?? [];
   const saved = album ? followedAlbums.some((item) => item.id === album.id) : false;
-  const alreadyDownloaded = tracks.length > 0 && tracks.every((track) => downloadedIds.has(track.id));
+  const alreadyDownloaded =
+    tracks.length > 0 && tracks.every((track) => downloadedIds.has(track.id));
 
   const play = (index: number, shuffle = false) => {
     if (tracks.length === 0) return;
@@ -129,7 +130,9 @@ export function AlbumScreen({
 
   const downloadAll = async () => {
     setDownloadBusy(true);
-    const result = await queueDownloads(tracks, downloadedIds, (track) => downloadTrack(track));
+    const result = await queueDownloads(tracks, downloadedIds, (track, opts) =>
+      downloadTrack(track, opts)
+    );
     setDownloadBusy(false);
     toast(
       result.queued > 0
@@ -244,7 +247,9 @@ export function ArtistScreen({
 
   const downloadTop = async () => {
     setDownloadBusy(true);
-    const result = await queueDownloads(tracks, downloadedIds, (track) => downloadTrack(track));
+    const result = await queueDownloads(tracks, downloadedIds, (track, opts) =>
+      downloadTrack(track, opts)
+    );
     setDownloadBusy(false);
     toast(
       result.queued > 0
@@ -395,7 +400,9 @@ export function PlaylistScreen({
 
   const downloadAll = async () => {
     setDownloadBusy(true);
-    const result = await queueDownloads(tracks, downloadedIds, (track) => downloadTrack(track));
+    const result = await queueDownloads(tracks, downloadedIds, (track, opts) =>
+      downloadTrack(track, opts)
+    );
     setDownloadBusy(false);
     toast(
       result.queued > 0
@@ -539,7 +546,11 @@ export function MixScreen({
 
   const saveMix = () => {
     if (!mix || saved) return;
-    const newId = addPlaylist(mix.name, mix.tracks, mix.description ?? `A ${mix.kind} mix from Sinc.`);
+    const newId = addPlaylist(
+      mix.name,
+      mix.tracks,
+      mix.description ?? `A ${mix.kind} mix from Sinc.`
+    );
     setSaved(true);
     toast('Mix saved as a playlist', 'success');
     navigation.navigate('LocalPlaylist', { id: newId });
@@ -548,7 +559,9 @@ export function MixScreen({
   const downloadAll = async () => {
     if (!mix) return;
     setDownloadBusy(true);
-    const result = await queueDownloads(mix.tracks, downloadedIds, (track) => downloadTrack(track));
+    const result = await queueDownloads(mix.tracks, downloadedIds, (track, opts) =>
+      downloadTrack(track, opts)
+    );
     setDownloadBusy(false);
     toast(
       result.queued > 0
@@ -664,7 +677,9 @@ export function LocalPlaylistScreen({
   const downloadAll = async () => {
     if (!playlist) return;
     setDownloadBusy(true);
-    const result = await queueDownloads(tracks, downloadedIds, (track) => downloadTrack(track));
+    const result = await queueDownloads(tracks, downloadedIds, (track, opts) =>
+      downloadTrack(track, opts)
+    );
     setDownloadBusy(false);
     toast(
       result.queued > 0

@@ -287,7 +287,11 @@ export function DownloadsScreen() {
             downloaded
             subtitle={`${item.track.artists.map((artist) => artist.name).join(', ')} · ${formatBytes(
               item.sizeBytes ?? 0
-            )}`}
+            )}${
+              item.provider === 'youtube' || item.provider === 'soundcloud'
+                ? ' · on-device engine'
+                : ''
+            }`}
             isCurrent={currentTrack?.id === item.track.id}
             isPlaying={playing}
             onPress={() => {

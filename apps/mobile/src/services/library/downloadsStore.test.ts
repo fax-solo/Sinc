@@ -409,6 +409,65 @@ describe('downloadsStore (local)', () => {
     expect(useDownloadsStore.getState().getDownload(bulk.id)?.phase).toBe('completed');
   });
 
+  it('keeps bulk imports on licensed sources and never falls back to the engine', async () => {
+    const t = track('itunes:bulk-no-engine');
+    findArchive.mockResolvedValue(null);
+
+    await useDownloadsStore.getState().downloadTrack(t, { priority: 'bulk' });
+
+    expect(ytMock.download).not.toHaveBeenCalled();
+    const record = useDownloadsStore.getState().getDownload(t.id);
+    expect(record?.allowEngine).toBe(false);
+    expect(record?.phase).toBe('failed');
+    expect(record?.error).toMatch(/Bulk downloads do not use the on-device engine/);
+  });
+
+  it('discloses the on-device engine fallback for an individual download', async () => {
+    const t = track('itunes:individual-engine');
+    findArchive.mockResolvedValue(null);
+    const gate = deferred<{ localUri: string; durationMs: number; mimeType: string }>();
+    ytMock.download.mockImplementationOnce(() => gate.promise);
+
+    const pending = useDownloadsStore.getState().downloadTrack(t);
+    await vi.waitFor(() => expect(ytMock.download).toHaveBeenCalledTimes(1));
+    const waiting = useDownloadsStore.getState().getDownload(t.id);
+    expect(waiting?.allowEngine).toBe(true);
+    expect(waiting?.provider).toBe('youtube');
+    expect(waiting?.error).toMatch(/on-device engine/);
+
+    gate.resolve({
+      localUri: 'file:///sdcard/Sinc/individual.mp3',
+      durationMs: 180_000,
+      mimeType: 'audio/mpeg',
+    });
+    await pending;
+    expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('completed');
+  });
+
+  it('keeps the bulk no-fallback policy across restart', async () => {
+    const t = track('itunes:bulk-restart');
+    useDownloadsStore.setState({
+      downloads: [
+        {
+          jobId: jobIdForTrack(t),
+          track: t,
+          phase: 'source',
+          progress: 0,
+          createdAt: Date.now(),
+          allowEngine: false,
+        },
+      ],
+    });
+    findArchive.mockResolvedValue(null);
+
+    await useDownloadsStore.getState().resumeInFlight();
+
+    expect(ytMock.download).not.toHaveBeenCalled();
+    const record = useDownloadsStore.getState().getDownload(t.id);
+    expect(record?.phase).toBe('failed');
+    expect(record?.error).toMatch(/Bulk downloads do not use the on-device engine/);
+  });
+
   it('cancels a queued download before it reaches the native bridge', async () => {
     const gates = holdDirectDownloads();
     findArchive.mockImplementation(async (candidate: CanonicalTrack) => ({
@@ -922,6 +981,7 @@ describe('downloadsStore (local)', () => {
             createdAt: now,
             attempts: 1,
             retryAt: now + 5_000,
+            allowEngine: true,
             error: 'Retrying in 5s…',
           },
         ],
@@ -963,6 +1023,7 @@ describe('downloadsStore (local)', () => {
             progress: 0,
             createdAt: Date.now(),
             attempts: 1,
+            allowEngine: true,
           },
         ],
       });

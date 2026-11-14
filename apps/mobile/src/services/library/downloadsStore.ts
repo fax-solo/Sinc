@@ -89,6 +89,8 @@ export interface DownloadRecord {
   attempts?: number;
   /** Epoch ms before which an automatic retry must not start. */
   retryAt?: number;
+  /** Whether this task may fall back to the on-device yt-dlp engine. */
+  allowEngine?: boolean;
   /** Actual Music/Sinc display name; may differ from publicFileName (m4a/webm). */
   publishedName?: string;
 }
@@ -101,7 +103,7 @@ interface DownloadsState {
   getDownload: (trackId: string) => DownloadRecord | undefined;
   downloadTrack: (
     track: CanonicalTrack,
-    opts?: { resumePart?: boolean; priority?: DownloadPriority }
+    opts?: { resumePart?: boolean; priority?: DownloadPriority; allowEngine?: boolean }
   ) => Promise<void>;
   pauseDownload: (jobId: string) => Promise<void>;
   resumeDownload: (jobId: string) => Promise<void>;
@@ -283,9 +285,11 @@ function scheduleRetryResume(record: DownloadRecord): void {
     if (!current || !isDownloadInProgress(current.phase)) return;
     if (useDownloadsStore.getState().pausedIds.has(record.jobId)) return;
     // A new process cannot prove which source produced the old partial.
-    void useDownloadsStore
-      .getState()
-      .downloadTrack(current.track, { resumePart: false, priority: 'resume' });
+    void useDownloadsStore.getState().downloadTrack(current.track, {
+      resumePart: false,
+      priority: 'resume',
+      allowEngine: current.allowEngine ?? false,
+    });
   }, delayMs);
   (timer as unknown as { unref?: () => void }).unref?.();
   retryTimers.set(record.jobId, timer);
@@ -790,6 +794,11 @@ export const useDownloadsStore = create<DownloadsState>()(
           const carriedAttempts =
             existing && existing.phase !== 'failed' ? (existing.attempts ?? 0) : 0;
 
+          // Bulk imports only use licensed/direct sources. The engine fallback
+          // is reserved for an explicit individual download or retry.
+          const priority = opts?.priority ?? 'user';
+          const allowEngine = opts?.allowEngine ?? priority !== 'bulk';
+
           const downloads = [
             {
               jobId,
@@ -799,6 +808,7 @@ export const useDownloadsStore = create<DownloadsState>()(
               createdAt: Date.now(),
               attempts: carriedAttempts,
               retryAt: undefined,
+              allowEngine,
             },
             ...get().downloads.filter((d) => d.jobId !== jobId),
           ];
@@ -931,10 +941,25 @@ export const useDownloadsStore = create<DownloadsState>()(
             // and the native URL path cannot compare it to the chosen track.
             // Searching lets the engine apply the title/artist/duration gates.
             if (stopped()) throw new Error('Download stopped');
+            if (!allowEngine) {
+              throw new Error(
+                'No licensed source found. Bulk downloads do not use the on-device engine; open this song to download it individually.'
+              );
+            }
             if (!nativeBridge.yt.available()) {
               throw new Error('The on-device media engine is not linked (yt-dlp).');
             }
-            upsert(jobId, { phase: 'source', progress: 10, error: undefined });
+            // Explicit disclosure for the individual fallback. The row shows
+            // this until the native transfer-reported stage replaces it. The
+            // provider is rewritten too: any earlier direct probe failed, so
+            // the completed row must not claim the audio came from that source.
+            upsert(jobId, {
+              phase: 'source',
+              progress: 10,
+              provider: 'youtube',
+              error:
+                'No licensed source found — using the on-device engine for this individual download…',
+            });
             const query = `${track.artists[0]?.name ?? 'unknown'} - ${searchTitle(track.title)}`;
             const result = await nativeBridge.yt.download(
               jobId,
@@ -1115,7 +1140,11 @@ export const useDownloadsStore = create<DownloadsState>()(
           const interrupted = runningDownloads.get(jobId);
           if (interrupted) await interrupted;
           if (get().pausedIds.has(jobId)) return;
-          await get().downloadTrack(record.track, { resumePart: true, priority: 'resume' });
+          await get().downloadTrack(record.track, {
+            resumePart: true,
+            priority: 'resume',
+            allowEngine: record.allowEngine ?? false,
+          });
         },
 
         cancelDownload: async (jobId) => {
@@ -1154,7 +1183,13 @@ export const useDownloadsStore = create<DownloadsState>()(
           if (record.phase !== 'failed') return;
           // Transient errors already auto-retry; this is the manual path for
           // definitive failures (extraction blocked, no validated source…).
-          await get().downloadTrack(record.track, { resumePart: true, priority: 'user' });
+          // Retry is an explicit individual action, so it may use the engine
+          // fallback even when the original task came from a bulk import.
+          await get().downloadTrack(record.track, {
+            resumePart: true,
+            priority: 'user',
+            allowEngine: true,
+          });
         },
 
         setPhaseTransfer: (jobId) => {
@@ -1199,7 +1234,11 @@ export const useDownloadsStore = create<DownloadsState>()(
               continue;
             }
             pendingResumes.push(
-              get().downloadTrack(record.track, { resumePart: false, priority: 'resume' })
+              get().downloadTrack(record.track, {
+                resumePart: false,
+                priority: 'resume',
+                allowEngine: record.allowEngine ?? false,
+              })
             );
           }
           await Promise.allSettled(pendingResumes);
@@ -1224,7 +1263,11 @@ export const useDownloadsStore = create<DownloadsState>()(
               continue;
             }
             pendingResumes.push(
-              get().downloadTrack(record.track, { resumePart: true, priority: 'resume' })
+              get().downloadTrack(record.track, {
+                resumePart: true,
+                priority: 'resume',
+                allowEngine: record.allowEngine ?? false,
+              })
             );
           }
           await Promise.allSettled(pendingResumes);
