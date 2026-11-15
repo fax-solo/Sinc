@@ -8,6 +8,8 @@ import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
@@ -22,12 +24,19 @@ import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import com.sinc.app.MainActivity
 import com.sinc.app.R
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Collections
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Shared registry + ongoing notification for active downloads (both the native
@@ -44,10 +53,22 @@ import java.util.concurrent.atomic.AtomicBoolean
 object SincDownloads {
   const val LOG_TAG = "SincDownloads"
   const val CHANNEL_ID = "sinc_downloads"
+  const val RESULTS_CHANNEL_ID = "sinc_download_results"
   const val NOTIF_ID = 94000
+
+  const val OUTCOME_COMPLETED = "completed"
+  const val OUTCOME_FAILED = "failed"
+  const val OUTCOME_CANCELLED = "cancelled"
+
+  private const val PREFS = "sinc_download_notifications"
+  private const val KEY_IDS = "progress_ids"
 
   private data class Job(
     val title: String,
+    val artist: String?,
+    val artworkUrl: String?,
+    /** Stable start order, so the foreground card never jumps between jobs. */
+    val order: Long,
     val kill: () -> Unit,
     val cleanup: () -> Unit,
   )
@@ -61,26 +82,84 @@ object SincDownloads {
   private val stages = ConcurrentHashMap<String, String>()
   /** Jobs whose total byte count is unknown; never render these as a percent. */
   private val indeterminate = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+  private val bytesDone = ConcurrentHashMap<String, Long>()
+  private val bytesTotal = ConcurrentHashMap<String, Long>()
   private val serviceStarted = AtomicBoolean(false)
+  private val nextOrder = AtomicInteger(0)
+
+  /** Notification ids, allocated per job attempt so retries never collide. */
+  private val progressNotifIds = ConcurrentHashMap<String, Int>()
+  private val resultNotifIds = ConcurrentHashMap<String, Int>()
+  private val nextProgressNotifId = AtomicInteger(95000)
+  private val nextResultNotifId = AtomicInteger(1_000_000)
+
+  /** Artwork is prefetched once per URL for the notification's large icon. */
+  private val artworkCache = ConcurrentHashMap<String, Bitmap>()
+  private val artworkLoading = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+  private val artworkFailed = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+  private val artworkExecutor = Executors.newFixedThreadPool(2)
 
   @Volatile
   private var react: ReactApplicationContext? = null
 
+  /** Notification ids currently posted for progress, mirrored to disk so a
+   *  process killed mid-download does not leave undismissable stale cards. */
+  private var persistedIds: Set<Int> = emptySet()
+  private val staleCardsCleaned = AtomicBoolean(false)
+
   /** Sets the RN context used for JS progress/action events. */
   fun attach(ctx: ReactApplicationContext) {
     react = ctx
+    // First attach in a process: any progress card we persisted belongs to a
+    // dead transfer (the in-memory registry starts empty). Cancel it.
+    if (staleCardsCleaned.compareAndSet(false, true)) {
+      val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+      val stale = prefs.getStringSet(KEY_IDS, null) ?: emptySet()
+      val nm = NotificationManagerCompat.from(ctx)
+      (stale + NOTIF_ID.toString()).forEach { raw ->
+        raw.toIntOrNull()?.let { id ->
+          try {
+            nm.cancel(id)
+          } catch (_: SecurityException) {
+          }
+        }
+      }
+      prefs.edit().remove(KEY_IDS).apply()
+    }
+  }
+
+  private fun persistProgressIds() {
+    val ctx = react ?: return
+    val ids = progressNotifIds.values.toSet() + NOTIF_ID
+    if (ids == persistedIds) return
+    persistedIds = ids
+    ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+      .edit()
+      .putStringSet(KEY_IDS, ids.mapTo(HashSet()) { it.toString() })
+      .apply()
+  }
+
+  private fun clearPersistedIds() {
+    persistedIds = emptySet()
+    val ctx = react ?: return
+    ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_IDS).apply()
   }
 
   fun begin(
     jobId: String,
     title: String,
+    artist: String? = null,
+    artworkUrl: String? = null,
     kill: () -> Unit,
     cleanup: () -> Unit = {},
   ) {
     // A re-entrant start for the same job must stop the old transfer before it
     // replaces the handle; otherwise the old process can keep writing/publish
     // after the new attempt has taken over the job id.
-    active.put(jobId, Job(title, kill, cleanup))?.let { previous ->
+    active.put(
+      jobId,
+      Job(title, artist, artworkUrl, nextOrder.getAndIncrement().toLong(), kill, cleanup),
+    )?.let { previous ->
       try {
         previous.kill()
       } catch (_: Exception) {
@@ -92,6 +171,12 @@ object SincDownloads {
     progress[jobId] = 0
     stages.remove(jobId)
     indeterminate.remove(jobId)
+    bytesDone.remove(jobId)
+    bytesTotal.remove(jobId)
+    // A retry reuses the job id: the previous result card must not linger
+    // beside the new progress card (it still gets the same id back on end).
+    cancelNotification(resultNotifIds[jobId])
+    loadArtwork(artworkUrl)
     ensureServiceRunning()
     refresh()
   }
@@ -100,6 +185,18 @@ object SincDownloads {
     if (!active.containsKey(jobId)) return
     indeterminate.remove(jobId)
     progress[jobId] = percent.coerceIn(0, 99)
+    refresh()
+  }
+
+  /** HTTP transfers know real byte counts; yt-dlp only some of the time. */
+  fun updateBytes(jobId: String, percent: Int?, bytesDownloaded: Long, totalBytes: Long) {
+    if (!active.containsKey(jobId)) return
+    if (percent != null) {
+      indeterminate.remove(jobId)
+      progress[jobId] = percent.coerceIn(0, 99)
+    }
+    if (bytesDownloaded > 0) bytesDone[jobId] = bytesDownloaded else bytesDone.remove(jobId)
+    if (totalBytes > 0) bytesTotal[jobId] = totalBytes else bytesTotal.remove(jobId)
     refresh()
   }
 
@@ -136,6 +233,8 @@ object SincDownloads {
     progress.remove(jobId)
     stages.remove(jobId)
     indeterminate.remove(jobId)
+    bytesDone.remove(jobId)
+    bytesTotal.remove(jobId)
     job.kill()
     // Cancel means "remove the partial too". Pause deliberately does not run
     // this: its `.part` is what the resume request continues from.
@@ -143,6 +242,8 @@ object SincDownloads {
       job.cleanup()
     } catch (_: Exception) {
     }
+    cancelNotification(progressNotifIds.remove(jobId))
+    postResult(jobId, job, OUTCOME_CANCELLED)
     postAction(jobId, "cancelled")
     refresh()
   }
@@ -158,6 +259,8 @@ object SincDownloads {
     progress.remove(jobId)
     stages.remove(jobId)
     indeterminate.remove(jobId)
+    bytesDone.remove(jobId)
+    bytesTotal.remove(jobId)
     try {
       job.kill()
     } catch (_: Exception) {
@@ -166,6 +269,10 @@ object SincDownloads {
       job.cleanup()
     } catch (_: Exception) {
     }
+    // Deleting/abandoning a download cancels its live progress card. Finished
+    // result cards are left alone: they are auto-dismissable and must survive
+    // the cleanup that follows a notification Cancel.
+    cancelNotification(progressNotifIds.remove(jobId))
     refresh()
   }
 
@@ -178,13 +285,30 @@ object SincDownloads {
     refresh()
   }
 
-  /** Called when a transfer genuinely completes (success or hard failure). */
-  fun end(jobId: String) {
-    active.remove(jobId)
+  /**
+   * Called when a transfer genuinely ends. Posts a result card for the real
+   * outcome ("completed", "failed", "cancelled") unless the end was caused by
+   * a pause (a pause keeps the job resumable and must not look like a failure).
+   */
+  fun end(
+    jobId: String,
+    outcome: String = OUTCOME_COMPLETED,
+    message: String? = null,
+  ) {
+    val wasActive = active.containsKey(jobId)
+    val wasPaused = paused.containsKey(jobId)
+    val job = active.remove(jobId) ?: paused.remove(jobId)
     paused.remove(jobId)
     progress.remove(jobId)
     stages.remove(jobId)
     indeterminate.remove(jobId)
+    bytesDone.remove(jobId)
+    bytesTotal.remove(jobId)
+    cancelNotification(progressNotifIds.remove(jobId))
+    // The transport aborts when the user pauses, so the module reports a
+    // cancellation; that is not a user-visible result.
+    val pauseAbort = outcome == OUTCOME_CANCELLED && wasPaused && !wasActive
+    if (job != null && !pauseAbort) postResult(jobId, job, outcome, message)
     refresh()
   }
 
@@ -427,109 +551,262 @@ object SincDownloads {
   }
 
   // ---------------------------------------------------------------------
-  // Foreground notification
+  // Notifications
+  //
+  // Two kinds, deliberately split:
+  //  - the foreground notification (NOTIF_ID, bound to SincDownloadService)
+  //    is also the primary job's card, so a single download produces exactly
+  //    one card — never a summary plus a duplicate progress card. Concurrent
+  //    jobs get their own card (95000+);
+  //  - one result card per job (1,000,000+) on a separate results channel for
+  //    completed / failed / cancelled, so a finished download does not
+  //    overwrite the next transfer's progress.
   // ---------------------------------------------------------------------
 
-  private data class NotifInfo(
+  private data class JobView(
+    val jobId: String,
     val title: String,
-    val jobId: String?,
+    val artist: String?,
+    val artworkUrl: String?,
+    val order: Long,
     val pct: Int,
     val paused: Boolean,
     val indeterminate: Boolean,
     val stage: String?,
+    val doneBytes: Long,
+    val totalBytes: Long,
   )
 
-  private fun describe(): NotifInfo {
-    if (count() == 0) return NotifInfo("Downloads", null, 0, false, false, null)
-    val ids = active.keys + paused.keys
-    val jobId = ids.last()
-    val isPaused = paused.containsKey(jobId)
-    val label = if (isPaused) paused[jobId]?.title else active[jobId]?.title
-    return NotifInfo(
-      label ?: "Downloading",
-      jobId,
-      progress[jobId] ?: 0,
-      isPaused,
-      indeterminate.contains(jobId),
-      stages[jobId],
-    )
-  }
+  private fun orderedJobs(): List<JobView> =
+    (active.keys + paused.keys).distinct().mapNotNull { id ->
+      val job = active[id] ?: paused[id] ?: return@mapNotNull null
+      JobView(
+        jobId = id,
+        title = job.title,
+        artist = job.artist,
+        artworkUrl = job.artworkUrl,
+        order = job.order,
+        pct = progress[id] ?: 0,
+        paused = paused.containsKey(id),
+        indeterminate = indeterminate.contains(id),
+        stage = stages[id],
+        doneBytes = bytesDone[id] ?: 0L,
+        totalBytes = bytesTotal[id] ?: 0L,
+      )
+    }.sortedBy { it.order }
 
   fun ensureChannel(context: Context) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-      val channel = NotificationChannel(
-        CHANNEL_ID,
-        "Downloads",
-        NotificationManager.IMPORTANCE_LOW,
-      ).apply { description = "Progress for active Sinc downloads" }
-      nm.createNotificationChannel(channel)
+      nm.createNotificationChannel(
+        NotificationChannel(
+          CHANNEL_ID,
+          "Downloads",
+          NotificationManager.IMPORTANCE_LOW,
+        ).apply { description = "Progress for active Sinc downloads" }
+      )
+      nm.createNotificationChannel(
+        NotificationChannel(
+          RESULTS_CHANNEL_ID,
+          "Download results",
+          NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+          description = "Completed, failed and cancelled Sinc downloads"
+          setShowBadge(false)
+        }
+      )
     }
   }
 
   /** The foreground notification the service is bound to (works before RN is up). */
-  fun buildNotification(context: Context): Notification = build(context, describe())
+  fun buildNotification(context: Context): Notification =
+    buildPrimary(context, orderedJobs().firstOrNull())
 
+  @Synchronized
   fun refresh() {
     val ctx = react ?: return
-    if (count() == 0) {
-      NotificationManagerCompat.from(ctx).cancel(NOTIF_ID)
-      stopServiceIfIdle()
-      return
+    val jobs = orderedJobs()
+    val primaryId = jobs.firstOrNull()?.jobId
+    val live = jobs.mapTo(HashSet()) { it.jobId }
+    // Cancel cards whose job vanished without an end() (defensive; end/cancel
+    // normally remove their own card).
+    for ((jobId, id) in progressNotifIds.toMap()) {
+      if (jobId !in live) {
+        cancelNotification(id)
+        progressNotifIds.remove(jobId)
+      }
     }
+    jobs.forEach { job ->
+      if (job.jobId == primaryId) {
+        // The primary job owns the stable foreground id. If it was secondary
+        // before (the previous primary ended), drop its second card first.
+        cancelNotification(progressNotifIds.remove(job.jobId))
+        notifySafe(ctx, NOTIF_ID, buildProgress(ctx, job))
+      } else {
+        val id =
+          progressNotifIds.computeIfAbsent(job.jobId) { nextProgressNotifId.getAndIncrement() }
+        notifySafe(ctx, id, buildProgress(ctx, job))
+      }
+    }
+    if (jobs.isEmpty()) {
+      cancelNotification(NOTIF_ID)
+      clearPersistedIds()
+      stopServiceIfIdle()
+    } else {
+      persistProgressIds()
+    }
+  }
+
+  private fun notifySafe(ctx: Context, id: Int, notification: Notification) {
     try {
-      NotificationManagerCompat.from(ctx).notify(NOTIF_ID, buildNotification(ctx))
-    } catch (e: SecurityException) {
+      NotificationManagerCompat.from(ctx).notify(id, notification)
+    } catch (_: SecurityException) {
       // POST_NOTIFICATIONS denied: the transfer still runs in the foreground.
     }
   }
 
-  private fun build(context: Context, info: NotifInfo): Notification {
+  private fun cancelNotification(id: Int?) {
+    val ctx = react ?: return
+    if (id == null) return
+    try {
+      NotificationManagerCompat.from(ctx).cancel(id)
+    } catch (_: SecurityException) {
+    }
+  }
+
+  private fun postResult(
+    jobId: String,
+    job: Job,
+    outcome: String,
+    message: String? = null,
+  ) {
+    val ctx = react ?: return
+    val id = resultNotifIds.computeIfAbsent(jobId) { nextResultNotifId.getAndIncrement() }
+    loadArtwork(job.artworkUrl)
+    notifySafe(ctx, id, buildResult(ctx, job, outcome, message))
+  }
+
+  private fun buildProgress(context: Context, job: JobView): Notification {
     ensureChannel(context)
-    val stageText = when (info.stage) {
+    val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+      .setContentTitle(job.title)
+      .setContentText(progressText(job))
+      .setSubText(job.artist)
+      .setLargeIcon(job.artworkUrl?.let { artworkCache[it] })
+      .setSmallIcon(R.drawable.ic_sinc_notification)
+      .setContentIntent(openDownloadsIntent(context))
+      .setOngoing(true)
+      .setOnlyAlertOnce(true)
+      .setShowWhen(false)
+      .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+      .setPriority(NotificationCompat.PRIORITY_LOW)
+      .setProgress(
+        100,
+        if (job.paused) 0 else job.pct,
+        job.paused || job.indeterminate || job.stage != null,
+      )
+    addActions(builder, context, job.jobId)
+    return builder.build()
+  }
+
+  /** Foreground card: the primary job, or a placeholder during service start. */
+  private fun buildPrimary(context: Context, job: JobView?): Notification {
+    if (job != null) return buildProgress(context, job)
+    ensureChannel(context)
+    return NotificationCompat.Builder(context, CHANNEL_ID)
+      .setContentTitle("Sinc downloads")
+      .setContentText("Preparing download…")
+      .setSmallIcon(R.drawable.ic_sinc_notification)
+      .setContentIntent(openDownloadsIntent(context))
+      .setOngoing(true)
+      .setOnlyAlertOnce(true)
+      .setShowWhen(false)
+      .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+      .setPriority(NotificationCompat.PRIORITY_LOW)
+      .setProgress(0, 0, true)
+      .build()
+  }
+
+  private fun buildResult(
+    context: Context,
+    job: Job,
+    outcome: String,
+    message: String?,
+  ): Notification {
+    ensureChannel(context)
+    val text = when (outcome) {
+      OUTCOME_COMPLETED -> "Download complete · saved to Music/Sinc"
+      OUTCOME_CANCELLED -> "Download cancelled"
+      else ->
+        if (message.isNullOrBlank()) "Download failed"
+        else "Download failed — ${message.take(160)}"
+    }
+    return NotificationCompat.Builder(context, RESULTS_CHANNEL_ID)
+      .setContentTitle(job.title)
+      .setContentText(text)
+      .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+      .setSubText(job.artist)
+      .setLargeIcon(job.artworkUrl?.let { artworkCache[it] })
+      .setSmallIcon(R.drawable.ic_sinc_notification)
+      .setContentIntent(openDownloadsIntent(context))
+      .setAutoCancel(true)
+      .setOnlyAlertOnce(true)
+      .setCategory(NotificationCompat.CATEGORY_STATUS)
+      .setPriority(NotificationCompat.PRIORITY_LOW)
+      .build()
+  }
+
+  private fun progressText(job: JobView): String {
+    val stageText = when (job.stage) {
       "processing" -> "Processing audio…"
       "tagging" -> "Writing tags…"
       "validating" -> "Verifying audio…"
       else -> null
     }
-    val text = when {
-      info.paused -> "Paused ${info.pct}% — tap Resume"
+    val size = sizeText(job.doneBytes, job.totalBytes)
+    return when {
+      job.paused -> "Paused · tap Resume"
       stageText != null -> stageText
-      info.indeterminate -> "Downloading…"
-      else -> "Downloading ${info.pct}%"
+      job.indeterminate || (job.pct <= 0 && job.totalBytes <= 0L) ->
+        if (job.doneBytes > 0) "Downloading · ${formatBytes(job.doneBytes)}" else "Downloading…"
+      else -> buildString {
+        append("Downloading · ${job.pct}%")
+        if (size.isNotEmpty()) {
+          append(" · ")
+          append(size)
+        }
+      }
     }
-    val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-      .setContentTitle(info.title)
-      .setContentText(text)
-      .setOngoing(true)
-      .setSmallIcon(R.mipmap.ic_launcher)
-      .setCategory(NotificationCompat.CATEGORY_PROGRESS)
-      .setOnlyAlertOnce(true)
-      .setProgress(
-        100,
-        if (info.paused) 0 else info.pct,
-        info.paused || info.indeterminate,
-      )
-      .setContentIntent(openAppIntent(context))
-      .setPriority(NotificationCompat.PRIORITY_LOW)
-    info.jobId?.let { addActions(builder, it) }
-    return builder.build()
   }
 
-  private fun addActions(builder: NotificationCompat.Builder, jobId: String) {
-    val ctx = react ?: return
+  private fun sizeText(done: Long, total: Long): String =
+    if (done > 0 && total > 0) "${formatBytes(done)} of ${formatBytes(total)}"
+    else if (done > 0) formatBytes(done)
+    else ""
+
+  private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0) return ""
+    if (bytes < 1024) return "$bytes B"
+    val kb = bytes / 1024.0
+    if (kb < 1024) return String.format(Locale.US, "%.0f KB", kb)
+    val mb = kb / 1024.0
+    if (mb < 1024) return String.format(Locale.US, "%.1f MB", mb)
+    return String.format(Locale.US, "%.2f GB", mb / 1024.0)
+  }
+
+  private fun addActions(builder: NotificationCompat.Builder, context: Context, jobId: String) {
     val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     val action = { action: String, label: String ->
       NotificationCompat.Action.Builder(
         0,
         label,
         PendingIntent.getBroadcast(
-          ctx,
+          context,
           // The request code must be unique per (job, action): keying only on
           // the action overwrote Pause/Cancel across concurrent downloads, so
           // tapping a button could hit the wrong transfer.
           "$jobId:$action".hashCode(),
-          Intent(ctx, DownloadActionReceiver::class.java)
+          Intent(context, DownloadActionReceiver::class.java)
             .setAction(action)
             .putExtra(EXTRA_JOB, jobId),
           flags,
@@ -544,14 +821,77 @@ object SincDownloads {
     builder.addAction(action(ACTION_CANCEL, "Cancel"))
   }
 
-  private fun openAppIntent(ctx: Context): PendingIntent? {
-    val launch = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName) ?: return null
-    return PendingIntent.getActivity(
+  /** Opens the in-app Downloads screen (deep link mirrors the playback actions). */
+  private fun openDownloadsIntent(ctx: Context): PendingIntent =
+    PendingIntent.getActivity(
       ctx,
-      4,
-      launch,
+      5,
+      Intent(ctx, MainActivity::class.java).apply {
+        action = Intent.ACTION_VIEW
+        data = Uri.parse("sinc://downloads")
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+      },
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
+
+  private fun loadArtwork(url: String?) {
+    val clean = url?.trim()?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+      ?: return
+    if (artworkCache.containsKey(clean) || artworkFailed.contains(clean)) return
+    if (!artworkLoading.add(clean)) return
+    artworkExecutor.execute {
+      try {
+        val bitmap = fetchArtwork(clean)
+        if (bitmap != null) {
+          if (artworkCache.size >= 64) artworkCache.clear()
+          artworkCache[clean] = bitmap
+          refresh()
+        } else {
+          artworkFailed.add(clean)
+        }
+      } catch (_: Exception) {
+        artworkFailed.add(clean)
+      } finally {
+        artworkLoading.remove(clean)
+      }
+    }
+  }
+
+  private fun fetchArtwork(url: String): Bitmap? {
+    val connection = (URL(url).openConnection() as? HttpURLConnection) ?: return null
+    connection.connectTimeout = 8_000
+    connection.readTimeout = 8_000
+    connection.instanceFollowRedirects = true
+    return try {
+      if (connection.responseCode !in 200..299) return null
+      val bytes = connection.inputStream.use { input ->
+        val out = ByteArrayOutputStream()
+        val buffer = ByteArray(16 * 1024)
+        var total = 0
+        while (true) {
+          val read = input.read(buffer)
+          if (read < 0) break
+          total += read
+          if (total > 6 * 1024 * 1024) return null
+          out.write(buffer, 0, read)
+        }
+        out.toByteArray()
+      }
+      val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+      BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+      var sample = 1
+      while (bounds.outWidth / sample > 512 || bounds.outHeight / sample > 512) sample *= 2
+      BitmapFactory.decodeByteArray(
+        bytes,
+        0,
+        bytes.size,
+        BitmapFactory.Options().apply { inSampleSize = sample },
+      )
+    } catch (_: Exception) {
+      null
+    } finally {
+      connection.disconnect()
+    }
   }
 
   const val ACTION_CANCEL = "com.sinc.app.DL_CANCEL"

@@ -545,10 +545,14 @@ class SincYtModule(reactContext: ReactApplicationContext) :
     SincDownloads.begin(
       jobId,
       title ?: destinationFileName,
+      artist = artist,
+      artworkUrl = artworkUrl,
       kill = {},
       cleanup = { deleteJobFiles(outDir, destinationFileName) },
     )
     downloadExecutor.execute {
+      var outcome = SincDownloads.OUTCOME_COMPLETED
+      var failure: String? = null
       try {
         Log.i(LOG_TAG, "download entry jobId=$jobId mediaUrl=${mediaUrl?.take(60) ?: "<none>"} resume=$resumePart")
         if (!ensureReady()) throw IllegalStateException("The on-device yt-dlp module is unavailable")
@@ -750,26 +754,33 @@ class SincYtModule(reactContext: ReactApplicationContext) :
           }
         )
       } catch (e: DownloadCancelledException) {
+        outcome = SincDownloads.OUTCOME_CANCELLED
         Log.i(LOG_TAG, "download cancelled jobId=$jobId: ${e.message}")
         promise.reject("DOWNLOAD_CANCELLED", e.message)
       } catch (e: FingerprintRejectedException) {
         if (isStopped(jobId)) {
+          outcome = SincDownloads.OUTCOME_CANCELLED
           Log.i(LOG_TAG, "download cancelled during verification jobId=$jobId")
           promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
         } else {
+          outcome = SincDownloads.OUTCOME_FAILED
+          failure = e.message
           Log.w(LOG_TAG, "download rejected jobId=$jobId: ${e.message}")
           promise.reject(e.code, e.message)
         }
       } catch (e: Exception) {
         if (isStopped(jobId)) {
+          outcome = SincDownloads.OUTCOME_CANCELLED
           Log.i(LOG_TAG, "download cancelled jobId=$jobId: ${e.message}")
           promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
         } else {
+          outcome = SincDownloads.OUTCOME_FAILED
+          failure = e.message
           Log.e(LOG_TAG, "download failed jobId=$jobId: ${e.message}", e)
           promise.reject("YT_DOWNLOAD_ERROR", e.message)
         }
       } finally {
-        SincDownloads.end(jobId)
+        SincDownloads.end(jobId, outcome, failure)
       }
     }
   }
@@ -2334,10 +2345,11 @@ class SincYtModule(reactContext: ReactApplicationContext) :
               lastTime = now
               if (total > 0) {
                 val pct = ((written.toDouble() / total) * 100).toInt().coerceIn(0, 99)
-                SincDownloads.update(jobId, pct)
+                SincDownloads.updateBytes(jobId, pct, written, total)
                 SincDownloads.emitYtProgress(jobId, pct, formatSpeedText(speed))
               } else {
                 SincDownloads.updateUnknown(jobId)
+                SincDownloads.updateBytes(jobId, null, written, 0)
                 SincDownloads.emitYtProgress(
                   jobId,
                   null,
@@ -2853,8 +2865,15 @@ class SincYtModule(reactContext: ReactApplicationContext) :
       // The server never sent a length. Keep the row/notification honest
       // instead of treating "unknown" as 1 byte and jumping to 99%.
       SincDownloads.updateUnknown(jobId)
+      val done = update.bytesDownloaded
+      if (done != null && done > 0) SincDownloads.updateBytes(jobId, null, done, 0)
     } else {
-      SincDownloads.update(jobId, update.percent)
+      SincDownloads.updateBytes(
+        jobId,
+        update.percent,
+        update.bytesDownloaded ?: 0L,
+        update.bytesTotal ?: 0L,
+      )
     }
     Log.d(
       LOG_TAG,

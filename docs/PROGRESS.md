@@ -195,6 +195,76 @@ Known limitations:
 - If a pinned device disconnects, Android falls back to default routing on its
   own; the picker refreshes its highlight the next time it is opened.
 
+## Phase 6 — Per-job download notifications ✅
+
+Implemented:
+
+- `SincDownloads` now keeps real metadata per job (title, artist, artwork URL)
+  plus bytes done/total and the post-transfer stage. Both engines feed it real
+  per-job progress and a real outcome (`completed` / `failed` / `cancelled`)
+  instead of a generic `end()`:
+  - `SincDownloaderModule` (HTTP) reports Content-Length/Content-Range byte
+    counts, and every verification path (unreadable audio, duration mismatch,
+    fingerprint mismatch/unavailable, truncation, network) reports a specific
+    failure reason.
+  - `SincYtModule` (yt-dlp) reports parsed bytes/percent and tracks the outcome
+    through its `finally` (pause aborts are not reported as failures).
+- Progress notification (`sinc_downloads`, LOW) **is** the foreground-service
+  notification for the primary job, so a single download produces exactly one
+  card. Concurrent jobs get their own card (`95000+`) and become primary in
+  start order as earlier jobs finish. Each card shows real title/artist/artwork,
+  `Downloading · 42% · 12.4 MB of 40.1 MB`, an indeterminate bar when the server
+  sends no length, stage text (`Processing audio…`, `Writing tags…`,
+  `Verifying audio…`), and Pause/Resume + Cancel actions with unique
+  per-(job, action) request codes. Tapping opens `sinc://downloads`.
+- New `sinc_download_results` channel (LOW, no badge) holds one result card per
+  job: completed (`Download complete · saved to Music/Sinc`), failed (with the
+  actual reason), cancelled. Auto-cancel, artwork, tap opens Downloads. Result
+  ids live in a different range (`1,000,000+`) so a result can never overwrite
+  the next transfer's progress.
+- No duplicates / race safety: notification ids are stable per live job; a
+  retry (same job id) cancels the previous result card; cancel is atomic
+  (`remove` has one winner) and posts exactly one result; JS cleanup (`remove`)
+  no longer deletes a cancelled/completed card; a paused transport abort is not
+  rendered as a failure.
+- Process-death hygiene: active progress ids and the FGS id are persisted to
+  `SharedPreferences`; the first attach in a new process cancels them, so a
+  download killed with the process cannot leave undismissable stale cards.
+- `linking.ts` gained `Downloads: 'downloads'` so the notification content
+  intent opens the existing Downloads screen (and the PIN gate still applies).
+- Artwork prefetch for notification large icons: capped at 64 cached bitmaps,
+  two-pass downsample to ≤512 px, 6 MB cap and 8 s timeouts on a 2-thread
+  executor; failures are remembered and not retried on every progress tick.
+
+Checks:
+
+- `./gradlew :app:compileDebugKotlin` ✅
+- `./gradlew :app:assembleRelease` ✅
+- `npm run typecheck -w @sinc/mobile` ✅
+- `npm test -w @sinc/mobile` ✅ 315 passed.
+- On device (release): foreground card showed a live
+  `Downloading · 65% · 2.3 MB of 3.5 MB` with title/artist/artwork and two
+  actions; completion posted a `sinc_download_results` card (AUTO_CANCEL) with
+  artwork; tapping it opened the in-app Downloads screen via `sinc://downloads`;
+  the download service stopped when the queue emptied.
+- 🕒 Pending device taps (phone disconnected before capture): notification
+  Cancel → result card, and two concurrent download cards.
+
+Bug found on device:
+
+- A dismissed completed card was re-posted when a later job's artwork finished
+  loading. Fixed by removing the result-card re-render path; result cards now
+  render once from the already-prefetched artwork.
+
+Known limitations:
+
+- Result cards are silent (LOW channel) by design — no heads-up for a finished
+  download.
+- If POST_NOTIFICATIONS is denied, downloads still transfer; notification posts
+  are skipped (SecurityException is swallowed).
+- The foreground notification id belongs to the primary job; when it ends, the
+  FGS card switches to the next job (same id, no duplicate).
+
 ## Device findings (Samsung Galaxy A05, Android 14, release build)
 
 Verified on hardware:
@@ -243,9 +313,7 @@ Bug found and fixed — **Show Lyrics blocked by Android 14 BAL**:
 
 ## Upcoming
 
-- Phase 2: JS playback-state reconciliation and favorite bridge.
-- Phase 3: Show Lyrics deep link and notification action verification.
-- Phase 4: Lyrics screen visual/interaction refinement.
-- Phase 5: Expanded player, audio output, and mini-player lyrics shortcut.
-- Phase 6: Per-job download notifications.
-- Phase 7: Background playback hardening and full A–G test pass.
+- Phase 7: Background playback hardening and the full A–G matrix (audio focus,
+  headphone disconnect, interruptions, end-of-queue/track switching, media
+  buttons, service lifecycle), plus the Phase 6 device follow-ups that need the
+  phone reconnected: notification Cancel → result card and concurrent-job cards.
