@@ -323,6 +323,40 @@ describe('downloadsStore (local)', () => {
     expect(useDownloadsStore.getState().downloads.every((d) => d.phase === 'completed')).toBe(true);
   });
 
+  it('keeps every overflow download queued instead of failing it', async () => {
+    const gates = holdDirectDownloads();
+    findArchive.mockImplementation(async (candidate: CanonicalTrack) => ({
+      url: `https://archive.org/download/${candidate.id}.mp3`,
+      provider: 'archive',
+      mimeType: 'audio/mpeg',
+    }));
+    const tracks = ['overflow-a', 'overflow-b', 'overflow-c', 'overflow-d', 'overflow-e'].map(
+      track
+    );
+    const pending = tracks.map((candidate) =>
+      useDownloadsStore.getState().downloadTrack(candidate)
+    );
+
+    await vi.waitFor(() => expect(downloaderMock.download).toHaveBeenCalledTimes(2));
+    const records = useDownloadsStore.getState().downloads;
+    expect(records.filter((record) => record.phase === 'transfer')).toHaveLength(2);
+    expect(records.filter((record) => record.phase === 'queued')).toHaveLength(3);
+    expect(records.filter((record) => record.phase === 'failed')).toHaveLength(0);
+
+    const queued = records.filter((record) => record.phase === 'queued');
+    for (const record of queued) {
+      await useDownloadsStore.getState().cancelDownload(record.jobId);
+    }
+    for (const record of records.filter((record) => record.phase === 'transfer')) {
+      completeDownload(gates, record.jobId);
+    }
+    await Promise.all(pending);
+
+    expect(useDownloadsStore.getState().downloads.filter((d) => d.phase === 'failed')).toHaveLength(
+      0
+    );
+  });
+
   it('reports post-transfer stages monotonically and ignores stale events', async () => {
     const gates = holdDirectDownloads();
     findArchive.mockResolvedValue({
@@ -442,6 +476,20 @@ describe('downloadsStore (local)', () => {
     });
     await pending;
     expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('completed');
+  });
+
+  it('keeps an explicit no-engine policy when Retry All retries a bulk failure', async () => {
+    const t = track('itunes:bulk-retry-all');
+    findArchive.mockResolvedValue(null);
+    await useDownloadsStore.getState().downloadTrack(t, { priority: 'bulk' });
+    expect(useDownloadsStore.getState().getDownload(t.id)?.phase).toBe('failed');
+
+    await useDownloadsStore.getState().retryDownload(jobIdForTrack(t), { allowEngine: false });
+
+    expect(ytMock.download).not.toHaveBeenCalled();
+    const record = useDownloadsStore.getState().getDownload(t.id);
+    expect(record?.phase).toBe('failed');
+    expect(record?.error).toMatch(/Bulk downloads do not use the on-device engine/);
   });
 
   it('keeps the bulk no-fallback policy across restart', async () => {
