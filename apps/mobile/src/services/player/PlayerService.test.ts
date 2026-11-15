@@ -619,4 +619,51 @@ describe('playerService', () => {
     expect(usePlayerStore.getState().status).toBe('error');
     expect(usePlayerStore.getState().errorMessage).toBe('Player crashed');
   });
+
+  it('records playStats and artistPlayStats only after reaching at least 50% of the song', async () => {
+    stubResolvePlayback([track('itunes:50')]);
+    useLibraryStore.setState({ playStats: {}, artistPlayStats: {} });
+
+    await playerService.playTrack(track('itunes:50'));
+    playerService.initialize();
+
+    // Progress at 20% (< 50%)
+    progressListeners.forEach((l) =>
+      l({
+        trackId: 'itunes:50',
+        positionMs: 20_000,
+        durationMs: 100_000,
+        isPlaying: true,
+      })
+    );
+
+    // Most played stats should NOT be bumped yet
+    expect(useLibraryStore.getState().playStats['itunes:50']).toBeUndefined();
+    expect(useLibraryStore.getState().artistPlayStats['Solo Artist']).toBeUndefined();
+
+    // Progress reaches 50%
+    progressListeners.forEach((l) =>
+      l({
+        trackId: 'itunes:50',
+        positionMs: 50_000,
+        durationMs: 100_000,
+        isPlaying: true,
+      })
+    );
+
+    // Most played stats should now be credited!
+    expect(useLibraryStore.getState().playStats['itunes:50']?.count).toBe(1);
+    expect(useLibraryStore.getState().artistPlayStats['Artist']).toBe(1);
+
+    // Later progress at 80% should not double-count
+    progressListeners.forEach((l) =>
+      l({
+        trackId: 'itunes:50',
+        positionMs: 80_000,
+        durationMs: 100_000,
+        isPlaying: true,
+      })
+    );
+    expect(useLibraryStore.getState().playStats['itunes:50']?.count).toBe(1);
+  });
 });

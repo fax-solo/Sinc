@@ -80,6 +80,8 @@ class PlayerService {
   private hasStarted = false;
   /** Id of the track already recorded as "recently played" for the current load. */
   private recordedTrackId: string | null = null;
+  /** Id of the track already credited for most played (>= 50% duration reached). */
+  private recordedFiftyPercentTrackId: string | null = null;
   /** Bumped on every load so stale async work is discarded. */
   private generation = 0;
   /** Serializes commands to keep rapid taps from interleaving. */
@@ -343,6 +345,7 @@ class PlayerService {
     this.generation += 1;
     this.hasStarted = false;
     this.staleTrackId = null;
+    this.recordedFiftyPercentTrackId = null;
   }
 
   private onProgress(event: NativeProgressEvent): void {
@@ -350,12 +353,30 @@ class PlayerService {
       this.hasStarted = true;
       if (event.trackId && this.recordedTrackId !== event.trackId) {
         this.recordedTrackId = event.trackId;
+        this.recordedFiftyPercentTrackId = null;
         const current = selectCurrentTrack(usePlayerStore.getState());
         if (current && current.id === event.trackId) {
           useLibraryStore.getState().recordPlayed(current);
-          useLibraryStore.getState().recordPlayStarted(current);
           recordPlay(current);
           track('playback:start', current.id);
+        }
+      }
+
+      // Only credit the song and artist in "most played" stats once at least 50% of the song is played
+      const reachedFiftyPercent =
+        event.durationMs > 0
+          ? event.positionMs >= event.durationMs * 0.5
+          : event.positionMs >= 30_000;
+
+      if (
+        event.trackId &&
+        this.recordedFiftyPercentTrackId !== event.trackId &&
+        reachedFiftyPercent
+      ) {
+        this.recordedFiftyPercentTrackId = event.trackId;
+        const current = selectCurrentTrack(usePlayerStore.getState());
+        if (current && current.id === event.trackId) {
+          useLibraryStore.getState().recordPlayStarted(current);
         }
       }
     }
@@ -467,6 +488,12 @@ class PlayerService {
       return;
     }
 
+    // Ensure the 50% milestone is credited if playback reached completion
+    if (current && this.recordedFiftyPercentTrackId !== trackId) {
+      this.recordedFiftyPercentTrackId = trackId;
+      useLibraryStore.getState().recordPlayStarted(current);
+    }
+
     // The current track actually played to completion.
     useLibraryStore.getState().recordPlayCompleted(current);
     track('playback:complete', trackId);
@@ -498,6 +525,7 @@ class PlayerService {
     const generation = ++this.generation;
     this.hasStarted = false;
     this.recordedTrackId = null;
+    this.recordedFiftyPercentTrackId = null;
     this.staleTrackId = null;
     store.setStatus('loading');
     store.setError(null);
