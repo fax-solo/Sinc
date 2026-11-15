@@ -16,6 +16,8 @@ import { selectCurrentTrack, usePlayerStore } from '../../services/player/player
 import { playerService } from '../../services/player/PlayerService';
 import { openSongMenu } from '../songMenu/songMenuStore';
 import { shuffled } from '../../services/local/affinity';
+import { TrackSelectionFooter } from '../selection/TrackSelectionFooter';
+import { useTrackSelection } from '../selection/useTrackSelection';
 import type { RootStackParamList } from '../../app/navigation/types';
 
 export function RecentlyPlayedScreen() {
@@ -28,6 +30,7 @@ export function RecentlyPlayedScreen() {
   const currentTrack = usePlayerStore(selectCurrentTrack);
   const playing = usePlayerStore((state) => state.status === 'playing');
   const [clearOpen, setClearOpen] = useState(false);
+  const selection = useTrackSelection();
 
   const downloadedIds = new Set(
     downloads
@@ -37,14 +40,19 @@ export function RecentlyPlayedScreen() {
 
   const play = (index: number, shuffle = false) => {
     if (tracks.length === 0) return;
-    void playerService.playQueue(shuffle ? shuffled(tracks, Math.random) : tracks, shuffle ? 0 : index);
+    void playerService.playQueue(
+      shuffle ? shuffled(tracks, Math.random) : tracks,
+      shuffle ? 0 : index
+    );
   };
 
   return (
     <Screen padded>
       <FlatList
+        style={{ flex: 1 }}
         data={tracks}
         keyExtractor={(item) => item.id}
+        extraData={selection.active ? selection.selectedIds : false}
         contentContainerStyle={{ paddingBottom: spacing.xxl + insets.bottom }}
         showsVerticalScrollIndicator={false}
         ListHeaderComponent={
@@ -94,6 +102,10 @@ export function RecentlyPlayedScreen() {
               >
                 <TextButton label="Play all" onPress={() => play(0)} />
                 <TextButton label="Shuffle" onPress={() => play(0, true)} />
+                <TextButton
+                  label={selection.active ? 'Done' : 'Select'}
+                  onPress={selection.active ? selection.cancel : () => selection.begin()}
+                />
               </View>
             ) : null}
           </View>
@@ -113,19 +125,33 @@ export function RecentlyPlayedScreen() {
             downloaded={downloadedIds.has(item.id)}
             isCurrent={currentTrack?.id === item.id}
             isPlaying={playing}
-            onPress={() => play(index)}
-            onMore={() =>
-              openSongMenu(item, {
-                sourceLabel: 'Recently played',
-                onRemoveFromHistory: () => {
-                  removeFromHistory(item.id);
-                  toast('Removed from listening history', 'success');
-                },
-              })
+            selectionMode={selection.active}
+            selected={selection.isSelected(item.id)}
+            onLongPress={() => selection.toggle(item.id)}
+            onPress={() => {
+              if (selection.active) {
+                selection.toggle(item.id);
+                return;
+              }
+              play(index);
+            }}
+            onMore={
+              selection.active
+                ? undefined
+                : () =>
+                    openSongMenu(item, {
+                      sourceLabel: 'Recently played',
+                      onRemoveFromHistory: () => {
+                        removeFromHistory(item.id);
+                        toast('Removed from listening history', 'success');
+                      },
+                    })
             }
           />
         )}
       />
+
+      {selection.active ? <TrackSelectionFooter selection={selection} tracks={tracks} /> : null}
 
       <ConfirmDialog
         visible={clearOpen}

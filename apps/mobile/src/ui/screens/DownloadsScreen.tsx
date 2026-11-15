@@ -22,6 +22,8 @@ import { playerService } from '../../services/player/PlayerService';
 import { openSongMenu } from '../songMenu/songMenuStore';
 import { shuffled } from '../../services/local/affinity';
 import { formatBytes } from '../../utils/format';
+import { TrackSelectionFooter } from '../selection/TrackSelectionFooter';
+import { useTrackSelection } from '../selection/useTrackSelection';
 import type { RootStackParamList } from '../../app/navigation/types';
 
 export function DownloadsScreen() {
@@ -40,6 +42,7 @@ export function DownloadsScreen() {
   const playing = usePlayerStore((state) => state.status === 'playing');
   const [pendingRemove, setPendingRemove] = useState<DownloadRecord | null>(null);
   const [pendingCancelAll, setPendingCancelAll] = useState(false);
+  const selection = useTrackSelection();
 
   // The concurrency cap is two *running* transfers, not a two-item queue.
   // Keep queued rows in their own section so overflow is visibly waiting, not
@@ -329,6 +332,10 @@ export function DownloadsScreen() {
           <View style={{ flexDirection: 'row', gap: spacing.md }}>
             <TextButton label="Play" onPress={() => playAll(false)} />
             <TextButton label="Shuffle" onPress={() => playAll(true)} />
+            <TextButton
+              label={selection.active ? 'Done' : 'Select'}
+              onPress={selection.active ? selection.cancel : () => selection.begin()}
+            />
           </View>
         </View>
       ) : null}
@@ -338,8 +345,10 @@ export function DownloadsScreen() {
   return (
     <Screen padded>
       <FlatList
+        style={{ flex: 1 }}
         data={completed}
         keyExtractor={(item) => item.jobId}
+        extraData={selection.active ? selection.selectedIds : false}
         ListHeaderComponent={header}
         contentContainerStyle={{ paddingBottom: spacing.xxl + insets.bottom }}
         showsVerticalScrollIndicator={false}
@@ -358,6 +367,8 @@ export function DownloadsScreen() {
           <SongRow
             track={item.track}
             downloaded
+            selectionMode={selection.active}
+            selected={selection.isSelected(item.track.id)}
             subtitle={`${item.track.artists.map((artist) => artist.name).join(', ')} · ${formatBytes(
               item.sizeBytes ?? 0
             )}${
@@ -367,14 +378,27 @@ export function DownloadsScreen() {
             }`}
             isCurrent={currentTrack?.id === item.track.id}
             isPlaying={playing}
+            onLongPress={() => selection.toggle(item.track.id)}
             onPress={() => {
+              if (selection.active) {
+                selection.toggle(item.track.id);
+                return;
+              }
               const index = completedTracks.findIndex((track) => track.id === item.track.id);
               void playerService.playQueue(completedTracks, Math.max(0, index));
             }}
-            onMore={() => openSongMenu(item.track, { sourceLabel: 'Downloaded' })}
+            onMore={
+              selection.active
+                ? undefined
+                : () => openSongMenu(item.track, { sourceLabel: 'Downloaded' })
+            }
           />
         )}
       />
+
+      {selection.active ? (
+        <TrackSelectionFooter selection={selection} tracks={completedTracks} showDownload={false} />
+      ) : null}
 
       <ConfirmDialog
         visible={pendingRemove != null}

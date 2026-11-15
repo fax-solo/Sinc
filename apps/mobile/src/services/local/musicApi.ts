@@ -8,6 +8,7 @@
  * Screens keep importing from `../../api/music`, which re-exports this module.
  */
 import type {
+  ArtistDetail,
   CanonicalAlbum,
   CanonicalArtist,
   CanonicalPlaylist,
@@ -21,6 +22,7 @@ import {
   scoreTrack,
   scorePlaylist,
   mergeAndDedupeTracks,
+  deduplicateAlbums,
   parseQuery,
 } from '@sinc/shared';
 import { config } from '../../app/config';
@@ -28,6 +30,8 @@ import { useLibraryStore } from '../../services/library/libraryStore';
 import { useDownloadsStore } from '../../services/library/downloadsStore';
 import { deezer, isDeezerId, stripDeezerPrefix } from '../../services/providers/deezer';
 import { itunes, stripItunesPrefix } from '../../services/providers/itunes';
+import { deduplicateArtists } from './artistIdentity';
+import { artistHubService } from './artistHubService';
 import { lrclib } from '../../services/providers/lrclib';
 import { providerFetchText } from '../../services/providers/http';
 import {
@@ -1205,7 +1209,9 @@ export const musicApi = {
         itunesTracks,
         deezerTracks,
         itunesArtists,
+        deezerArtists,
         itunesAlbums,
+        deezerAlbums,
         itunesPlaylists,
         deezerPlaylists,
       ] = await Promise.all([
@@ -1224,8 +1230,18 @@ export const musicApi = {
               .searchArtists(trimmed, fetchLimit, providerOptions)
               .catch(() => [] as CanonicalArtist[])
           : Promise.resolve([]),
+        type === 'all' || type === 'artists'
+          ? deezer
+              .searchArtists(trimmed, fetchLimit, providerOptions)
+              .catch(() => [] as CanonicalArtist[])
+          : Promise.resolve([]),
         type === 'all' || type === 'albums'
           ? itunes
+              .searchAlbums(trimmed, fetchLimit, providerOptions)
+              .catch(() => [] as CanonicalAlbum[])
+          : Promise.resolve([]),
+        type === 'all' || type === 'albums'
+          ? deezer
               .searchAlbums(trimmed, fetchLimit, providerOptions)
               .catch(() => [] as CanonicalAlbum[])
           : Promise.resolve([]),
@@ -1247,6 +1263,16 @@ export const musicApi = {
         ? [...deezerTracks, ...itunesTracks]
         : [...itunesTracks, ...deezerTracks];
       const merged = mergeAndDedupeTracks(poolTracks, trimmed);
+
+      const poolArtists = isNonLatin(trimmed)
+        ? [...deezerArtists, ...itunesArtists]
+        : [...itunesArtists, ...deezerArtists];
+      const mergedArtists = deduplicateArtists(poolArtists);
+
+      const poolAlbums = isNonLatin(trimmed)
+        ? [...deezerAlbums, ...itunesAlbums]
+        : [...itunesAlbums, ...deezerAlbums];
+      const mergedAlbums = deduplicateAlbums(poolAlbums);
 
       const scoredTracks = merged.map((track) => {
         const scored = scoreTrack(trimmed, track);
@@ -1273,21 +1299,21 @@ export const musicApi = {
           },
         },
         artists: {
-          data: itunesArtists.slice(0, limit),
+          data: mergedArtists.slice(0, limit),
           meta: {
             page,
             limit,
-            total: itunesArtists.length,
-            totalPages: Math.max(1, Math.ceil(itunesArtists.length / limit)),
+            total: mergedArtists.length,
+            totalPages: Math.max(1, Math.ceil(mergedArtists.length / limit)),
           },
         },
         albums: {
-          data: itunesAlbums.slice(0, limit),
+          data: mergedAlbums.slice(0, limit),
           meta: {
             page,
             limit,
-            total: itunesAlbums.length,
-            totalPages: Math.max(1, Math.ceil(itunesAlbums.length / limit)),
+            total: mergedAlbums.length,
+            totalPages: Math.max(1, Math.ceil(mergedAlbums.length / limit)),
           },
         },
         playlists: {
@@ -1334,6 +1360,14 @@ export const musicApi = {
       : await itunes.lookupArtist(stripItunesPrefix(id));
     if (!result) throw new Error(`Artist not found: ${id}`);
     return result;
+  },
+
+  async getArtistDetail(
+    id: string,
+    fallbackName?: string,
+    options?: { forceRefresh?: boolean }
+  ): Promise<ArtistDetail> {
+    return artistHubService.getArtistDetail(id, fallbackName, options);
   },
 
   async getPlaylist(

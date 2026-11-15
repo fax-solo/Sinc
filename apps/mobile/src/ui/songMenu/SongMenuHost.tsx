@@ -7,26 +7,16 @@ import { Artwork } from '../components/Artwork';
 import { BottomSheet, ConfirmDialog, SheetRow, toast } from '../components/Overlays';
 import { useSongMenuStore } from './songMenuStore';
 import { playerService } from '../../services/player/PlayerService';
-import { useLibraryStore, type LocalPlaylist } from '../../services/library/libraryStore';
+import { useLibraryStore } from '../../services/library/libraryStore';
 import { isDownloadInProgress, useDownloadsStore } from '../../services/library/downloadsStore';
 import { useDownloadProgressStore } from '../../services/library/downloadProgressStore';
 import { useLockStore } from '../../features/lock/lockStore';
 import { navigateTo } from '../navigation/navigation';
 import { shareEntity } from '../../utils/share';
 import { formatDuration } from '../../utils/format';
+import { nextPlaylistName } from '../../services/library/playlistNames';
 
 type Mode = 'main' | 'playlists' | 'details';
-
-/** A new-playlist action should not create a pile of identically named rows. */
-function nextPlaylistName(playlists: LocalPlaylist[]): string {
-  const base = 'New playlist';
-  if (!playlists.some((playlist) => playlist.name === base)) return base;
-  for (let index = 2; index < 10_000; index += 1) {
-    const candidate = `${base} ${index}`;
-    if (!playlists.some((playlist) => playlist.name === candidate)) return candidate;
-  }
-  return `${base} ${Date.now()}`;
-}
 
 export function SongMenuHost() {
   const track = useSongMenuStore((state) => state.track);
@@ -77,9 +67,7 @@ export function SongMenuHost() {
   const isDownloaded = download?.phase === 'completed' && Boolean(download.localUri);
   const isDownloading = download ? isDownloadInProgress(download.phase) : false;
   const canDownload = !isDownloaded && !isDownloading;
-  const downloadPercent = download
-    ? (liveProgress[download.jobId] ?? download.progress)
-    : 0;
+  const downloadPercent = download ? (liveProgress[download.jobId] ?? download.progress) : 0;
   const artist = track.artists[0];
   const thumb = thumbsUp[track.id] ? 'up' : thumbsDown[track.id] ? 'down' : undefined;
   const trackHidden = hiddenTrackIds.includes(track.id);
@@ -115,7 +103,9 @@ export function SongMenuHost() {
         // sheet is unsupported on iOS and brittle on Android.
         visible={!confirmRemoveDownload}
         onClose={close}
-        title={mode === 'main' ? undefined : mode === 'playlists' ? 'Add to playlist' : 'Song details'}
+        title={
+          mode === 'main' ? undefined : mode === 'playlists' ? 'Add to playlist' : 'Song details'
+        }
         scroll
       >
         {mode === 'main' ? (
@@ -161,7 +151,10 @@ export function SongMenuHost() {
               label="Play next"
               onPress={() => {
                 void playerService.playNext(track).then((added) => {
-                  toast(added ? 'Added to play next' : 'Already in your queue', added ? 'success' : 'default');
+                  toast(
+                    added ? 'Added to play next' : 'Already in your queue',
+                    added ? 'success' : 'default'
+                  );
                 });
                 close();
               }}
@@ -171,7 +164,10 @@ export function SongMenuHost() {
               label="Add to queue"
               onPress={() => {
                 void playerService.addToQueue(track).then((added) => {
-                  toast(added ? 'Added to queue' : 'Already in your queue', added ? 'success' : 'default');
+                  toast(
+                    added ? 'Added to queue' : 'Already in your queue',
+                    added ? 'success' : 'default'
+                  );
                 });
                 close();
               }}
@@ -198,7 +194,9 @@ export function SongMenuHost() {
               onPress={() => {
                 setThumb(track.id, thumb === 'up' ? 'none' : 'up');
                 toast(
-                  thumb === 'up' ? 'Recommendation feedback removed' : 'Sinc will recommend more like this',
+                  thumb === 'up'
+                    ? 'Recommendation feedback removed'
+                    : 'Sinc will recommend more like this',
                   'success'
                 );
                 close();
@@ -211,7 +209,9 @@ export function SongMenuHost() {
               onPress={() => {
                 setThumb(track.id, thumb === 'down' ? 'none' : 'down');
                 toast(
-                  thumb === 'down' ? 'Recommendation feedback removed' : 'Sinc will recommend less like this',
+                  thumb === 'down'
+                    ? 'Recommendation feedback removed'
+                    : 'Sinc will recommend less like this',
                   'success'
                 );
                 close();
@@ -309,11 +309,7 @@ export function SongMenuHost() {
                 onPress={retry}
               />
             ) : canDownload ? (
-              <SheetRow
-                icon="download-outline"
-                label="Download"
-                onPress={startDownload}
-              />
+              <SheetRow icon="download-outline" label="Download" onPress={startDownload} />
             ) : null}
             <SheetRow
               icon="information-circle-outline"
@@ -432,10 +428,18 @@ export function SongMenuHost() {
 
         {mode === 'details' ? (
           <View style={{ paddingHorizontal: spacing.lg, gap: spacing.md }}>
-            <Artwork uri={track.artworkUrl} size={220} radius={radii.lg} style={{ alignSelf: 'center' }} />
+            <Artwork
+              uri={track.artworkUrl}
+              size={220}
+              radius={radii.lg}
+              style={{ alignSelf: 'center' }}
+            />
             <View style={{ gap: 10 }}>
               <DetailLine label="Title" value={track.title} />
-              <DetailLine label="Artist" value={track.artists.map((item) => item.name).join(', ')} />
+              <DetailLine
+                label="Artist"
+                value={track.artists.map((item) => item.name).join(', ')}
+              />
               {track.album ? <DetailLine label="Album" value={track.album.title} /> : null}
               <DetailLine
                 label="Duration"
@@ -444,16 +448,14 @@ export function SongMenuHost() {
               <DetailLine
                 label="Source"
                 value={
-                  track.providerIds.deezer
-                    ? 'Deezer'
-                    : track.providerIds.itunes
-                      ? 'iTunes'
-                      : 'Sinc'
+                  track.providerIds.deezer ? 'Deezer' : track.providerIds.itunes ? 'iTunes' : 'Sinc'
                 }
               />
               <DetailLine
                 label="Offline"
-                value={isDownloaded ? 'Downloaded' : isDownloading ? 'Downloading' : 'Not downloaded'}
+                value={
+                  isDownloaded ? 'Downloaded' : isDownloading ? 'Downloading' : 'Not downloaded'
+                }
               />
               {track.isrc ? <DetailLine label="ISRC" value={track.isrc} /> : null}
             </View>
@@ -505,7 +507,13 @@ function DetailLine({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function SongMenuIcon({ onPress, label = 'More options' }: { onPress: () => void; label?: string }) {
+export function SongMenuIcon({
+  onPress,
+  label = 'More options',
+}: {
+  onPress: () => void;
+  label?: string;
+}) {
   return (
     <Pressable
       onPress={onPress}

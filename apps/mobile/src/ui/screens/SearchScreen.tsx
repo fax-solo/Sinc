@@ -13,11 +13,12 @@ import { normalizeText, rankPersonalizedTracks } from '@sinc/shared';
 import { Screen, SectionHeader } from '../components/Screen';
 import { Text } from '../components/Text';
 import { SearchInput, FilterChip } from '../components/Fields';
+import { PrimaryButton } from '../components/Buttons';
 import { SongRow } from '../components/SongRow';
 import { CategoryTile, MediaCard, ArtistCard, SectionRail } from '../components/Cards';
 import { EmptyState, ErrorState, ListSkeleton, Pill, SkeletonBlock } from '../components/State';
 import { Artwork } from '../components/Artwork';
-import { colors, spacing } from '../theme';
+import { colors, radii, spacing } from '../theme';
 import { useSearch } from '../../features/search/useSearch';
 import { useSearchStore, MIN_QUERY_CHARS } from '../../features/search/searchStore';
 import type { SearchType } from '../../api/music';
@@ -27,6 +28,9 @@ import { usePersonalizationStore } from '../../services/local/personalizationSto
 import { usePlayerStore } from '../../services/player/playerStore';
 import { playerService } from '../../services/player/PlayerService';
 import { openSongMenu } from '../songMenu/songMenuStore';
+import { parseSpotifyUrl, openSpotifyUrl } from '../../services/providers/spotifyUrl';
+import { TrackSelectionFooter } from '../selection/TrackSelectionFooter';
+import { useTrackSelection } from '../selection/useTrackSelection';
 import { searchLocalLibrary } from './searchLocal';
 import type { MainTabParamList, RootStackParamList } from '../../app/navigation/types';
 
@@ -56,6 +60,8 @@ export function SearchScreen() {
   const [input, setInput] = useState(route.params?.query ?? storedQuery);
   const [visibleTracks, setVisibleTracks] = useState(PAGE_SIZE);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const selection = useTrackSelection();
+  const cancelSelection = selection.cancel;
 
   const cancelDebounce = useCallback(() => {
     if (debounceTimerRef.current) {
@@ -118,6 +124,11 @@ export function SearchScreen() {
       }
     ).setParams({ query: undefined });
   }, [route.params?.query, submit, navigation, cancelDebounce]);
+
+  useEffect(() => {
+    // A new result set must not act on songs that are no longer on screen.
+    cancelSelection();
+  }, [storedQuery, type, cancelSelection]);
 
   const suggestions = useMemo(() => {
     const raw = input.trim();
@@ -202,15 +213,17 @@ export function SearchScreen() {
   );
   const favoriteArtistNames = useMemo(
     () =>
-      new Set(
-        favorites.map((t) => t.artists[0]?.name?.toLowerCase()).filter(Boolean) as string[]
-      ),
+      new Set(favorites.map((t) => t.artists[0]?.name?.toLowerCase()).filter(Boolean) as string[]),
     [favorites]
   );
   const downloadedTrackIds = useMemo(
     () => new Set(downloadedTracks.map((t) => t.id)),
     [downloadedTracks]
   );
+
+  const parsedSpotify = useMemo(() => {
+    return parseSpotifyUrl(input) || parseSpotifyUrl(storedQuery);
+  }, [input, storedQuery]);
 
   const allTracks = useMemo(() => {
     const pool = [...localTracks, ...remoteTracks];
@@ -320,461 +333,599 @@ export function SearchScreen() {
   };
 
   return (
-    <Screen
-      scroll
-      padded={false}
-      scrollProps={{ keyboardShouldPersistTaps: 'handled', keyboardDismissMode: 'on-drag' }}
-    >
-      <View style={{ paddingHorizontal: 20 }}>
-        <View style={{ paddingTop: spacing.sm, marginBottom: spacing.lg }}>
-          <Text variant="display">Search</Text>
-          <Text variant="small" style={{ marginTop: 3 }}>
-            Songs and playlists from iTunes and Deezer, plus your own library.
-          </Text>
-        </View>
+    <View style={{ flex: 1, backgroundColor: colors.background }}>
+      <Screen
+        scroll
+        padded={false}
+        scrollProps={{ keyboardShouldPersistTaps: 'handled', keyboardDismissMode: 'on-drag' }}
+      >
+        <View style={{ paddingHorizontal: 20 }}>
+          <View style={{ paddingTop: spacing.sm, marginBottom: spacing.lg }}>
+            <Text variant="display">Search</Text>
+            <Text variant="small" style={{ marginTop: 3 }}>
+              Songs and playlists from iTunes and Deezer, plus your own library.
+            </Text>
+          </View>
 
-        <SearchInput
-          value={input}
-          onChangeText={(value) => {
-            setInput(value);
-            if (!value.trim()) {
-              cancelDebounce();
-              setQuery('');
-            }
-          }}
-          onSubmitEditing={() => {
-            if (input.trim()) {
-              triggerImmediateSearch(input);
-            }
-            Keyboard.dismiss();
-          }}
-          onClear={() => {
-            cancelDebounce();
-            setInput('');
-            setVisibleTracks(PAGE_SIZE);
-            setQuery('');
-          }}
-          placeholder="What do you want to listen to?"
-        />
-
-        {suggestions.length > 0 && input.trim() !== storedQuery ? (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{
-              gap: spacing.xs,
-              paddingTop: spacing.xs,
-              paddingBottom: spacing.xs,
+          <SearchInput
+            value={input}
+            onChangeText={(value) => {
+              setInput(value);
+              if (!value.trim()) {
+                cancelDebounce();
+                setQuery('');
+              }
             }}
-          >
-            {suggestions.map((item) => (
-              <Pressable
-                key={`${item.kind}-${item.label}`}
-                onPress={() => triggerImmediateSearch(item.label)}
-                accessibilityRole="button"
-                accessibilityLabel={`Search for ${item.label}`}
-                style={({ pressed }) => ({
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 4,
-                  backgroundColor: colors.input,
-                  borderWidth: 1,
-                  borderColor: colors.borderSoft,
-                  paddingHorizontal: 12,
-                  paddingVertical: 6,
-                  borderRadius: 16,
-                  opacity: pressed ? 0.7 : 1,
-                })}
-              >
-                <Ionicons
-                  name={
-                    item.kind === 'recent'
-                      ? 'time-outline'
-                      : item.kind === 'artist'
-                        ? 'person-outline'
-                        : 'musical-note-outline'
-                  }
-                  size={13}
-                  color={colors.textSecondary}
-                />
-                <Text variant="small" numberOfLines={1}>
-                  {item.label}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        ) : null}
+            onSubmitEditing={() => {
+              if (input.trim()) {
+                triggerImmediateSearch(input);
+              }
+              Keyboard.dismiss();
+            }}
+            onClear={() => {
+              cancelDebounce();
+              setInput('');
+              setVisibleTracks(PAGE_SIZE);
+              setQuery('');
+            }}
+            placeholder="What do you want to listen to?"
+          />
 
-        {ready ? (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ gap: spacing.xs, paddingVertical: spacing.md }}
-          >
-            {FILTERS.map((filter) => (
-              <FilterChip
-                key={filter.value}
-                label={filter.label}
-                active={type === filter.value}
-                onPress={() => {
-                  setType(filter.value);
-                  setVisibleTracks(PAGE_SIZE);
-                }}
-              />
-            ))}
-          </ScrollView>
-        ) : (
-          <View style={{ height: spacing.xl }} />
-        )}
-
-        {!ready ? (
-          <>
-            {recentSearches.length > 0 ? (
-              <View style={{ marginBottom: spacing.xxl }}>
-                <SectionHeader title="Recent searches" actionLabel="Clear" onAction={clearRecent} />
-                {recentSearches.map((value) => (
-                  <Pressable
-                    key={value}
-                    onPress={() => {
-                      setInput(value);
-                      setVisibleTracks(PAGE_SIZE);
-                      submit(value);
-                    }}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Search for ${value}`}
-                    style={({ pressed }) => ({
-                      flexDirection: 'row',
-                      alignItems: 'center',
-                      gap: spacing.sm,
-                      minHeight: 44,
-                      opacity: pressed ? 0.6 : 1,
-                    })}
-                  >
-                    <Ionicons name="time-outline" size={19} color={colors.textMuted} />
-                    <Text variant="body" style={{ flex: 1 }} numberOfLines={1}>
-                      {value}
-                    </Text>
-                    <Pressable
-                      onPress={(event) => {
-                        event.stopPropagation();
-                        removeRecent(value);
-                      }}
-                      hitSlop={10}
-                      accessibilityRole="button"
-                      accessibilityLabel={`Remove ${value} from recent searches`}
-                    >
-                      <Ionicons name="close" size={18} color={colors.textMuted} />
-                    </Pressable>
-                  </Pressable>
-                ))}
-              </View>
-            ) : null}
-
-            <SectionHeader title="Browse" subtitle="Pick a lane and start listening" />
-            <View style={{ gap: spacing.sm, marginBottom: spacing.xl }}>
-              <View style={{ flexDirection: 'row', gap: spacing.sm }}>
-                <CategoryTile
-                  title="Made for you"
-                  subtitle="Your mixes"
-                  colors={['#145A35', '#1ED760']}
-                  icon={<Ionicons name="sparkles" size={28} color="rgba(255,255,255,0.6)" />}
-                  onPress={() =>
-                    navigation.navigate('BrowseCategory', {
-                      kind: 'made-for-you',
-                      title: 'Made for you',
-                    })
-                  }
-                />
-                <CategoryTile
-                  title="Charts"
-                  subtitle="What’s hot now"
-                  colors={['#2A1A55', '#7B5CFF']}
-                  icon={<Ionicons name="trending-up" size={28} color="rgba(255,255,255,0.55)" />}
-                  onPress={() =>
-                    navigation.navigate('BrowseCategory', { kind: 'charts', title: 'Charts' })
-                  }
-                />
-              </View>
-              <View style={{ flexDirection: 'row', gap: spacing.sm }}>
-                <CategoryTile
-                  title="New releases"
-                  subtitle="Fresh albums"
-                  colors={['#123C4D', '#26B7D9']}
-                  icon={<Ionicons name="albums" size={28} color="rgba(255,255,255,0.55)" />}
-                  onPress={() =>
-                    navigation.navigate('BrowseCategory', {
-                      kind: 'new-releases',
-                      title: 'New releases',
-                    })
-                  }
-                />
-                <CategoryTile
-                  title="Moods"
-                  subtitle="Match the moment"
-                  colors={['#5A3416', '#F5C451']}
-                  icon={<Ionicons name="partly-sunny" size={28} color="rgba(255,255,255,0.55)" />}
-                  onPress={() =>
-                    navigation.navigate('BrowseCategory', { kind: 'moods', title: 'Moods' })
-                  }
-                />
-              </View>
-            </View>
-
-            {local.tracks.length > 0 ? (
-              <View style={{ marginBottom: spacing.xl }}>
-                <SectionHeader
-                  title="From your library"
-                  subtitle="Liked, recent and downloaded songs"
-                />
-                {local.tracks.slice(0, 4).map((track) => (
-                  <SongRow
-                    key={track.id}
-                    track={track}
-                    subtitle={`${track.artists.map((artist) => artist.name).join(', ')} · ${
-                      local.downloadedIds.has(track.id) ? 'Downloaded' : 'In your library'
-                    }`}
-                    downloaded={local.downloadedIds.has(track.id)}
-                    isCurrent={currentTrack?.id === track.id}
-                    isPlaying={playing}
-                    onPress={() => playTrack(track)}
-                    onMore={() => openSongMenu(track, { sourceLabel: 'From your library' })}
-                  />
-                ))}
-              </View>
-            ) : null}
-          </>
-        ) : null}
-
-        {ready ? (
-          <>
-            {search.isLoading ? (
-              <View style={{ marginTop: spacing.md }}>
-                <ListSkeleton rows={6} />
-              </View>
-            ) : null}
-
-            {search.isError && !data ? (
-              <ErrorState
-                title="Search failed"
-                message={
-                  search.error instanceof Error
-                    ? search.error.message
-                    : 'Check your connection and try again.'
-                }
-                onRetry={() => void search.refetch()}
-              />
-            ) : null}
-
-            {noResults && !search.isError ? (
-              <EmptyState
-                icon="search-outline"
-                title={`No results for “${trimmed}”`}
-                message="Try a different spelling, a shorter search, or look in your own library instead."
-                actionLabel="Clear search"
-                onAction={() => {
-                  setInput('');
-                  setQuery('');
-                }}
-              />
-            ) : null}
-
-            {localTracks.length > 0 ? (
-              <View style={{ marginTop: spacing.md, marginBottom: spacing.lg }}>
-                <View
-                  style={{
+          {suggestions.length > 0 && input.trim() !== storedQuery ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{
+                gap: spacing.xs,
+                paddingTop: spacing.xs,
+                paddingBottom: spacing.xs,
+              }}
+            >
+              {suggestions.map((item) => (
+                <Pressable
+                  key={`${item.kind}-${item.label}`}
+                  onPress={() => triggerImmediateSearch(item.label)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Search for ${item.label}`}
+                  style={({ pressed }) => ({
                     flexDirection: 'row',
                     alignItems: 'center',
-                    gap: spacing.xs,
-                    marginBottom: spacing.xs,
+                    gap: 4,
+                    backgroundColor: colors.input,
+                    borderWidth: 1,
+                    borderColor: colors.borderSoft,
+                    paddingHorizontal: 12,
+                    paddingVertical: 6,
+                    borderRadius: 16,
+                    opacity: pressed ? 0.7 : 1,
+                  })}
+                >
+                  <Ionicons
+                    name={
+                      item.kind === 'recent'
+                        ? 'time-outline'
+                        : item.kind === 'artist'
+                          ? 'person-outline'
+                          : 'musical-note-outline'
+                    }
+                    size={13}
+                    color={colors.textSecondary}
+                  />
+                  <Text variant="small" numberOfLines={1}>
+                    {item.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          ) : null}
+
+          {ready ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ gap: spacing.xs, paddingVertical: spacing.md }}
+            >
+              {FILTERS.map((filter) => (
+                <FilterChip
+                  key={filter.value}
+                  label={filter.label}
+                  active={type === filter.value}
+                  onPress={() => {
+                    setType(filter.value);
+                    setVisibleTracks(PAGE_SIZE);
+                  }}
+                />
+              ))}
+            </ScrollView>
+          ) : (
+            <View style={{ height: spacing.xl }} />
+          )}
+
+          {!ready ? (
+            <>
+              {recentSearches.length > 0 ? (
+                <View style={{ marginBottom: spacing.xxl }}>
+                  <SectionHeader
+                    title="Recent searches"
+                    actionLabel="Clear"
+                    onAction={clearRecent}
+                  />
+                  {recentSearches.map((value) => (
+                    <Pressable
+                      key={value}
+                      onPress={() => {
+                        setInput(value);
+                        setVisibleTracks(PAGE_SIZE);
+                        submit(value);
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Search for ${value}`}
+                      style={({ pressed }) => ({
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: spacing.sm,
+                        minHeight: 44,
+                        opacity: pressed ? 0.6 : 1,
+                      })}
+                    >
+                      <Ionicons name="time-outline" size={19} color={colors.textMuted} />
+                      <Text variant="body" style={{ flex: 1 }} numberOfLines={1}>
+                        {value}
+                      </Text>
+                      <Pressable
+                        onPress={(event) => {
+                          event.stopPropagation();
+                          removeRecent(value);
+                        }}
+                        hitSlop={10}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Remove ${value} from recent searches`}
+                      >
+                        <Ionicons name="close" size={18} color={colors.textMuted} />
+                      </Pressable>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+
+              <SectionHeader title="Browse" subtitle="Pick a lane and start listening" />
+              <View style={{ gap: spacing.sm, marginBottom: spacing.xl }}>
+                <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+                  <CategoryTile
+                    title="Made for you"
+                    subtitle="Your mixes"
+                    colors={['#145A35', '#1ED760']}
+                    icon={<Ionicons name="sparkles" size={28} color="rgba(255,255,255,0.6)" />}
+                    onPress={() =>
+                      navigation.navigate('BrowseCategory', {
+                        kind: 'made-for-you',
+                        title: 'Made for you',
+                      })
+                    }
+                  />
+                  <CategoryTile
+                    title="Charts"
+                    subtitle="What’s hot now"
+                    colors={['#2A1A55', '#7B5CFF']}
+                    icon={<Ionicons name="trending-up" size={28} color="rgba(255,255,255,0.55)" />}
+                    onPress={() =>
+                      navigation.navigate('BrowseCategory', { kind: 'charts', title: 'Charts' })
+                    }
+                  />
+                </View>
+                <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+                  <CategoryTile
+                    title="New releases"
+                    subtitle="Fresh albums"
+                    colors={['#123C4D', '#26B7D9']}
+                    icon={<Ionicons name="albums" size={28} color="rgba(255,255,255,0.55)" />}
+                    onPress={() =>
+                      navigation.navigate('BrowseCategory', {
+                        kind: 'new-releases',
+                        title: 'New releases',
+                      })
+                    }
+                  />
+                  <CategoryTile
+                    title="Moods"
+                    subtitle="Match the moment"
+                    colors={['#5A3416', '#F5C451']}
+                    icon={<Ionicons name="partly-sunny" size={28} color="rgba(255,255,255,0.55)" />}
+                    onPress={() =>
+                      navigation.navigate('BrowseCategory', { kind: 'moods', title: 'Moods' })
+                    }
+                  />
+                </View>
+              </View>
+
+              {local.tracks.length > 0 ? (
+                <View style={{ marginBottom: spacing.xl }}>
+                  <SectionHeader
+                    title="From your library"
+                    subtitle="Liked, recent and downloaded songs"
+                  />
+                  {local.tracks.slice(0, 4).map((track) => (
+                    <SongRow
+                      key={track.id}
+                      track={track}
+                      subtitle={`${track.artists.map((artist) => artist.name).join(', ')} · ${
+                        local.downloadedIds.has(track.id) ? 'Downloaded' : 'In your library'
+                      }`}
+                      downloaded={local.downloadedIds.has(track.id)}
+                      isCurrent={currentTrack?.id === track.id}
+                      isPlaying={playing}
+                      selectionMode={selection.active}
+                      selected={selection.isSelected(track.id)}
+                      onLongPress={() => selection.toggle(track.id)}
+                      onPress={() => {
+                        if (selection.active) selection.toggle(track.id);
+                        else playTrack(track);
+                      }}
+                      onMore={
+                        selection.active
+                          ? undefined
+                          : () => openSongMenu(track, { sourceLabel: 'From your library' })
+                      }
+                    />
+                  ))}
+                </View>
+              ) : null}
+            </>
+          ) : null}
+
+          {ready ? (
+            <>
+              {parsedSpotify ? (
+                <View
+                  style={{
+                    backgroundColor: colors.card,
+                    borderRadius: radii.lg,
+                    borderWidth: 1,
+                    borderColor: '#1DB954',
+                    padding: spacing.md,
+                    marginTop: spacing.sm,
+                    marginBottom: spacing.md,
                   }}
                 >
-                  <Text variant="bodyStrong">From your library</Text>
-                  <Pill label="Saved" />
-                </View>
-                {localTracks.slice(0, visibleTracks).map((track) => (
-                  <SongRow
-                    key={track.id}
-                    track={track}
-                    subtitle={`${track.artists.map((artist) => artist.name).join(', ')} · ${
-                      local.downloadedIds.has(track.id) ? 'Downloaded' : 'In your library'
-                    }`}
-                    downloaded={local.downloadedIds.has(track.id)}
-                    isCurrent={currentTrack?.id === track.id}
-                    isPlaying={playing}
-                    onPress={() => playTrack(track)}
-                    onMore={() => openSongMenu(track, { sourceLabel: 'From your library' })}
-                  />
-                ))}
-                {localTracks.length > visibleTracks ? (
-                  <Pressable
-                    onPress={() => setVisibleTracks((count) => count + PAGE_SIZE)}
-                    accessibilityRole="button"
-                    style={{ paddingVertical: spacing.md, alignItems: 'center' }}
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: spacing.sm,
+                      marginBottom: spacing.xs,
+                    }}
                   >
-                    <Text variant="small" style={{ color: colors.accent, fontWeight: '700' }}>
-                      Show more from your library
+                    <Ionicons name="musical-notes" size={20} color="#1DB954" />
+                    <Text variant="bodyStrong">
+                      {parsedSpotify.type === 'playlist'
+                        ? 'Spotify Playlist Detected'
+                        : `Spotify ${parsedSpotify.type.charAt(0).toUpperCase() + parsedSpotify.type.slice(1)} Link`}
                     </Text>
-                  </Pressable>
-                ) : null}
-              </View>
-            ) : null}
-
-            {remoteTracks.length > 0 ? (
-              <View style={{ marginBottom: spacing.lg }}>
-                <SectionHeader
-                  title="Songs"
-                  subtitle={type === 'all' ? 'Results from iTunes and Deezer' : undefined}
-                />
-                {remoteTracks.slice(0, visibleTracks).map((track) => (
-                  <SongRow
-                    key={track.id}
-                    track={track}
-                    subtitle={sourceFor(track)}
-                    isCurrent={currentTrack?.id === track.id}
-                    isPlaying={playing}
-                    onPress={() => playTrack(track)}
-                    onMore={() => openSongMenu(track, { sourceLabel: 'Search result' })}
-                  />
-                ))}
-                {remoteTracks.length > visibleTracks ? (
-                  <Pressable
-                    onPress={() => setVisibleTracks((count) => count + PAGE_SIZE)}
-                    accessibilityRole="button"
-                    style={{ paddingVertical: spacing.md, alignItems: 'center' }}
+                    <Pill label="Spotify" />
+                  </View>
+                  <Text
+                    variant="small"
+                    style={{ color: colors.textSecondary, marginBottom: spacing.md }}
                   >
-                    <Text variant="small" style={{ color: colors.accent, fontWeight: '700' }}>
-                      Load more songs
-                    </Text>
-                  </Pressable>
-                ) : null}
-              </View>
-            ) : null}
-
-            {localArtists.length + remoteArtists.length > 0 ? (
-              <View style={{ marginBottom: spacing.lg }}>
-                <SectionHeader title="Artists" />
-                <SectionRail>
-                  {localArtists.map((artist) => (
-                    <View key={`local-${artist.id}`}>
-                      <ArtistCard
-                        name={artist.name}
-                        artworkUri={artist.artworkUrl}
-                        onPress={() => openArtist(artist)}
+                    {parsedSpotify.type === 'playlist'
+                      ? 'Import and convert this playlist into your Sinc library without a Spotify account.'
+                      : 'Open directly in Spotify or search matched songs in Sinc.'}
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+                    {parsedSpotify.type === 'playlist' ? (
+                      <PrimaryButton
+                        label="Import to Sinc Library"
+                        icon="download-outline"
+                        onPress={() => {
+                          navigation.navigate('SpotifyImport', { initialUrl: parsedSpotify.url });
+                        }}
                       />
-                    </View>
-                  ))}
-                  {remoteArtists.map((artist) => (
-                    <ArtistCard
-                      key={artist.id}
-                      name={artist.name}
-                      artworkUri={artist.artworkUrl}
-                      onPress={() => openArtist(artist)}
-                    />
-                  ))}
-                </SectionRail>
-              </View>
-            ) : null}
+                    ) : (
+                      <PrimaryButton
+                        label="Open in Spotify"
+                        icon="open-outline"
+                        onPress={() => void openSpotifyUrl(parsedSpotify.url)}
+                      />
+                    )}
+                  </View>
+                </View>
+              ) : null}
 
-            {localAlbums.length + remoteAlbums.length > 0 ? (
-              <View style={{ marginBottom: spacing.lg }}>
-                <SectionHeader title="Albums" />
-                <SectionRail>
-                  {localAlbums.map((album) => (
-                    <MediaCard
-                      key={`local-${album.id}`}
-                      title={album.title}
-                      subtitle={album.artist?.name}
-                      artworkUri={album.artworkUrl}
-                      onPress={() => openAlbum(album)}
-                    />
-                  ))}
-                  {remoteAlbums.map((album) => (
-                    <MediaCard
-                      key={album.id}
-                      title={album.title}
-                      subtitle={album.artist?.name}
-                      artworkUri={album.artworkUrl}
-                      onPress={() => openAlbum(album)}
-                    />
-                  ))}
-                </SectionRail>
-              </View>
-            ) : null}
+              {search.isLoading ? (
+                <View style={{ marginTop: spacing.md }}>
+                  <ListSkeleton rows={6} />
+                </View>
+              ) : null}
 
-            {localPlaylists.length + remotePlaylists.length > 0 ? (
-              <View style={{ marginBottom: spacing.lg }}>
-                <SectionHeader title="Playlists" subtitle="From iTunes, Deezer and your library" />
-                {localPlaylists.map((playlist) => (
-                  <Pressable
-                    key={playlist.id}
-                    onPress={() => navigation.navigate('LocalPlaylist', { id: playlist.id })}
-                    accessibilityRole="button"
-                    style={({ pressed }) => ({
+              {search.isError && !data ? (
+                <ErrorState
+                  title="Search failed"
+                  message={
+                    search.error instanceof Error
+                      ? search.error.message
+                      : 'Check your connection and try again.'
+                  }
+                  onRetry={() => void search.refetch()}
+                />
+              ) : null}
+
+              {noResults && !search.isError ? (
+                <EmptyState
+                  icon="search-outline"
+                  title={`No results for “${trimmed}”`}
+                  message="Try a different spelling, a shorter search, or look in your own library instead."
+                  actionLabel="Clear search"
+                  onAction={() => {
+                    setInput('');
+                    setQuery('');
+                  }}
+                />
+              ) : null}
+
+              {localTracks.length > 0 ? (
+                <View style={{ marginTop: spacing.md, marginBottom: spacing.lg }}>
+                  <View
+                    style={{
                       flexDirection: 'row',
                       alignItems: 'center',
-                      gap: spacing.sm,
-                      paddingVertical: 7,
-                      opacity: pressed ? 0.65 : 1,
-                    })}
+                      gap: spacing.xs,
+                      marginBottom: spacing.xs,
+                    }}
                   >
-                    <Artwork
-                      uri={
-                        playlist.coverArtworkUrl ??
-                        playlist.tracks.find((track) => track.artworkUrl)?.artworkUrl
+                    <Text variant="bodyStrong">From your library</Text>
+                    <Pill label="Saved" />
+                  </View>
+                  {localTracks.slice(0, visibleTracks).map((track) => (
+                    <SongRow
+                      key={track.id}
+                      track={track}
+                      subtitle={`${track.artists.map((artist) => artist.name).join(', ')} · ${
+                        local.downloadedIds.has(track.id) ? 'Downloaded' : 'In your library'
+                      }`}
+                      downloaded={local.downloadedIds.has(track.id)}
+                      isCurrent={currentTrack?.id === track.id}
+                      isPlaying={playing}
+                      selectionMode={selection.active}
+                      selected={selection.isSelected(track.id)}
+                      onLongPress={() => selection.toggle(track.id)}
+                      onPress={() => {
+                        if (selection.active) selection.toggle(track.id);
+                        else playTrack(track);
+                      }}
+                      onMore={
+                        selection.active
+                          ? undefined
+                          : () => openSongMenu(track, { sourceLabel: 'From your library' })
                       }
-                      size={48}
-                      radius={8}
                     />
-                    <View style={{ flex: 1 }}>
-                      <Text variant="bodyStrong" numberOfLines={1}>
-                        {playlist.name}
+                  ))}
+                  {localTracks.length > visibleTracks ? (
+                    <Pressable
+                      onPress={() => setVisibleTracks((count) => count + PAGE_SIZE)}
+                      accessibilityRole="button"
+                      style={{ paddingVertical: spacing.md, alignItems: 'center' }}
+                    >
+                      <Text variant="small" style={{ color: colors.accent, fontWeight: '700' }}>
+                        Show more from your library
                       </Text>
-                      <Text variant="small">{playlist.tracks.length} songs · On this device</Text>
-                    </View>
-                    <Ionicons name="chevron-forward" size={17} color={colors.textMuted} />
-                  </Pressable>
-                ))}
-                {remotePlaylists.map((playlist) => (
-                  <Pressable
-                    key={playlist.id}
-                    onPress={() =>
-                      navigation.navigate('Playlist', { id: playlist.id, name: playlist.name })
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : null}
+
+              {remoteTracks.length > 0 ? (
+                <View style={{ marginBottom: spacing.lg }}>
+                  <SectionHeader
+                    title="Songs"
+                    subtitle={type === 'all' ? 'Results from iTunes and Deezer' : undefined}
+                    actionLabel={
+                      allTracks.length > 0 ? (selection.active ? 'Done' : 'Select') : undefined
                     }
-                    accessibilityRole="button"
-                    style={({ pressed }) => ({
-                      flexDirection: 'row',
-                      alignItems: 'center',
-                      gap: spacing.sm,
-                      paddingVertical: 7,
-                      opacity: pressed ? 0.65 : 1,
-                    })}
-                  >
-                    <Artwork uri={playlist.artworkUrl} size={48} radius={8} />
-                    <View style={{ flex: 1 }}>
-                      <Text variant="bodyStrong" numberOfLines={1}>
-                        {playlist.name}
+                    onAction={selection.active ? selection.cancel : () => selection.begin()}
+                  />
+                  {remoteTracks.slice(0, visibleTracks).map((track) => (
+                    <SongRow
+                      key={track.id}
+                      track={track}
+                      subtitle={sourceFor(track)}
+                      isCurrent={currentTrack?.id === track.id}
+                      isPlaying={playing}
+                      selectionMode={selection.active}
+                      selected={selection.isSelected(track.id)}
+                      onLongPress={() => selection.toggle(track.id)}
+                      onPress={() => {
+                        if (selection.active) selection.toggle(track.id);
+                        else playTrack(track);
+                      }}
+                      onMore={
+                        selection.active
+                          ? undefined
+                          : () => openSongMenu(track, { sourceLabel: 'Search result' })
+                      }
+                    />
+                  ))}
+                  {remoteTracks.length > visibleTracks ? (
+                    <Pressable
+                      onPress={() => setVisibleTracks((count) => count + PAGE_SIZE)}
+                      accessibilityRole="button"
+                      style={{ paddingVertical: spacing.md, alignItems: 'center' }}
+                    >
+                      <Text variant="small" style={{ color: colors.accent, fontWeight: '700' }}>
+                        Load more songs
                       </Text>
-                      <Text variant="small">
-                        {playlist.trackCount > 0 ? `${playlist.trackCount} songs` : 'Playlist'} ·{' '}
-                        {sourceForPlaylist(playlist)}
-                      </Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : null}
+
+              {localArtists.length + remoteArtists.length > 0 ? (
+                <View style={{ marginBottom: spacing.lg }}>
+                  <SectionHeader
+                    title="Artists"
+                    subtitle={type === 'artists' ? `${localArtists.length + remoteArtists.length} artists found` : undefined}
+                  />
+                  {type === 'artists' ? (
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.md, paddingTop: spacing.xs }}>
+                      {[...localArtists, ...remoteArtists].map((artist) => (
+                        <View key={artist.id} style={{ width: '47%' }}>
+                          <ArtistCard
+                            name={artist.name}
+                            artworkUri={artist.artworkUrl}
+                            onPress={() => openArtist(artist)}
+                          />
+                        </View>
+                      ))}
                     </View>
-                    <Ionicons name="chevron-forward" size={17} color={colors.textMuted} />
-                  </Pressable>
-                ))}
-              </View>
-            ) : null}
+                  ) : (
+                    <SectionRail>
+                      {localArtists.map((artist) => (
+                        <View key={`local-${artist.id}`}>
+                          <ArtistCard
+                            name={artist.name}
+                            artworkUri={artist.artworkUrl}
+                            onPress={() => openArtist(artist)}
+                          />
+                        </View>
+                      ))}
+                      {remoteArtists.map((artist) => (
+                        <ArtistCard
+                          key={artist.id}
+                          name={artist.name}
+                          artworkUri={artist.artworkUrl}
+                          onPress={() => openArtist(artist)}
+                        />
+                      ))}
+                    </SectionRail>
+                  )}
+                </View>
+              ) : null}
 
-            {search.isFetching && data ? (
-              <View style={{ marginBottom: spacing.lg }}>
-                <SkeletonBlock height={12} width="45%" />
-              </View>
-            ) : null}
-          </>
-        ) : null}
+              {localAlbums.length + remoteAlbums.length > 0 ? (
+                <View style={{ marginBottom: spacing.lg }}>
+                  <SectionHeader
+                    title="Albums"
+                    subtitle={type === 'albums' ? `${localAlbums.length + remoteAlbums.length} albums found` : undefined}
+                  />
+                  {type === 'albums' ? (
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.md, paddingTop: spacing.xs }}>
+                      {[...localAlbums, ...remoteAlbums].map((album) => (
+                        <View key={album.id} style={{ width: '47%' }}>
+                          <MediaCard
+                            title={album.title}
+                            subtitle={album.artist?.name}
+                            artworkUri={album.artworkUrl}
+                            onPress={() => openAlbum(album)}
+                          />
+                        </View>
+                      ))}
+                    </View>
+                  ) : (
+                    <SectionRail>
+                      {localAlbums.map((album) => (
+                        <MediaCard
+                          key={`local-${album.id}`}
+                          title={album.title}
+                          subtitle={album.artist?.name}
+                          artworkUri={album.artworkUrl}
+                          onPress={() => openAlbum(album)}
+                        />
+                      ))}
+                      {remoteAlbums.map((album) => (
+                        <MediaCard
+                          key={album.id}
+                          title={album.title}
+                          subtitle={album.artist?.name}
+                          artworkUri={album.artworkUrl}
+                          onPress={() => openAlbum(album)}
+                        />
+                      ))}
+                    </SectionRail>
+                  )}
+                </View>
+              ) : null}
 
-        <View style={{ height: spacing.xxl }} />
-      </View>
-    </Screen>
+              {localPlaylists.length + remotePlaylists.length > 0 ? (
+                <View style={{ marginBottom: spacing.lg }}>
+                  <SectionHeader
+                    title="Playlists"
+                    subtitle="From iTunes, Deezer and your library"
+                  />
+                  {localPlaylists.map((playlist) => (
+                    <Pressable
+                      key={playlist.id}
+                      onPress={() => navigation.navigate('LocalPlaylist', { id: playlist.id })}
+                      accessibilityRole="button"
+                      style={({ pressed }) => ({
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: spacing.sm,
+                        paddingVertical: 7,
+                        opacity: pressed ? 0.65 : 1,
+                      })}
+                    >
+                      <Artwork
+                        uri={
+                          playlist.coverArtworkUrl ??
+                          playlist.tracks.find((track) => track.artworkUrl)?.artworkUrl
+                        }
+                        size={48}
+                        radius={8}
+                      />
+                      <View style={{ flex: 1 }}>
+                        <Text variant="bodyStrong" numberOfLines={1}>
+                          {playlist.name}
+                        </Text>
+                        <Text variant="small">{playlist.tracks.length} songs · On this device</Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={17} color={colors.textMuted} />
+                    </Pressable>
+                  ))}
+                  {remotePlaylists.map((playlist) => (
+                    <Pressable
+                      key={playlist.id}
+                      onPress={() =>
+                        navigation.navigate('Playlist', { id: playlist.id, name: playlist.name })
+                      }
+                      accessibilityRole="button"
+                      style={({ pressed }) => ({
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: spacing.sm,
+                        paddingVertical: 7,
+                        opacity: pressed ? 0.65 : 1,
+                      })}
+                    >
+                      <Artwork uri={playlist.artworkUrl} size={48} radius={8} />
+                      <View style={{ flex: 1 }}>
+                        <Text variant="bodyStrong" numberOfLines={1}>
+                          {playlist.name}
+                        </Text>
+                        <Text variant="small">
+                          {playlist.trackCount > 0 ? `${playlist.trackCount} songs` : 'Playlist'} ·{' '}
+                          {sourceForPlaylist(playlist)}
+                        </Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={17} color={colors.textMuted} />
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+
+              {search.isFetching && data ? (
+                <View style={{ marginBottom: spacing.lg }}>
+                  <SkeletonBlock height={12} width="45%" />
+                </View>
+              ) : null}
+            </>
+          ) : null}
+
+          <View style={{ height: spacing.xxl }} />
+        </View>
+      </Screen>
+
+      {selection.active ? (
+        <TrackSelectionFooter selection={selection} tracks={allTracks} bottomInset={spacing.sm} />
+      ) : null}
+    </View>
   );
 }

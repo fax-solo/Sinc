@@ -18,6 +18,11 @@ interface DeezerArtist {
   name?: string;
   picture_medium?: string;
   picture_big?: string;
+  picture_xl?: string;
+  nb_fan?: number;
+  nb_album?: number;
+  link?: string;
+  share?: string;
 }
 
 interface DeezerAlbum {
@@ -25,8 +30,11 @@ interface DeezerAlbum {
   title?: string;
   cover_medium?: string;
   cover_big?: string;
+  cover_xl?: string;
   release_date?: string;
   nb_tracks?: number;
+  record_type?: string;
+  fans?: number;
   artist?: DeezerArtist;
 }
 
@@ -80,15 +88,20 @@ function toAlbum(a: DeezerAlbum | undefined): CanonicalAlbum {
       type: 'album',
     };
   }
+  let albumType: 'album' | 'single' | 'compilation' | 'ep' = 'album';
+  const recType = (a.record_type ?? '').toLowerCase();
+  if (recType === 'single') albumType = 'single';
+  else if (recType === 'ep') albumType = 'ep';
+  else if (recType === 'compile' || recType === 'compilation') albumType = 'compilation';
   return {
     id: `deezer:${a.id}`,
     title: a.title ?? 'Unknown Album',
     artist: toArtist(a.artist),
-    artworkUrl: a.cover_medium ?? a.cover_big,
+    artworkUrl: a.cover_medium ?? a.cover_big ?? a.cover_xl,
     releaseDate: a.release_date,
     trackCount: a.nb_tracks ?? 0,
     providerIds: { deezer: String(a.id) },
-    type: 'album',
+    type: albumType,
   };
 }
 
@@ -290,6 +303,99 @@ export const deezer = {
     } catch {
       return null;
     }
+  },
+
+  async searchAlbums(
+    query: string,
+    limit = 25,
+    options?: ProviderSearchOptions
+  ): Promise<CanonicalAlbum[]> {
+    const n = clamp(1, limit, 50);
+    const index = options?.offset && options.offset > 0 ? `&index=${options.offset}` : '';
+    const albums = await fetchPaged<DeezerAlbum>(
+      `/search/album?q=${encodeURIComponent(query)}&limit=${n}${index}`,
+      options
+    );
+    return albums.map(toAlbum);
+  },
+
+  async fetchRelatedArtists(
+    artistId: string,
+    limit = 25
+  ): Promise<CanonicalArtist[]> {
+    const n = clamp(1, limit, 50);
+    const artists = await fetchPaged<DeezerArtist>(
+      `/artist/${encodeURIComponent(artistId)}/related?limit=${n}`
+    ).catch(() => []);
+    return artists.map(toArtist);
+  },
+
+  async fetchArtistPlaylists(
+    artistId: string,
+    limit = 25
+  ): Promise<CanonicalPlaylist[]> {
+    const n = clamp(1, limit, 50);
+    const playlists = await fetchPaged<DeezerPlaylist>(
+      `/artist/${encodeURIComponent(artistId)}/playlists?limit=${n}`
+    ).catch(() => []);
+    return playlists.map(toPlaylist);
+  },
+
+  async lookupArtistDetailed(artistId: string): Promise<{
+    artist: CanonicalArtist;
+    fans?: number;
+    link?: string;
+    topTracks: CanonicalTrack[];
+    discography: {
+      albums: CanonicalAlbum[];
+      singles: CanonicalAlbum[];
+      eps: CanonicalAlbum[];
+      compilations: CanonicalAlbum[];
+    };
+    relatedArtists: CanonicalArtist[];
+    playlists: CanonicalPlaylist[];
+  } | null> {
+    const [artist, top, albums, related, playlists] = await Promise.all([
+      providerFetchJson<DeezerArtist & ErrorPayload>(
+        `${BASE_URL}/artist/${encodeURIComponent(artistId)}`
+      ).catch(() => null),
+      fetchDeezerTop(artistId).catch(() => []),
+      fetchDeezerAlbums(artistId).catch(() => []),
+      fetchPaged<DeezerArtist>(`/artist/${encodeURIComponent(artistId)}/related?limit=20`).catch(() => []),
+      fetchPaged<DeezerPlaylist>(`/artist/${encodeURIComponent(artistId)}/playlists?limit=20`).catch(() => []),
+    ]);
+
+    if (!artist || (!artist.id && !artist.name)) return null;
+
+    const canonicalArtist = toArtist(artist);
+    const mappedAlbums = albums.map(toAlbum);
+
+    const albumsList: CanonicalAlbum[] = [];
+    const singlesList: CanonicalAlbum[] = [];
+    const epsList: CanonicalAlbum[] = [];
+    const compilationsList: CanonicalAlbum[] = [];
+
+    for (const alb of mappedAlbums) {
+      if (alb.type === 'single') singlesList.push(alb);
+      else if (alb.type === 'ep') epsList.push(alb);
+      else if (alb.type === 'compilation') compilationsList.push(alb);
+      else albumsList.push(alb);
+    }
+
+    return {
+      artist: canonicalArtist,
+      fans: typeof artist.nb_fan === 'number' ? artist.nb_fan : undefined,
+      link: typeof artist.link === 'string' ? artist.link : undefined,
+      topTracks: top.slice(0, 50).map(toTrack),
+      discography: {
+        albums: albumsList,
+        singles: singlesList,
+        eps: epsList,
+        compilations: compilationsList,
+      },
+      relatedArtists: related.map(toArtist),
+      playlists: playlists.map(toPlaylist),
+    };
   },
 
   async lookupAlbum(

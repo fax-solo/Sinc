@@ -11,6 +11,7 @@ interface SongRowProps {
   track: CanonicalTrack;
   onPress: () => void;
   onMore?: () => void;
+  onLongPress?: () => void;
   subtitle?: string;
   isCurrent?: boolean;
   isPlaying?: boolean;
@@ -19,6 +20,8 @@ interface SongRowProps {
   showDuration?: boolean;
   trailing?: ReactNode;
   compact?: boolean;
+  selectionMode?: boolean;
+  selected?: boolean;
 }
 
 /** A roomy, virtualisation-friendly song row with artwork and one trailing menu. */
@@ -26,6 +29,7 @@ export const SongRow = memo(function SongRow({
   track,
   onPress,
   onMore,
+  onLongPress,
   subtitle,
   isCurrent,
   isPlaying,
@@ -34,6 +38,8 @@ export const SongRow = memo(function SongRow({
   showDuration = true,
   trailing,
   compact,
+  selectionMode,
+  selected,
 }: SongRowProps) {
   const artistLine =
     subtitle || track.artists.map((artist) => artist.name).join(', ') || 'Unknown artist';
@@ -42,15 +48,22 @@ export const SongRow = memo(function SongRow({
   return (
     <Pressable
       onPress={onPress}
-      onLongPress={onMore}
+      onLongPress={onLongPress ?? onMore}
+      delayLongPress={350}
       accessibilityRole="button"
-      accessibilityLabel={`${track.title} by ${artistLine}${isCurrent ? ', currently playing' : ''}`}
+      accessibilityLabel={`${track.title} by ${artistLine}${
+        selected ? ', selected' : isCurrent ? ', currently playing' : ''
+      }`}
+      accessibilityState={selectionMode ? { selected: Boolean(selected) } : undefined}
       style={({ pressed }) => ({
         flexDirection: 'row',
         alignItems: 'center',
         gap: spacing.sm,
+        marginHorizontal: -6,
         paddingVertical: compact ? 7 : 8,
-        paddingHorizontal: 2,
+        paddingHorizontal: 6,
+        borderRadius: radii.sm,
+        backgroundColor: selectionMode && selected ? colors.accentSoft : 'transparent',
         opacity: pressed ? 0.7 : 1,
       })}
     >
@@ -113,7 +126,9 @@ export const SongRow = memo(function SongRow({
                 backgroundColor: colors.textMuted,
               }}
             >
-              <Text style={{ fontSize: 8, lineHeight: 11, color: colors.background, fontWeight: '800' }}>
+              <Text
+                style={{ fontSize: 8, lineHeight: 11, color: colors.background, fontWeight: '800' }}
+              >
                 E
               </Text>
             </View>
@@ -121,40 +136,50 @@ export const SongRow = memo(function SongRow({
           <Text variant="small" numberOfLines={1} style={{ flexShrink: 1 }}>
             {artistLine}
           </Text>
-          {downloaded ? (
-            <Ionicons name="checkmark-circle" size={14} color={colors.accent} />
-          ) : null}
+          {downloaded ? <Ionicons name="checkmark-circle" size={14} color={colors.accent} /> : null}
         </View>
       </View>
 
-      {trailing}
+      {selectionMode ? (
+        <View style={{ width: 32, alignItems: 'center' }}>
+          <Ionicons
+            name={selected ? 'checkmark-circle' : 'ellipse-outline'}
+            size={24}
+            color={selected ? colors.accent : colors.textMuted}
+          />
+        </View>
+      ) : (
+        <>
+          {trailing}
 
-      {showDuration ? (
-        <Text variant="caption" style={{ minWidth: 32, textAlign: 'right' }}>
-          {track.durationMs > 0 ? formatDuration(track.durationMs) : '--:--'}
-        </Text>
-      ) : null}
+          {showDuration ? (
+            <Text variant="caption" style={{ minWidth: 32, textAlign: 'right' }}>
+              {track.durationMs > 0 ? formatDuration(track.durationMs) : '--:--'}
+            </Text>
+          ) : null}
 
-      {onMore ? (
-        <Pressable
-          onPress={(event) => {
-            event.stopPropagation();
-            onMore();
-          }}
-          hitSlop={8}
-          accessibilityRole="button"
-          accessibilityLabel={`More options for ${track.title}`}
-          style={({ pressed }) => ({
-            width: 28,
-            height: 34,
-            alignItems: 'center',
-            justifyContent: 'center',
-            opacity: pressed ? 0.55 : 1,
-          })}
-        >
-          <Ionicons name="ellipsis-vertical" size={17} color={colors.textMuted} />
-        </Pressable>
-      ) : null}
+          {onMore ? (
+            <Pressable
+              onPress={(event) => {
+                event.stopPropagation();
+                onMore();
+              }}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel={`More options for ${track.title}`}
+              style={({ pressed }) => ({
+                width: 28,
+                height: 34,
+                alignItems: 'center',
+                justifyContent: 'center',
+                opacity: pressed ? 0.55 : 1,
+              })}
+            >
+              <Ionicons name="ellipsis-vertical" size={17} color={colors.textMuted} />
+            </Pressable>
+          ) : null}
+        </>
+      )}
     </Pressable>
   );
 });

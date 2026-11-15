@@ -7,7 +7,7 @@
  * - Smart track deduplication with provider ID merging
  */
 
-import type { CanonicalPlaylist, CanonicalTrack } from '../types/index.js';
+import type { CanonicalAlbum, CanonicalPlaylist, CanonicalTrack } from '../types/index.js';
 import { compactText, normalizeText, tokenize } from './text.js';
 
 export type SearchConfidence = 'high' | 'medium' | 'low';
@@ -425,6 +425,35 @@ export interface PersonalizationSearchSignals {
   favoriteArtistNames?: ReadonlySet<string>;
   downloadedTrackIds?: ReadonlySet<string>;
   enabled?: boolean;
+}
+
+/**
+ * Deduplicates albums across multiple providers by matching normalized title and artist name.
+ */
+export function deduplicateAlbums(albums: CanonicalAlbum[]): CanonicalAlbum[] {
+  const merged: CanonicalAlbum[] = [];
+  const seen = new Map<string, number>();
+
+  for (const album of albums) {
+    const key = `${normalizeText(album.title)}|${normalizeText(album.artist?.name ?? '')}`;
+    const existingIndex = seen.get(key);
+    if (existingIndex !== undefined) {
+      const existing = merged[existingIndex]!;
+      merged[existingIndex] = {
+        ...existing,
+        artworkUrl: existing.artworkUrl || album.artworkUrl,
+        providerIds: { ...existing.providerIds, ...album.providerIds },
+        trackCount: Math.max(existing.trackCount, album.trackCount),
+        releaseDate: existing.releaseDate || album.releaseDate,
+        year: existing.year || album.year,
+      };
+    } else {
+      seen.set(key, merged.length);
+      merged.push({ ...album, providerIds: { ...album.providerIds } });
+    }
+  }
+
+  return merged;
 }
 
 /**

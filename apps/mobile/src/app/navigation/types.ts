@@ -34,7 +34,7 @@ export type RootStackParamList = {
   Settings: undefined;
   Security: undefined;
   About: undefined;
-  SpotifyImport: undefined;
+  SpotifyImport: { initialUrl?: string } | undefined;
   RecentlyPlayed: undefined;
   BrowseCategory: { kind: BrowseCategoryKind; title: string };
   PlaylistEditor: { playlistId?: string; mode?: 'create' | 'edit' } | undefined;

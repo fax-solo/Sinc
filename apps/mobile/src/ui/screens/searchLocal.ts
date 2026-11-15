@@ -23,6 +23,8 @@ export function searchLocalLibrary(input: {
   playlists: LocalPlaylist[];
   artists: CanonicalArtist[];
   albums: CanonicalAlbum[];
+  /** Maximum matching tracks; pass Infinity for a complete browse list. */
+  trackLimit?: number;
 }): LocalSearchResults {
   const query = normalise(input.query);
   const empty: LocalSearchResults = {
@@ -36,11 +38,7 @@ export function searchLocalLibrary(input: {
 
   const knownTracks = new Map<string, CanonicalTrack>();
   const downloadedIds = new Set(input.downloadedTracks.map((track) => track.id));
-  for (const track of [
-    ...input.downloadedTracks,
-    ...input.favorites,
-    ...input.recentlyPlayed,
-  ]) {
+  for (const track of [...input.downloadedTracks, ...input.favorites, ...input.recentlyPlayed]) {
     if (!knownTracks.has(track.id)) knownTracks.set(track.id, track);
   }
 
@@ -48,15 +46,11 @@ export function searchLocalLibrary(input: {
     tracks: [...knownTracks.values()]
       .filter((track) =>
         matches(
-          [
-            track.title,
-            track.album?.title,
-            ...track.artists.map((artist) => artist.name),
-          ],
+          [track.title, track.album?.title, ...track.artists.map((artist) => artist.name)],
           query
         )
       )
-      .slice(0, 30),
+      .slice(0, input.trackLimit ?? 30),
     artists: input.artists
       .filter((artist) => matches([artist.name, ...artist.genres], query))
       .slice(0, 12),
@@ -64,11 +58,12 @@ export function searchLocalLibrary(input: {
       .filter((album) => matches([album.title, album.artist?.name], query))
       .slice(0, 12),
     playlists: input.playlists
-      .filter((playlist) =>
-        matches([playlist.name, playlist.description], query) ||
-        playlist.tracks.some((track) =>
-          matches([track.title, ...track.artists.map((artist) => artist.name)], query)
-        )
+      .filter(
+        (playlist) =>
+          matches([playlist.name, playlist.description], query) ||
+          playlist.tracks.some((track) =>
+            matches([track.title, ...track.artists.map((artist) => artist.name)], query)
+          )
       )
       .slice(0, 12),
     downloadedIds,

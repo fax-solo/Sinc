@@ -217,3 +217,56 @@ export interface ListeningInsights {
   recentlyDiscoveredArtists: Array<{ name: string; firstPlayedAt: number }>;
 }
 
+// ---------------------------------------------------------------------------
+// Artist Hub, Music Discovery & Metadata Types
+// ---------------------------------------------------------------------------
+
+export interface ArtistStatistics {
+  deezerFans?: number;
+  lastFmListeners?: number;
+  lastFmPlayCount?: number;
+  albumCount?: number;
+  trackCount?: number;
+  releaseCount?: number;
+  sourceProviders: string[];
+}
+
+export interface ExternalLinks {
+  deezer?: string;
+  spotify?: string;
+  musicbrainz?: string;
+  lastfm?: string;
+  wikidata?: string;
+  discogs?: string;
+  homepage?: string;
+}
+
+export interface ArtistDiscography {
+  albums: CanonicalAlbum[];
+  singles: CanonicalAlbum[];
+  eps: CanonicalAlbum[];
+  compilations: CanonicalAlbum[];
+}
+
+export interface ArtistDetail {
+  artist: CanonicalArtist;
+  biography?: string;
+  country?: string;
+  lifeSpan?: { begin?: string; end?: string; ended?: boolean };
+  isVerified?: boolean;
+  statistics: ArtistStatistics;
+  externalLinks: ExternalLinks;
+  topTracks: CanonicalTrack[];
+  discography: ArtistDiscography;
+  relatedArtists: CanonicalArtist[];
+  playlists: CanonicalPlaylist[];
+}
+
+export type SpotifyUrlType = 'track' | 'album' | 'artist' | 'playlist';
+
+export interface SpotifyUrlInfo {
+  type: SpotifyUrlType;
+  id: string;
+  url: string;
+}
+

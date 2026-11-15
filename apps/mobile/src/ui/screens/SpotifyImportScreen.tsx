@@ -27,10 +27,11 @@ type Status =
   | { kind: 'done'; result: SpotifyImportResult };
 
 export function SpotifyImportScreen({
+  route,
   navigation,
 }: NativeStackScreenProps<RootStackParamList, 'SpotifyImport'>) {
   const insets = useSafeAreaInsets();
-  const [url, setUrl] = useState('');
+  const [url, setUrl] = useState(route.params?.initialUrl ?? '');
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
   const [savedId, setSavedId] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
@@ -53,8 +54,8 @@ export function SpotifyImportScreen({
     };
   }, []);
 
-  const fetchPlaylist = async () => {
-    const link = url.trim();
+  const fetchPlaylist = async (overrideUrl?: string) => {
+    const link = (overrideUrl ?? url).trim();
     if (!link) return;
     const seq = ++fetchSeqRef.current;
     Keyboard.dismiss();
@@ -73,6 +74,12 @@ export function SpotifyImportScreen({
       });
     }
   };
+
+  useEffect(() => {
+    if (route.params?.initialUrl) {
+      void fetchPlaylist(route.params.initialUrl);
+    }
+  }, [route.params?.initialUrl]);
 
   const savePlaylist = () => {
     if (status.kind !== 'done' || savedId) return;
