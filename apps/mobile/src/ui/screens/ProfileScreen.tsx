@@ -15,6 +15,7 @@ import { AVATAR_PRESETS, useProfileStore } from '../../features/profile/profileS
 import { useLibraryStore } from '../../services/library/libraryStore';
 import { useDownloadsStore } from '../../services/library/downloadsStore';
 import { useBackupStore, saveBackupToDevice } from '../../services/backup/backupService';
+import { usePersonalizationStore } from '../../services/local/personalizationStore';
 import type { RootStackParamList } from '../../app/navigation/types';
 import { ProfileQuickSheet } from '../components/ProfileQuickSheet';
 import { toast } from '../components/Overlays';
@@ -38,21 +39,26 @@ export function ProfileScreen() {
     [downloads]
   );
 
+  const events = usePersonalizationStore((state) => state.events);
+  const insights = useMemo(
+    () => usePersonalizationStore.getState().getInsights('30d'),
+    [events, playStats]
+  );
+
   // Total unique songs available
   const totalSongsCount = useMemo(() => {
     const ids = new Set<string>();
     favorites.forEach((t) => ids.add(t.id));
     completedDownloads.forEach((d) => ids.add(d.track.id));
-    return Math.max(ids.size, favorites.length, 12);
+    return ids.size;
   }, [favorites, completedDownloads]);
 
-  // Total listening minutes calculated from playStats
+  // Total listening minutes calculated from real events and verified play counts (no fabricated numbers)
   const totalMinutes = useMemo(() => {
+    if (insights.totalMinutes > 0) return insights.totalMinutes;
     const totalPlays = Object.values(playStats).reduce((acc, s) => acc + s.count, 0);
-    // Average 3.5 minutes per play, with a sensible baseline for newly active accounts
-    const mins = Math.round(totalPlays * 3.5);
-    return mins > 0 ? mins : 3500;
-  }, [playStats]);
+    return Math.round(totalPlays * 3.5);
+  }, [insights, playStats]);
 
   const formattedMinutes = useMemo(() => {
     if (totalMinutes >= 1000) {
@@ -178,7 +184,7 @@ export function ProfileScreen() {
 
           <View style={{ alignItems: 'center' }}>
             <Text style={{ fontSize: 22, fontWeight: '800', color: colors.text }}>
-              {playlists.length || 12}
+              {playlists.length}
             </Text>
             <Text style={{ fontSize: 13, color: colors.textMuted, marginTop: 2 }}>Playlists</Text>
           </View>
@@ -226,7 +232,9 @@ export function ProfileScreen() {
               Your Music Journey
             </Text>
             <Text style={{ fontSize: 13, color: colors.textMuted, marginTop: 2 }}>
-              You've listened for {formattedMinutes} minutes this month!
+              {totalMinutes > 0
+                ? `You've listened for ${formattedMinutes} minutes this month!`
+                : 'Play music to start building your listening journey.'}
             </Text>
           </View>
           <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
@@ -321,7 +329,7 @@ export function ProfileScreen() {
           <MenuRow
             icon="shuffle-outline"
             title="My Playlists"
-            detail={`${playlists.length || 12} playlists`}
+            detail={playlists.length === 1 ? '1 playlist' : `${playlists.length} playlists`}
             onPress={() =>
               navigation.navigate('Main', {
                 screen: 'Library',

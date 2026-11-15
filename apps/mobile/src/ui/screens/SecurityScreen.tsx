@@ -26,6 +26,8 @@ import {
   loadAnalyticsPreference,
   setAnalyticsPreference,
 } from '../../services/analytics/analytics';
+import { usePersonalizationStore } from '../../services/local/personalizationStore';
+import { useLibraryStore } from '../../services/library/libraryStore';
 import type { RootStackParamList } from '../../app/navigation/types';
 
 export function SecurityScreen() {
@@ -44,6 +46,19 @@ export function SecurityScreen() {
   const [bioEnabled, setBioEnabled] = useState(false);
   const [bioBusy, setBioBusy] = useState(false);
   const [analyticsOn, setAnalyticsOn] = useState(false);
+
+  // Personalization settings
+  const personalizationEnabled = usePersonalizationStore((state) => state.enabled);
+  const setPersonalizationEnabled = usePersonalizationStore((state) => state.setEnabled);
+  const discoveryMode = usePersonalizationStore((state) => state.discoveryMode);
+  const setDiscoveryMode = usePersonalizationStore((state) => state.setDiscoveryMode);
+  const resetTasteProfile = usePersonalizationStore((state) => state.resetTasteProfile);
+  const clearRecommendationFeedback = useLibraryStore((state) => state.clearRecommendationFeedback);
+  const clearHistory = useLibraryStore((state) => state.clearHistory);
+
+  const [resetTasteOpen, setResetTasteOpen] = useState(false);
+  const [clearFeedbackOpen, setClearFeedbackOpen] = useState(false);
+  const [clearHistoryOpen, setClearHistoryOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -294,6 +309,88 @@ export function SecurityScreen() {
           </View>
         ) : null}
 
+        {/* Personalization & Music Recommendation Settings */}
+        <View
+          style={{
+            marginTop: spacing.md,
+            backgroundColor: colors.card,
+            borderRadius: radii.lg,
+            padding: spacing.md,
+            gap: spacing.md,
+          }}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+            <Ionicons name="sparkles-outline" size={22} color={colors.accent} />
+            <View style={{ flex: 1 }}>
+              <Text variant="bodyStrong">Music Personalization</Text>
+              <Text variant="caption">
+                Local-only music intelligence. Generates custom mixes and recommendations based on your listening habits.
+              </Text>
+            </View>
+            <Switch
+              value={personalizationEnabled}
+              onValueChange={(val) => {
+                setPersonalizationEnabled(val);
+                toast(val ? 'Personalization enabled' : 'Personalization disabled', 'default');
+              }}
+              trackColor={{ true: colors.accent, false: colors.input }}
+              thumbColor={colors.white}
+              accessibilityLabel="Toggle music personalization"
+            />
+          </View>
+
+          {personalizationEnabled ? (
+            <View style={{ gap: spacing.sm, paddingTop: spacing.xs, borderTopWidth: 1, borderTopColor: colors.borderSoft }}>
+              <Text variant="bodyStrong">Recommendation Discovery Mode</Text>
+              <Text variant="caption">
+                Controls how adventurous mixes and discovery suggestions should be.
+              </Text>
+
+              <View style={{ flexDirection: 'row', gap: spacing.xs, marginTop: spacing.xs }}>
+                {(
+                  [
+                    { mode: 'familiar', label: 'Familiar', desc: 'Focus on favorite & familiar tracks' },
+                    { mode: 'balanced', label: 'Balanced', desc: 'Blend favorites with discoveries' },
+                    { mode: 'exploration', label: 'Exploration', desc: 'Adventurous picks & new genres' },
+                  ] as const
+                ).map(({ mode, label }) => {
+                  const active = discoveryMode === mode;
+                  return (
+                    <PrimaryButton
+                      key={mode}
+                      label={label}
+                      variant={active ? 'primary' : 'secondary'}
+                      compact
+                      style={{ flex: 1 }}
+                      onPress={() => {
+                        setDiscoveryMode(mode);
+                        toast(`Discovery mode set to ${label}`, 'default');
+                      }}
+                    />
+                  );
+                })}
+              </View>
+
+              <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm }}>
+                <PrimaryButton
+                  label="Reset Taste Profile"
+                  variant="secondary"
+                  compact
+                  style={{ flex: 1 }}
+                  onPress={() => setResetTasteOpen(true)}
+                />
+                <PrimaryButton
+                  label="Clear Feedback"
+                  variant="secondary"
+                  compact
+                  style={{ flex: 1 }}
+                  onPress={() => setClearFeedbackOpen(true)}
+                />
+              </View>
+            </View>
+          ) : null}
+        </View>
+
         <View
           style={{
             marginTop: spacing.md,
@@ -325,10 +422,38 @@ export function SecurityScreen() {
         </View>
 
         <Text variant="caption" style={{ marginTop: spacing.lg, lineHeight: 17 }}>
-          Sinc has no account and no cloud library. If you forget the PIN, clearing app data is the
-          only way back in.
+          Sinc has no account and no cloud library. All recommendation algorithms, taste profiles, and
+          play statistics stay 100% on your device.
         </Text>
       </ScrollView>
+
+      <ConfirmDialog
+        visible={resetTasteOpen}
+        title="Reset Music Taste Profile?"
+        message="This clears your learned music preferences and listening event records. Your liked songs, playlists, and downloads will remain untouched."
+        confirmLabel="Reset Profile"
+        destructive
+        onCancel={() => setResetTasteOpen(false)}
+        onConfirm={() => {
+          resetTasteProfile();
+          setResetTasteOpen(false);
+          toast('Music taste profile reset', 'success');
+        }}
+      />
+
+      <ConfirmDialog
+        visible={clearFeedbackOpen}
+        title="Clear Recommendation Feedback?"
+        message="This clears your thumbs-up, thumbs-down, and hidden artist/song filters."
+        confirmLabel="Clear Feedback"
+        destructive
+        onCancel={() => setClearFeedbackOpen(false)}
+        onConfirm={() => {
+          clearRecommendationFeedback();
+          setClearFeedbackOpen(false);
+          toast('Recommendation feedback cleared', 'success');
+        }}
+      />
 
       <ConfirmDialog
         visible={disableOpen}

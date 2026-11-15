@@ -9,7 +9,7 @@ import type {
   CanonicalPlaylist,
   CanonicalTrack,
 } from '@sinc/shared';
-import { normalizeText } from '@sinc/shared';
+import { normalizeText, rankPersonalizedTracks } from '@sinc/shared';
 import { Screen, SectionHeader } from '../components/Screen';
 import { Text } from '../components/Text';
 import { SearchInput, FilterChip } from '../components/Fields';
@@ -23,6 +23,7 @@ import { useSearchStore, MIN_QUERY_CHARS } from '../../features/search/searchSto
 import type { SearchType } from '../../api/music';
 import { useLibraryStore } from '../../services/library/libraryStore';
 import { useDownloadsStore } from '../../services/library/downloadsStore';
+import { usePersonalizationStore } from '../../services/local/personalizationStore';
 import { usePlayerStore } from '../../services/player/playerStore';
 import { playerService } from '../../services/player/PlayerService';
 import { openSongMenu } from '../songMenu/songMenuStore';
@@ -192,16 +193,54 @@ export function SearchScreen() {
     () => (type === 'all' || type === 'tracks' ? local.tracks : []),
     [type, local.tracks]
   );
+  const personalizationEnabled = usePersonalizationStore((state) => state.enabled);
+  const favoriteTrackIds = useMemo(() => new Set(favorites.map((t) => t.id)), [favorites]);
+  const playedTrackIds = useMemo(() => new Set(recentlyPlayed.map((t) => t.id)), [recentlyPlayed]);
+  const followedArtistNames = useMemo(
+    () => new Set(followedArtists.map((a) => a.name.toLowerCase())),
+    [followedArtists]
+  );
+  const favoriteArtistNames = useMemo(
+    () =>
+      new Set(
+        favorites.map((t) => t.artists[0]?.name?.toLowerCase()).filter(Boolean) as string[]
+      ),
+    [favorites]
+  );
+  const downloadedTrackIds = useMemo(
+    () => new Set(downloadedTracks.map((t) => t.id)),
+    [downloadedTracks]
+  );
+
   const allTracks = useMemo(() => {
+    const pool = [...localTracks, ...remoteTracks];
     const seen = new Set<string>();
-    const merged: CanonicalTrack[] = [];
-    for (const track of [...localTracks, ...remoteTracks]) {
+    const deduped: CanonicalTrack[] = [];
+    for (const track of pool) {
       if (seen.has(track.id)) continue;
       seen.add(track.id);
-      merged.push(track);
+      deduped.push(track);
     }
-    return merged;
-  }, [localTracks, remoteTracks]);
+    if (!trimmed) return deduped;
+    return rankPersonalizedTracks(trimmed, deduped, {
+      favoriteTrackIds,
+      playedTrackIds,
+      followedArtistNames,
+      favoriteArtistNames,
+      downloadedTrackIds,
+      enabled: personalizationEnabled,
+    }).map((r) => r.track);
+  }, [
+    localTracks,
+    remoteTracks,
+    trimmed,
+    favoriteTrackIds,
+    playedTrackIds,
+    followedArtistNames,
+    favoriteArtistNames,
+    downloadedTrackIds,
+    personalizationEnabled,
+  ]);
   const localPlaylists = type === 'all' || type === 'playlists' ? local.playlists : [];
   const localArtists = type === 'all' || type === 'artists' ? local.artists : [];
   const localAlbums = type === 'all' || type === 'albums' ? local.albums : [];

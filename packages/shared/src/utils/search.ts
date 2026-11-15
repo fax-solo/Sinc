@@ -417,3 +417,61 @@ export function mergeAndDedupeTracks(tracks: CanonicalTrack[], query?: string): 
 
   return merged;
 }
+
+export interface PersonalizationSearchSignals {
+  favoriteTrackIds?: ReadonlySet<string>;
+  playedTrackIds?: ReadonlySet<string>;
+  followedArtistNames?: ReadonlySet<string>;
+  favoriteArtistNames?: ReadonlySet<string>;
+  downloadedTrackIds?: ReadonlySet<string>;
+  enabled?: boolean;
+}
+
+/**
+ * Ranks tracks by combining base search relevance with subtle personalization signals.
+ * Guarantees that exact text matches always dominate, while giving a controlled boost
+ * to user favorites, previous plays, and followed artists within competitive matches.
+ */
+export function rankPersonalizedTracks(
+  query: string,
+  tracks: CanonicalTrack[],
+  signals?: PersonalizationSearchSignals
+): ScoredTrack[] {
+  const parsed = parseQuery(query);
+  const enabled = signals?.enabled ?? true;
+
+  const scoredList = tracks.map((track) => {
+    const scored = scoreTrack(parsed, track);
+    let boost = 0;
+
+    if (enabled && signals) {
+      // Only apply personalization boost if the track has baseline text relevance (score >= 40).
+      // This guarantees an unrelated favorited track NEVER outranks an exact match.
+      if (scored.score >= 40) {
+        if (signals.favoriteTrackIds?.has(track.id)) boost += 15;
+        if (signals.playedTrackIds?.has(track.id)) boost += 10;
+        if (signals.downloadedTrackIds?.has(track.id)) boost += 8;
+
+        const leadArtist = track.artists[0]?.name.toLowerCase();
+        if (leadArtist) {
+          if (signals.favoriteArtistNames?.has(leadArtist)) boost += 10;
+          else if (signals.followedArtistNames?.has(leadArtist)) boost += 8;
+        }
+        boost = Math.min(25, boost);
+      }
+    }
+
+    return {
+      track: scored.track,
+      score: scored.score + boost,
+      confidence: scored.confidence,
+      matchReasons:
+        boost > 0
+          ? [...scored.matchReasons, `personal_affinity(+${boost})`]
+          : scored.matchReasons,
+    };
+  });
+
+  return scoredList.sort((a, b) => b.score - a.score);
+}
+

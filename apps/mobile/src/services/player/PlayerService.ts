@@ -26,6 +26,7 @@ import { track } from '../analytics/analytics';
 import type { NativePlaybackState, NativeProgressEvent } from '../native/types';
 import { selectCurrentTrack, usePlayerStore } from './playerStore';
 import { usePlayerProgressStore } from './playerProgressStore';
+import { usePersonalizationStore } from '../local/personalizationStore';
 
 /**
  * Recently resolved stream URLs. googlevideo URLs live ~6h; entries younger
@@ -82,6 +83,9 @@ class PlayerService {
   private recordedTrackId: string | null = null;
   /** Id of the track already credited for most played (>= 50% duration reached). */
   private recordedFiftyPercentTrackId: string | null = null;
+  /** Track replay detection fields. */
+  private lastPlayedTrackId: string | null = null;
+  private lastPlayedTrackTime = 0;
   /** Bumped on every load so stale async work is discarded. */
   private generation = 0;
   /** Serializes commands to keep rapid taps from interleaving. */
@@ -317,7 +321,22 @@ class PlayerService {
     const duration = progress.durationMs;
     const early =
       progress.positionMs < 30_000 || (duration > 0 && progress.positionMs / duration < 0.25);
-    if (early) useLibraryStore.getState().recordSkip(current);
+    if (early) {
+      useLibraryStore.getState().recordSkip(current);
+      usePersonalizationStore.getState().recordEvent({
+        trackId: current.id,
+        trackTitle: current.title,
+        artistId: current.artists[0]?.id,
+        artistName: current.artists[0]?.name ?? 'Unknown Artist',
+        albumId: current.album?.id,
+        albumTitle: current.album?.title,
+        genres: current.artists[0]?.genres,
+        eventType: 'track_skipped',
+        playbackDurationMs: progress.positionMs,
+        trackDurationMs: duration || current.durationMs || 0,
+        completionRatio: duration > 0 ? Math.min(1, progress.positionMs / duration) : 0,
+      });
+    }
   }
 
   seekTo(positionMs: number): Promise<void> {
@@ -359,6 +378,23 @@ class PlayerService {
           useLibraryStore.getState().recordPlayed(current);
           recordPlay(current);
           track('playback:start', current.id);
+          const isReplay =
+            this.lastPlayedTrackId === current.id && Date.now() - this.lastPlayedTrackTime < 300_000;
+          this.lastPlayedTrackId = current.id;
+          this.lastPlayedTrackTime = Date.now();
+          usePersonalizationStore.getState().recordEvent({
+            trackId: current.id,
+            trackTitle: current.title,
+            artistId: current.artists[0]?.id,
+            artistName: current.artists[0]?.name ?? 'Unknown Artist',
+            albumId: current.album?.id,
+            albumTitle: current.album?.title,
+            genres: current.artists[0]?.genres,
+            eventType: isReplay ? 'track_replayed' : 'track_started',
+            playbackDurationMs: 0,
+            trackDurationMs: event.durationMs || current.durationMs || 0,
+            completionRatio: 0,
+          });
         }
       }
 
@@ -497,6 +533,22 @@ class PlayerService {
     // The current track actually played to completion.
     useLibraryStore.getState().recordPlayCompleted(current);
     track('playback:complete', trackId);
+
+    const completionDuration =
+      current.durationMs || usePlayerProgressStore.getState().durationMs || 0;
+    usePersonalizationStore.getState().recordEvent({
+      trackId: current.id,
+      trackTitle: current.title,
+      artistId: current.artists[0]?.id,
+      artistName: current.artists[0]?.name ?? 'Unknown Artist',
+      albumId: current.album?.id,
+      albumTitle: current.album?.title,
+      genres: current.artists[0]?.genres,
+      eventType: 'track_completed',
+      playbackDurationMs: completionDuration,
+      trackDurationMs: completionDuration,
+      completionRatio: 1.0,
+    });
     store.next();
     // Re-read state: `store` is a snapshot — after next() the queue may have
     // moved to 'ended' (repeat off, queue exhausted). Keep the media session

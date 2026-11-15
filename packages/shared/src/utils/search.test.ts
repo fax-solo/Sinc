@@ -6,6 +6,7 @@ import {
   levenshteinDistance,
   mergeAndDedupeTracks,
   parseQuery,
+  rankPersonalizedTracks,
   scoreTrack,
   stringSimilarity,
 } from './search.js';
@@ -154,3 +155,48 @@ describe('Smart Deduplication and Provider ID Merging', () => {
     expect(merged).toHaveLength(2);
   });
 });
+
+describe('Personalized Search Ranking', () => {
+  it('gives affinity boost to favorite/played tracks among relevant results', () => {
+    const trackA = mockTrack('1', 'Starboy', 'The Weeknd');
+    const trackB = mockTrack('2', 'Starboy (Remix)', 'The Weeknd');
+
+    // Both match query "Starboy", but trackA is a favorite
+    const ranked = rankPersonalizedTracks('Starboy', [trackB, trackA], {
+      favoriteTrackIds: new Set(['itunes:1']),
+      playedTrackIds: new Set(['itunes:1']),
+      enabled: true,
+    });
+
+    expect(ranked[0]?.track.id).toBe('itunes:1');
+    expect(ranked[0]?.matchReasons.some((r) => r.startsWith('personal_affinity'))).toBe(true);
+  });
+
+  it('NEVER allows an unrelated favorite song to outrank an exact match', () => {
+    const exactMatch = mockTrack('1', 'Hotel California', 'Eagles');
+    const unrelatedFav = mockTrack('2', 'California Love', '2Pac');
+
+    const ranked = rankPersonalizedTracks('Hotel California', [unrelatedFav, exactMatch], {
+      favoriteTrackIds: new Set(['itunes:2']), // user loves 2Pac
+      favoriteArtistNames: new Set(['2pac']),
+      enabled: true,
+    });
+
+    // Exact match must still be #1!
+    expect(ranked[0]?.track.id).toBe('itunes:1');
+    expect(ranked[0]?.track.title).toBe('Hotel California');
+  });
+
+  it('ignores personalization when disabled', () => {
+    const trackA = mockTrack('1', 'Starboy', 'The Weeknd');
+    const trackB = mockTrack('2', 'Starboy', 'The Weeknd');
+
+    const ranked = rankPersonalizedTracks('Starboy', [trackA, trackB], {
+      favoriteTrackIds: new Set(['itunes:2']),
+      enabled: false,
+    });
+
+    expect(ranked[0]?.matchReasons.some((r) => r.startsWith('personal_affinity'))).toBe(false);
+  });
+});
+

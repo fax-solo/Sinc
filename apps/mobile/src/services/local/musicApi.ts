@@ -42,11 +42,13 @@ import {
   hasUsefulAffinity,
   hashString,
   localDayKey,
+  localWeekKey,
   mulberry32,
   shuffled,
   type AffinityEvidence,
   type ArtistAffinity,
 } from './affinity';
+import { usePersonalizationStore } from './personalizationStore';
 import {
   freshRatioFor,
   MIN_MIX_SIZE,
@@ -100,7 +102,7 @@ export interface HomeFeed {
   starterMixes: DailyMix[];
 }
 
-export type MixKind = 'daily' | 'favorites' | 'discovery' | 'artist' | 'mood';
+export type MixKind = 'daily' | 'favorites' | 'discovery' | 'artist' | 'mood' | 'weekly';
 
 export interface DailyMix {
   id: string;
@@ -604,9 +606,9 @@ function leadArtistName(track: CanonicalTrack): string {
 }
 
 /** One mix per family keeps Home fast and varied: favorites, a daily genre,
- *  an artist, and discovery. Extra clusters/seeds are fallbacks when a pool
+ *  an artist, discovery, and a weekly mix. Extra clusters/seeds are fallbacks when a pool
  *  comes back too thin. */
-const MAX_MIXES = 4;
+const MAX_MIXES = 5;
 const MAX_DAILY_MIXES = 1;
 const MAX_ARTIST_MIXES = 1;
 
@@ -815,6 +817,31 @@ async function buildMixesFromSignals(
     }
   }
 
+  // 5) Weekly mix — refreshed weekly based on overall taste
+  if (mixes.length < MAX_MIXES && recommendableAffinity.length > 0) {
+    const weekRand = mulberry32(hashString(`sinc-weekly-mix:${localWeekKey(local.nowMs)}`));
+    const candidatePool = shuffled(
+      [...local.favoriteTracks, ...local.recentTracks].filter(usable),
+      weekRand
+    );
+    if (candidatePool.length >= MIN_MIX_SIZE) {
+      const tracks = selectMixTracks(candidatePool, MIX_SIZE, scoreOf, 99);
+      if (tracks.length >= MIN_MIX_SIZE) {
+        mixes.push({
+          id: 'mix:weekly',
+          name: 'Your Weekly Mix',
+          kind: 'weekly' as MixKind,
+          genre: 'Weekly Highlights',
+          description: 'Refreshed every week with the music that defines your sound.',
+          artworkUrl: mixArtwork(tracks),
+          trackCount: tracks.length,
+          tracks,
+        });
+        remember(tracks);
+      }
+    }
+  }
+
   return mixes.slice(0, MAX_MIXES);
 }
 
@@ -865,8 +892,25 @@ async function buildPersonalizedSections(
     sections.push({ kind: 'mixes', title: 'Made for you', mixes });
   }
 
-  // 2) Zero-network rail: jump back in (favorites first, then recent).
   const seenIds = new Set<string>();
+
+  // 2) Rediscover your favorites (tracks favorited or played before, but not in top 15 recent)
+  const recentTopIds = new Set(local.recentTracks.slice(0, 15).map((t) => t.id));
+  const rediscoveryCandidates = local.favoriteTracks.filter(
+    (t) => usable(t) && !recentTopIds.has(t.id) && !seenIds.has(t.id)
+  );
+  if (rediscoveryCandidates.length >= 3) {
+    const rediscovery = rediscoveryCandidates.slice(0, 10);
+    for (const t of rediscovery) seenIds.add(t.id);
+    sections.push({
+      kind: 'tracks',
+      title: 'Rediscover your favorites',
+      explanation: 'Songs you loved that you haven’t played recently',
+      tracks: rediscovery,
+    });
+  }
+
+  // 3) Zero-network rail: jump back in (favorites first, then recent).
   const revisit: CanonicalTrack[] = [];
   for (const t of [...local.favoriteTracks, ...local.recentTracks]) {
     if (revisit.length >= 12) break;
@@ -879,15 +923,16 @@ async function buildPersonalizedSections(
     sections.push({ kind: 'tracks', title: 'Jump back in', tracks: revisit });
   }
 
-  // 3) "Because you listen to" rails, ranked by affinity, not raw count.
+  // 4) "Because you listen to" rails, ranked by affinity, not raw count.
   for (const a of recommendableAffinity.slice(0, 2)) {
     try {
       const [tracks, albums] = await Promise.all([
         deezer.searchTracks(`artist:"${a.name}"`, 15).catch(() => [] as CanonicalTrack[]),
         itunes.searchAlbums(a.name, 4).catch(() => [] as CanonicalAlbum[]),
       ]);
-      const usableTracks = tracks.filter(usable).slice(0, 12);
+      const usableTracks = tracks.filter((t) => usable(t) && !seenIds.has(t.id)).slice(0, 12);
       if (usableTracks.length > 0) {
+        for (const t of usableTracks) seenIds.add(t.id);
         sections.push({
           kind: 'tracks',
           title: 'Because you listen to',
@@ -907,21 +952,99 @@ async function buildPersonalizedSections(
     }
   }
 
-  // 4) Fresh finds — the discovery half of the taste slider. Only new
-  //    artists the listener has no history with.
-  if (discovery >= 0.45) {
+  // 5) More from your favorite artists (deeper catalog)
+  if (recommendableAffinity.length > 0) {
+    const topArtist = recommendableAffinity[0];
+    try {
+      const extraTracks = (
+        await deezer
+          .searchTracks(`artist:"${topArtist.name}"`, 25)
+          .catch(() => [] as CanonicalTrack[])
+      )
+        .filter((t) => usable(t) && !seenIds.has(t.id))
+        .slice(0, 10);
+      if (extraTracks.length >= 3) {
+        for (const t of extraTracks) seenIds.add(t.id);
+        sections.push({
+          kind: 'tracks',
+          title: `More from ${topArtist.name}`,
+          explanation: `Deep cuts & catalog from ${topArtist.name}`,
+          tracks: extraTracks,
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 6) Hidden gems — less-discovered tracks related to taste
+  if (recommendableAffinity.length > 0) {
+    const top = recommendableAffinity[0];
+    try {
+      const gemCandidates = (
+        await deezer.searchTracks(top.name, 35).catch(() => [] as CanonicalTrack[])
+      )
+        .filter((t) => {
+          if (!usable(t) || seenIds.has(t.id)) return false;
+          const lead = leadArtistName(t).toLowerCase();
+          return lead !== top.name.toLowerCase();
+        })
+        .slice(0, 10);
+      if (gemCandidates.length >= 3) {
+        for (const t of gemCandidates) seenIds.add(t.id);
+        sections.push({
+          kind: 'tracks',
+          title: 'Hidden gems for you',
+          explanation: `Under-the-radar songs aligned with your taste`,
+          tracks: gemCandidates,
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 7) New releases for you
+  if (recommendableAffinity.length > 0) {
+    try {
+      const albums = (
+        await itunes
+          .searchAlbums(recommendableAffinity[0].name, 6)
+          .catch(() => [] as CanonicalAlbum[])
+      )
+        .filter((a) => !hiddenLower.has((a.artist?.name ?? '').toLowerCase()))
+        .slice(0, 6);
+      if (albums.length >= 2) {
+        sections.push({
+          kind: 'albums',
+          title: 'New releases for you',
+          explanation: `Releases from artists you listen to`,
+          albums,
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 8) Fresh finds / Outside your comfort zone — taste slider
+  if (discovery >= 0.40) {
     try {
       const fresh = (await deezer.chartTracks(40).catch(() => [] as CanonicalTrack[]))
         .filter((t) => {
-          if (!usable(t)) return false;
+          if (!usable(t) || seenIds.has(t.id)) return false;
           return !knownArtistNames.has((t.artists[0]?.name ?? '').toLowerCase());
         })
         .slice(0, 12);
-      if (fresh.length >= 5) {
+      if (fresh.length >= 4) {
+        for (const t of fresh) seenIds.add(t.id);
+        const isExploration = discovery >= 0.65;
         sections.push({
           kind: 'tracks',
-          title: 'Fresh finds',
-          explanation: 'Artists outside your usual orbit',
+          title: isExploration ? 'Outside your comfort zone' : 'Fresh finds',
+          explanation: isExploration
+            ? 'Adventurous sounds curated beyond your usual listening'
+            : 'Artists outside your usual orbit',
           tracks: fresh,
         });
       }
@@ -932,9 +1055,10 @@ async function buildPersonalizedSections(
 
   try {
     const trending = (await deezer.chartTracks(20).catch(() => [] as CanonicalTrack[])).filter(
-      usable
+      (t) => usable(t) && !seenIds.has(t.id)
     );
     if (trending.length > 0) {
+      for (const t of trending) seenIds.add(t.id);
       sections.push({
         kind: 'tracks',
         title: 'Trending songs',
@@ -959,7 +1083,7 @@ async function buildPersonalizedSections(
     // charts are a bonus rail
   }
 
-  // 5) Saved for you (downloads), skipping hidden/over-skipped tracks.
+  // 9) Saved for you (downloads), skipping hidden/over-skipped tracks.
   const downloaded = local.downloadedTracks.filter(usable).slice(0, 12);
   if (downloaded.length > 0) {
     sections.push({ kind: 'tracks', title: 'Saved for you', tracks: downloaded });
@@ -1008,6 +1132,10 @@ export const musicApi = {
   },
 
   async getPersonalizedHomeFeed(library: LibraryPayload): Promise<PersonalizedHomeFeed> {
+    const isPersonalizationEnabled = usePersonalizationStore.getState().enabled;
+    if (!isPersonalizationEnabled) {
+      return { sections: [], personalized: false };
+    }
     const signals = library.signals;
     const local = buildLocalEvidence(Date.now());
     const affinity = computeArtistAffinity(signals, {
