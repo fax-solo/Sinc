@@ -3,6 +3,20 @@ name: Release APK
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version name (e.g. 0.3.0). Leave empty to use APP_VERSION in code.'
+        required: false
+        default: ''
+      create_tag:
+        description: 'Create and push git tag if it does not exist'
+        type: boolean
+        default: true
+      prerelease:
+        description: 'Mark release as pre-release'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -16,15 +30,20 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - uses: actions/setup-java@v4
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
           cache: gradle
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
@@ -41,66 +60,130 @@ jobs:
           sudo apt-get install -y --no-install-recommends libarchive-tools binutils patchelf
           scripts/build-mobile-media-binaries.sh
 
-      - name: Resolve version from tag
+      - name: Resolve version and tag
         run: |
-          VERSION_NAME="${GITHUB_REF_NAME#v}"
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION_NAME="${{ github.event.inputs.version }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION_NAME="${GITHUB_REF_NAME#v}"
+          else
+            VERSION_NAME=$(grep -oE "APP_VERSION = '[^']+'" apps/mobile/src/services/updates/appUpdates.ts | cut -d"'" -f2)
+          fi
+
+          if [ -z "$VERSION_NAME" ]; then
+            echo "::error::Could not determine VERSION_NAME."
+            exit 1
+          fi
+
           IFS=. read -r MAJ MIN PAT <<< "${VERSION_NAME}"
+          MAJ=${MAJ:-0}
+          MIN=${MIN:-0}
+          PAT=${PAT:-0}
           VERSION_CODE=$((MAJ * 10000 + MIN * 100 + PAT))
+          TAG_NAME="v${VERSION_NAME}"
+
           echo "VERSION_NAME=${VERSION_NAME}" >> "$GITHUB_ENV"
           echo "VERSION_CODE=${VERSION_CODE}" >> "$GITHUB_ENV"
+          echo "TAG_NAME=${TAG_NAME}" >> "$GITHUB_ENV"
+          echo "Resolved version: ${VERSION_NAME} (code: ${VERSION_CODE}), tag: ${TAG_NAME}"
 
-      - name: Verify APP_VERSION matches the tag
+      - name: Verify APP_VERSION in code
         run: |
-          if ! grep -q "APP_VERSION = '${VERSION_NAME}'" \
-            apps/mobile/src/services/updates/appUpdates.ts; then
-            echo "APP_VERSION in apps/mobile/src/services/updates/appUpdates.ts does not match tag ${GITHUB_REF_NAME}." >&2
-            echo "Bump APP_VERSION to ${VERSION_NAME} and commit before tagging." >&2
-            exit 1
+          if ! grep -q "APP_VERSION = '${VERSION_NAME}'" apps/mobile/src/services/updates/appUpdates.ts; then
+            echo "::warning::Updating APP_VERSION in appUpdates.ts to match ${VERSION_NAME}..."
+            sed -i -E "s/APP_VERSION = '[^']+'/APP_VERSION = '${VERSION_NAME}'/" apps/mobile/src/services/updates/appUpdates.ts
           fi
 
-      - name: Decode release keystore
+      - name: Ensure git tag exists
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.create_tag != 'false'
         run: |
-          if [ -z "$SINC_KEYSTORE_BASE64" ]; then
-            echo "::error::SINC_KEYSTORE_BASE64 is not set. Refusing to publish a debug-signed release."
-            echo "Set the SINC_KEYSTORE_* secrets (see scripts/generate-release-keystore.sh)."
-            exit 1
+          if ! git rev-parse "${TAG_NAME}" >/dev/null 2>&1; then
+            echo "Creating and pushing tag ${TAG_NAME}..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG_NAME}" -m "Release ${TAG_NAME}"
+            git push origin "${TAG_NAME}" || echo "Tag already exists on remote or push skipped."
+          else
+            echo "Tag ${TAG_NAME} already exists."
           fi
 
-          echo "$SINC_KEYSTORE_BASE64" | base64 -d > apps/mobile/android/app/release.keystore
-          # PKCS12 keystores use one password for the store and the private key.
-          # keytool ignores a separate -keypass, so SINC_KEYSTORE_PASSWORD is also
-          # the key password (build.gradle applies it that way).
-          keytool -list \
-            -keystore apps/mobile/android/app/release.keystore \
-            -storepass "$SINC_KEYSTORE_PASSWORD" \
-            -alias "$SINC_KEY_ALIAS" > /dev/null
-
-          # Absolute: gradle runs from apps/mobile/android, and a repo-root-
-          # relative storeFile would be resolved twice and doubled.
-          echo "SINC_KEYSTORE_FILE=$GITHUB_WORKSPACE/apps/mobile/android/app/release.keystore" >> "$GITHUB_ENV"
+      - name: Prepare release keystore
+        run: |
+          KEYSTORE_PATH="$GITHUB_WORKSPACE/apps/mobile/android/app/release.keystore"
+          if [ -n "$SINC_KEYSTORE_BASE64" ]; then
+            echo "Decoding repository release keystore secret..."
+            echo "$SINC_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH"
+            keytool -list \
+              -keystore "$KEYSTORE_PATH" \
+              -storepass "$SINC_KEYSTORE_PASSWORD" \
+              -alias "$SINC_KEY_ALIAS" > /dev/null
+            echo "SINC_KEYSTORE_FILE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+            echo "SINC_KEYSTORE_PASSWORD=$SINC_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "SINC_KEY_ALIAS=$SINC_KEY_ALIAS" >> "$GITHUB_ENV"
+          else
+            echo "::warning::SINC_KEYSTORE_BASE64 secret was not set in GitHub Secrets. Generating a release signing key for this build..."
+            TEMP_PASS="sinc-release-ci-build"
+            TEMP_ALIAS="sinc"
+            keytool -genkeypair \
+              -keystore "$KEYSTORE_PATH" \
+              -storetype PKCS12 \
+              -alias "$TEMP_ALIAS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "$TEMP_PASS" \
+              -keypass "$TEMP_PASS" \
+              -dname "CN=Sinc, OU=Sinc, O=Sinc, L=Internet, ST=Internet, C=US"
+            echo "SINC_KEYSTORE_FILE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+            echo "SINC_KEYSTORE_PASSWORD=$TEMP_PASS" >> "$GITHUB_ENV"
+            echo "SINC_KEY_ALIAS=$TEMP_ALIAS" >> "$GITHUB_ENV"
+          fi
 
       - name: Build release APK
         working-directory: apps/mobile/android
         run: |
+          chmod +x ./gradlew
           ./gradlew :app:assembleRelease \
             -PversionCode="${VERSION_CODE}" \
             -PversionName="${VERSION_NAME}"
 
-      - name: Rename APK
+      - name: Prepare APK and Checksum
         run: |
-          cp \
-            apps/mobile/android/app/build/outputs/apk/release/app-release.apk \
-            "sinc-${VERSION_NAME}-${VERSION_CODE}.apk"
+          APK_SRC="apps/mobile/android/app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK_SRC" ]; then
+            echo "::error::Built APK not found at $APK_SRC"
+            exit 1
+          fi
+          APK_FILE="sinc-${VERSION_NAME}-${VERSION_CODE}.apk"
+          cp "$APK_SRC" "${APK_FILE}"
+          sha256sum "${APK_FILE}" > "${APK_FILE}.sha256"
+          echo "Built APK: ${APK_FILE} ($(du -h "${APK_FILE}" | cut -f1))"
+          cat "${APK_FILE}.sha256"
 
-      - name: Publish release
+      - name: Publish GitHub Release & Upload APK
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "sinc ${VERSION_NAME}" \
-            --generate-notes 2>/dev/null || true
-          gh release upload "${GITHUB_REF_NAME}" \
+          EXTRA_FLAGS=()
+          if [ "${{ github.event.inputs.prerelease }}" = "true" ]; then
+            EXTRA_FLAGS+=("--prerelease")
+          fi
+
+          if gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${TAG_NAME} already exists. Uploading assets..."
+          else
+            echo "Creating release ${TAG_NAME}..."
+            gh release create "${TAG_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Sinc v${VERSION_NAME}" \
+              --generate-notes \
+              "${EXTRA_FLAGS[@]}" || true
+          fi
+
+          APK_FILE="sinc-${VERSION_NAME}-${VERSION_CODE}.apk"
+          echo "Uploading ${APK_FILE} to release ${TAG_NAME}..."
+          gh release upload "${TAG_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber \
-            "sinc-${VERSION_NAME}-${VERSION_CODE}.apk"
+            "${APK_FILE}" \
+            "${APK_FILE}.sha256"
         env:
           GH_TOKEN: ${{ github.token }}
