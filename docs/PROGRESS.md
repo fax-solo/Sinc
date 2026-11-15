@@ -265,7 +265,7 @@ Known limitations:
 - The foreground notification id belongs to the primary job; when it ends, the
   FGS card switches to the next job (same id, no duplicate).
 
-## Phase 7 — Background playback hardening 🕒 (code done, device matrix pending)
+## Phase 7 — Background playback hardening 🕒 (code done, manual device pass pending)
 
 Implemented:
 
@@ -306,7 +306,7 @@ Checks:
 
 - `./gradlew :app:compileDebugKotlin` ✅
 - `./gradlew :app:assembleRelease` ✅
-- Device pass: 🕒 blocked until the phone is reconnected (USB `adb` was lost).
+- Device pass: 🕒 left for manual verification — see the checklist below.
 
 ## Device findings (Samsung Galaxy A05, Android 14, release build)
 
@@ -354,9 +354,38 @@ Bug found and fixed — **Show Lyrics blocked by Android 14 BAL**:
   provider. On-device: Favorite works from the lockscreen expanded player (action
   switched to "Remove from Liked Songs" with a filled heart).
 
-## Upcoming
+## Left for manual device verification
 
-- Phase 7: Background playback hardening and the full A–G matrix (audio focus,
-  headphone disconnect, interruptions, end-of-queue/track switching, media
-  buttons, service lifecycle), plus the Phase 6 device follow-ups that need the
-  phone reconnected: notification Cancel → result card and concurrent-job cards.
+All code below is implemented and committed; only hardware confirmation is
+outstanding. Install the APK built from `5dee3cb`:
+
+```sh
+adb install -r apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+```
+
+1. **Download cancel** — start a download, expand the Sinc card in the shade,
+   tap Cancel. Expect: the progress card disappears, a "Download cancelled"
+   card appears on the Sinc results channel, the row is gone from Downloads,
+   and no download service notification remains.
+2. **Concurrent downloads** — start two downloads quickly. Expect two cards
+   (the first owns the foreground card). Completing one leaves the other with
+   its own real progress and no duplicate card.
+3. **Dismissed result stays dismissed** — complete a download, dismiss its
+   result card, then start another download. Expect the dismissed card not to
+   reappear when the new artwork loads.
+4. **Focus / interruption** — play, then take a call or start audio in another
+   app. Expect pause, then resume when the interruption ends; an explicit user
+   pause before the interruption must stay paused.
+5. **Headphone / Bluetooth unplug** — play over headphones, disconnect them.
+   Expect playback to pause, with notification and lockscreen agreeing.
+6. **Screen off / Doze** — play a streaming track with the screen off for
+   10+ minutes. Expect uninterrupted playback and a correct lockscreen position.
+7. **Swipe away** — swipe Sinc from recents while playing: playback continues.
+   Pause first, then swipe: the service and notification stop.
+8. **Output switching (Phase 5)** — with Bluetooth or wired audio connected,
+   open Output and switch routes. Expect the highlight to follow the actual
+   route and audio to move immediately.
+
+Media buttons, lockscreen transport/favorite/Show Lyrics, end-of-queue
+behavior, and the started/completed download notifications were already
+verified on hardware in earlier phases.
