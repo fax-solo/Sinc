@@ -530,6 +530,10 @@ class PlayerService {
       if (download?.localUri) {
         uri = download.localUri;
         mimeType = mimeForLocalUri(download.localUri);
+      } else if (download?.publishedName) {
+        // Fallback to the persistent Music/Sinc folder on Android
+        uri = `file:///storage/emulated/0/Music/Sinc/${download.publishedName}`;
+        mimeType = mimeForLocalUri(uri);
       } else {
         // A fresh cached URL (< 5h) plays instantly; otherwise resolve (with
         // retries for flaky mobile networks) and remember the URL for next time.

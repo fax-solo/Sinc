@@ -87,4 +87,6 @@ export const STORAGE_KEYS = {
   STREAM_CACHE: 'sinc.streamCache',
   NOTIFICATIONS: 'sinc.notifications',
   UI_PREFS: 'sinc.uiPrefs',
+  PROFILE: 'sinc.profile',
+  BACKUP_INFO: 'sinc.backupInfo',
 } as const;
