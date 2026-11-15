@@ -11,6 +11,8 @@ import { QueueScreen } from '../../ui/screens/QueueScreen';
 import { AlbumScreen, ArtistScreen, LocalPlaylistScreen, MixScreen, PlaylistScreen } from '../../ui/screens/CollectionScreens';
 import { ProfileScreen } from '../../ui/screens/ProfileScreen';
 import { EditProfileScreen } from '../../ui/screens/EditProfileScreen';
+import { AppearanceScreen } from '../../ui/screens/AppearanceScreen';
+import { StorageDownloadsScreen } from '../../ui/screens/StorageDownloadsScreen';
 import { NotificationsScreen } from '../../ui/screens/NotificationsScreen';
 import { DownloadsScreen } from '../../ui/screens/DownloadsScreen';
 import { SettingsScreen } from '../../ui/screens/SettingsScreen';
@@ -85,6 +87,8 @@ export function RootNavigator() {
           <Stack.Screen name="Mix" component={MixScreen} />
           <Stack.Screen name="Profile" component={ProfileScreen} />
           <Stack.Screen name="EditProfile" component={EditProfileScreen} />
+          <Stack.Screen name="Appearance" component={AppearanceScreen} />
+          <Stack.Screen name="StorageDownloads" component={StorageDownloadsScreen} />
           <Stack.Screen name="Notifications" component={NotificationsScreen} />
           <Stack.Screen name="Downloads" component={DownloadsScreen} />
           <Stack.Screen name="Settings" component={SettingsScreen} />

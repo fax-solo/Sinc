@@ -1,30 +1,16 @@
 import { useCallback } from 'react';
-import { Linking, ScrollView, View } from 'react-native';
+import { Linking, Pressable, ScrollView, View } from 'react-native';
 import Ionicons from '@react-native-vector-icons/ionicons';
-import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from '../components/Text';
-import { IconButton, PrimaryButton } from '../components/Buttons';
 import { toast } from '../components/Overlays';
 import { colors, radii, spacing } from '../theme';
 import { APP_VERSION } from '../../services/updates/appUpdates';
 import { useUpdateStore } from '../../features/updates/updateStore';
-import type { RootStackParamList } from '../../app/navigation/types';
-
-function formatDate(iso: string | null): string | null {
-  if (!iso) return null;
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  });
-}
 
 export function AboutScreen() {
-  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+  const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const latest = useUpdateStore((state) => state.latest);
   const softStatus = useUpdateStore((state) => state.softStatus);
@@ -38,185 +24,175 @@ export function AboutScreen() {
     );
   }, [latest]);
 
-  const statusText =
-    softStatus === 'checking'
-      ? 'Checking for updates…'
-      : softStatus === 'available'
-        ? `Version ${latest?.versionName ?? 'new'} is available`
-        : softStatus === 'error'
-          ? 'Could not check for updates'
-          : softStatus === 'idle'
-            ? 'Update status not checked yet'
-            : 'Sinc is up to date';
+  const openLink = (url: string) => {
+    void Linking.openURL(url).catch(() => toast('Could not open link', 'error'));
+  };
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.background }}>
+      {/* Header */}
+      <View
+        style={{
+          paddingTop: insets.top + spacing.sm,
+          paddingHorizontal: spacing.lg,
+          paddingBottom: spacing.md,
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}
+      >
+        <Pressable
+          onPress={() => navigation.goBack()}
+          hitSlop={12}
+          style={({ pressed }) => ({
+            width: 40,
+            height: 40,
+            borderRadius: 20,
+            backgroundColor: colors.card,
+            alignItems: 'center',
+            justifyContent: 'center',
+            opacity: pressed ? 0.7 : 1,
+          })}
+        >
+          <Ionicons name="chevron-back" size={20} color={colors.text} />
+        </Pressable>
+        <Text style={{ fontSize: 18, fontWeight: '700', color: colors.text }}>
+          About
+        </Text>
+        <View style={{ width: 40 }} />
+      </View>
+
       <ScrollView
         contentContainerStyle={{
-          paddingTop: insets.top + spacing.xs,
           paddingHorizontal: spacing.lg,
           paddingBottom: insets.bottom + spacing.xxl,
         }}
         showsVerticalScrollIndicator={false}
       >
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: spacing.sm,
-            marginBottom: spacing.xl,
-          }}
-        >
-          <IconButton
-            icon="chevron-back"
-            label="Back"
-            size={38}
-            background={colors.card}
-            onPress={() => navigation.goBack()}
-          />
-          <View style={{ flex: 1 }}>
-            <Text variant="headline">About & updates</Text>
-            <Text variant="caption">Version {APP_VERSION}</Text>
-          </View>
-        </View>
-
-        <View style={{ alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xl }}>
+        {/* App Hero */}
+        <View style={{ alignItems: 'center', marginVertical: spacing.xl }}>
           <View
             style={{
-              width: 82,
-              height: 82,
-              borderRadius: 24,
-              backgroundColor: colors.accentSoft,
-              borderWidth: 1,
-              borderColor: 'rgba(30,215,96,0.25)',
+              width: 80,
+              height: 80,
+              borderRadius: radii.xl,
+              backgroundColor: 'rgba(30, 215, 96, 0.16)',
+              borderWidth: 2,
+              borderColor: 'rgba(30, 215, 96, 0.35)',
               alignItems: 'center',
               justifyContent: 'center',
+              marginBottom: spacing.md,
+              shadowColor: colors.accent,
+              shadowOffset: { width: 0, height: 4 },
+              shadowOpacity: 0.3,
+              shadowRadius: 12,
+              elevation: 8,
             }}
           >
-            <Ionicons name="musical-notes" size={38} color={colors.accent} />
+            <Ionicons name="musical-notes" size={40} color={colors.accent} />
           </View>
-          <Text variant="title">Sinc</Text>
-          <Text variant="caption">A private, on-device music player</Text>
+
+          <Text style={{ fontSize: 24, fontWeight: '800', color: colors.text }}>
+            Sinc Music
+          </Text>
+          <Text style={{ fontSize: 13, color: colors.textMuted, marginTop: 4 }}>
+            Version {APP_VERSION}
+          </Text>
+          <Text style={{ fontSize: 14, color: colors.textSecondary, marginTop: 8 }}>
+            Listen. Discover. Enjoy.
+          </Text>
         </View>
 
+        {/* Menu Options */}
         <View
           style={{
             backgroundColor: colors.card,
-            borderRadius: radii.lg,
-            padding: spacing.md,
-            gap: spacing.md,
+            borderRadius: radii.md,
+            borderWidth: 1,
+            borderColor: colors.borderSoft,
+            overflow: 'hidden',
+            marginBottom: spacing.xl,
           }}
         >
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-            <View
-              style={{
-                width: 36,
-                height: 36,
-                borderRadius: 18,
-                backgroundColor:
-                  softStatus === 'available'
-                    ? colors.accentSoft
-                    : softStatus === 'error'
-                      ? 'rgba(255,91,101,0.14)'
-                      : colors.input,
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <Ionicons
-                name={
-                  softStatus === 'available'
-                    ? 'rocket-outline'
-                    : softStatus === 'error'
-                      ? 'alert-circle-outline'
-                      : softStatus === 'idle'
-                        ? 'time-outline'
-                        : 'checkmark-circle-outline'
-                }
-                size={19}
-                color={
-                  softStatus === 'available'
-                    ? colors.accent
-                    : softStatus === 'error'
-                      ? colors.error
-                      : colors.textSecondary
-                }
-              />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text variant="bodyStrong">{statusText}</Text>
-              {latest ? (
-                <Text variant="caption">
-                  Latest release {latest.versionName}
-                  {formatDate(latest.publishedAt) ? ` · ${formatDate(latest.publishedAt)}` : ''}
-                </Text>
-              ) : null}
-            </View>
-          </View>
-
-          {softStatus === 'available' && latest ? (
-            <>
-              {latest.notes ? (
-                <View style={{ gap: 4 }}>
-                  <Text variant="micro">RELEASE NOTES</Text>
-                  <Text variant="small" style={{ lineHeight: 20 }}>
-                    {latest.notes}
-                  </Text>
-                </View>
-              ) : null}
-              <PrimaryButton
-                label="Download update"
-                icon="download-outline"
-                onPress={download}
-              />
-            </>
-          ) : null}
-
-          <PrimaryButton
-            label={checking ? 'Checking…' : 'Check for updates'}
-            variant="secondary"
-            loading={checking}
+          <AboutRow
+            icon="document-text-outline"
+            title="Terms of Service"
+            onPress={() => openLink('https://github.com/fax-solo/Sinc/blob/main/README.md')}
+          />
+          <AboutRow
+            icon="shield-outline"
+            title="Privacy Policy"
+            onPress={() => openLink('https://github.com/fax-solo/Sinc/blob/main/README.md')}
+          />
+          <AboutRow
+            icon="code-slash-outline"
+            title="Open Source Licenses"
+            onPress={() => openLink('https://github.com/fax-solo/Sinc')}
+          />
+          <AboutRow
+            icon="chatbubble-outline"
+            title="Contact Support"
+            onPress={() => openLink('https://github.com/fax-solo/Sinc/issues')}
+          />
+          <AboutRow
+            icon="star-outline"
+            title="Check for Updates"
+            detail={checking ? 'Checking…' : softStatus === 'available' ? 'Update available!' : 'Up to date'}
             onPress={() => void checkSoft()}
           />
         </View>
 
-        <View
-          style={{
-            marginTop: spacing.md,
-            backgroundColor: colors.card,
-            borderRadius: radii.lg,
-            padding: spacing.md,
-            gap: spacing.sm,
-          }}
-        >
-          <Text variant="bodyStrong">How updates work</Text>
-          <Text variant="small" style={{ lineHeight: 20 }}>
-            Sinc checks the project’s public GitHub releases. When a newer APK is published, it
-            appears here and in your notification centre. Updates are installed by Android after
-            you download them; Sinc never installs anything silently.
+        {/* Made with love footer */}
+        <View style={{ alignItems: 'center', marginTop: spacing.md }}>
+          <Text style={{ fontSize: 13, color: colors.textMuted, textAlign: 'center' }}>
+            Made with ❤️ for music lovers
           </Text>
+          <Ionicons
+            name="musical-note"
+            size={16}
+            color={colors.accent}
+            style={{ marginTop: spacing.xs }}
+          />
         </View>
-
-        <View
-          style={{
-            marginTop: spacing.md,
-            backgroundColor: colors.card,
-            borderRadius: radii.lg,
-            padding: spacing.md,
-            gap: spacing.sm,
-          }}
-        >
-          <Text variant="bodyStrong">Your data</Text>
-          <Text variant="small" style={{ lineHeight: 20 }}>
-            Your library, playlists, history, lyrics cache and downloads live on this device. The
-            local build has no account backend and does not upload your listening activity.
-          </Text>
-        </View>
-
-        <Text variant="caption" align="center" style={{ marginTop: spacing.xl }}>
-          Sinc · local build · {APP_VERSION}
-        </Text>
       </ScrollView>
     </View>
+  );
+}
+
+function AboutRow({
+  icon,
+  title,
+  detail,
+  onPress,
+}: {
+  icon: string;
+  title: string;
+  detail?: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => ({
+        minHeight: 52,
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: spacing.md,
+        borderBottomWidth: 1,
+        borderBottomColor: colors.borderSoft,
+        opacity: pressed ? 0.7 : 1,
+      })}
+    >
+      <Ionicons name={icon as any} size={20} color={colors.textSecondary} style={{ marginRight: spacing.md }} />
+      <Text style={{ flex: 1, fontSize: 15, fontWeight: '600', color: colors.text }}>
+        {title}
+      </Text>
+      {detail ? (
+        <Text style={{ fontSize: 13, color: colors.accent, marginRight: spacing.xs }}>
+          {detail}
+        </Text>
+      ) : null}
+      <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+    </Pressable>
   );
 }
