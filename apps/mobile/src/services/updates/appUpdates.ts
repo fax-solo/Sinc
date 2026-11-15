@@ -7,7 +7,7 @@
  */
 import { config } from '../../app/config';
 
-export const APP_VERSION = '0.2.0';
+export const APP_VERSION = '0.3.0';
 
 /** Compares dotted numeric versions. Returns true when a is older than b. */
 export function isVersionOlder(a: string, b: string): boolean {

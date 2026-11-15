@@ -3,7 +3,6 @@ import { Pressable, View } from 'react-native';
 import { useQuery } from '@tanstack/react-query';
 import Ionicons from '@react-native-vector-icons/ionicons';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
-import type { CanonicalTrack } from '@sinc/shared';
 import { CollectionScaffold } from '../components/CollectionScaffold';
 import { SectionHeader } from '../components/Screen';
 import { MediaCard, SectionRail } from '../components/Cards';
@@ -16,11 +15,8 @@ import { musicApi, type DailyMix } from '../../api/music';
 import { getCachedPersonalizedHome } from '../../api/resultCache';
 import { useAuthStore } from '../../features/auth/authStore';
 import { useLibraryStore } from '../../services/library/libraryStore';
-import {
-  isDownloadInProgress,
-  useDownloadsStore,
-  type DownloadPriority,
-} from '../../services/library/downloadsStore';
+import { useDownloadsStore } from '../../services/library/downloadsStore';
+import { queueTracksForDownload } from '../../services/library/downloadQueue';
 import { selectCurrentTrack, usePlayerStore } from '../../services/player/playerStore';
 import { playerService } from '../../services/player/PlayerService';
 import { openSongMenu } from '../songMenu/songMenuStore';
@@ -48,26 +44,6 @@ function useDownloadedIds(): Set<string> {
       ),
     [downloads]
   );
-}
-
-async function queueDownloads(
-  tracks: CanonicalTrack[],
-  downloadedIds: Set<string>,
-  downloadTrack: (track: CanonicalTrack, opts?: { priority?: DownloadPriority }) => Promise<void>
-): Promise<{ queued: number; skipped: number }> {
-  let queued = 0;
-  let skipped = 0;
-  for (const track of tracks) {
-    const existing = useDownloadsStore.getState().getDownload(track.id);
-    if (downloadedIds.has(track.id) || (existing && isDownloadInProgress(existing.phase))) {
-      skipped += 1;
-      continue;
-    }
-    void downloadTrack(track, { priority: 'bulk' }).catch(() => undefined);
-    queued += 1;
-    await new Promise((resolve) => setTimeout(resolve, 350));
-  }
-  return { queued, skipped };
 }
 
 function QuickAction({
@@ -109,7 +85,6 @@ export function AlbumScreen({
   });
   const followedAlbums = useLibraryStore((state) => state.followedAlbums);
   const toggleFollowAlbum = useLibraryStore((state) => state.toggleFollowAlbum);
-  const downloadTrack = useDownloadsStore((state) => state.downloadTrack);
   const downloadedIds = useDownloadedIds();
   const currentTrack = usePlayerStore(selectCurrentTrack);
   const playing = usePlayerStore((state) => state.status === 'playing');
@@ -130,9 +105,7 @@ export function AlbumScreen({
 
   const downloadAll = async () => {
     setDownloadBusy(true);
-    const result = await queueDownloads(tracks, downloadedIds, (track, opts) =>
-      downloadTrack(track, opts)
-    );
+    const result = await queueTracksForDownload(tracks);
     setDownloadBusy(false);
     toast(
       result.queued > 0
@@ -214,143 +187,9 @@ export function AlbumScreen({
   );
 }
 
-export function ArtistScreen({
-  route,
-  navigation,
-}: NativeStackScreenProps<RootStackParamList, 'Artist'>) {
-  const { id } = route.params;
-  const query = useQuery({
-    queryKey: ['artist', id],
-    queryFn: () => musicApi.getArtist(id),
-    enabled: Boolean(id),
-    retry: 1,
-  });
-  const followedArtists = useLibraryStore((state) => state.followedArtists);
-  const toggleFollowArtist = useLibraryStore((state) => state.toggleFollowArtist);
-  const downloadTrack = useDownloadsStore((state) => state.downloadTrack);
-  const downloadedIds = useDownloadedIds();
-  const currentTrack = usePlayerStore(selectCurrentTrack);
-  const playing = usePlayerStore((state) => state.status === 'playing');
-  const [downloadBusy, setDownloadBusy] = useState(false);
-
-  const artist = query.data?.artist;
-  const tracks = query.data?.topTracks ?? [];
-  const albums = query.data?.albums ?? [];
-  const followed = artist ? followedArtists.some((item) => item.id === artist.id) : false;
-
-  const play = (index: number, shuffle = false) => {
-    if (tracks.length === 0) return;
-    const queue = shuffle ? shuffled(tracks, Math.random) : tracks;
-    void playerService.playQueue(queue, shuffle ? 0 : index);
-    navigation.navigate('Player');
-  };
-
-  const downloadTop = async () => {
-    setDownloadBusy(true);
-    const result = await queueDownloads(tracks, downloadedIds, (track, opts) =>
-      downloadTrack(track, opts)
-    );
-    setDownloadBusy(false);
-    toast(
-      result.queued > 0
-        ? `Downloading ${result.queued} song${result.queued === 1 ? '' : 's'}`
-        : 'Popular songs are already downloaded',
-      result.queued > 0 ? 'success' : 'default'
-    );
-  };
-
-  return (
-    <CollectionScaffold
-      label="Artist"
-      title={artist?.name ?? route.params.name ?? 'Artist'}
-      subtitle={artist?.genres.length ? artist.genres.slice(0, 3).join(' · ') : 'Artist'}
-      artworkUri={artist?.artworkUrl}
-      meta={
-        artist
-          ? tracks.length > 0
-            ? `${tracks.length} ${tracks.length === 1 ? 'popular song' : 'popular songs'} · ${
-                albums.length
-              } ${albums.length === 1 ? 'album' : 'albums'}`
-            : `${albums.length} ${albums.length === 1 ? 'album' : 'albums'} available`
-          : undefined
-      }
-      tracks={tracks}
-      tracklistLabel="POPULAR"
-      loading={query.isLoading}
-      error={query.isError}
-      errorMessage={query.error instanceof Error ? query.error.message : undefined}
-      onBack={() => navigation.goBack()}
-      onRetry={() => void query.refetch()}
-      onPlayAll={() => play(0)}
-      onShuffleAll={() => play(0, true)}
-      onPlayTrack={(_track, index) => play(index)}
-      onMoreTrack={(track) =>
-        openSongMenu(track, { sourceLabel: artist ? `Artist · ${artist.name}` : 'Artist' })
-      }
-      downloadedIds={downloadedIds}
-      currentTrackId={currentTrack?.id}
-      isPlaying={playing}
-      headerRight={
-        artist ? (
-          <IconButton
-            icon="share-outline"
-            label="Share artist"
-            size={38}
-            background="rgba(255,255,255,0.08)"
-            onPress={() =>
-              void shareEntity({
-                type: 'artist',
-                id: artist.id,
-                title: artist.name,
-              })
-            }
-          />
-        ) : null
-      }
-      quickActions={
-        artist ? (
-          <>
-            <QuickAction
-              icon={followed ? 'heart' : 'heart-outline'}
-              label={followed ? 'Unfollow artist' : 'Follow artist'}
-              active={followed}
-              onPress={() => {
-                toggleFollowArtist(artist);
-                toast(followed ? 'Artist unfollowed' : 'Artist followed', 'success');
-              }}
-            />
-            <QuickAction
-              icon="download-outline"
-              label="Download popular songs"
-              disabled={downloadBusy || tracks.length === 0}
-              onPress={() => void downloadTop()}
-            />
-          </>
-        ) : null
-      }
-      beforeTracks={
-        albums.length > 0 ? (
-          <View style={{ marginTop: spacing.xl }}>
-            <SectionHeader title="Albums" subtitle="From this artist" />
-            <SectionRail>
-              {albums.map((album) => (
-                <MediaCard
-                  key={album.id}
-                  title={album.title}
-                  subtitle={album.releaseDate?.slice(0, 4)}
-                  artworkUri={album.artworkUrl}
-                  onPress={() => navigation.navigate('Album', { id: album.id, title: album.title })}
-                />
-              ))}
-            </SectionRail>
-          </View>
-        ) : null
-      }
-      emptyTitle="No popular songs"
-      emptyMessage="Try opening one of this artist's albums instead."
-    />
-  );
-}
+import { openSpotifyUrl } from '../../services/providers/spotifyUrl';
+import { Linking } from 'react-native';
+export { ArtistHubScreen as ArtistScreen } from './ArtistHubScreen';
 
 export function PlaylistScreen({
   route,
@@ -365,7 +204,6 @@ export function PlaylistScreen({
   });
   const addPlaylist = useLibraryStore((state) => state.addPlaylist);
   const playlists = useLibraryStore((state) => state.playlists);
-  const downloadTrack = useDownloadsStore((state) => state.downloadTrack);
   const downloadedIds = useDownloadedIds();
   const currentTrack = usePlayerStore(selectCurrentTrack);
   const playing = usePlayerStore((state) => state.status === 'playing');
@@ -400,9 +238,7 @@ export function PlaylistScreen({
 
   const downloadAll = async () => {
     setDownloadBusy(true);
-    const result = await queueDownloads(tracks, downloadedIds, (track, opts) =>
-      downloadTrack(track, opts)
-    );
+    const result = await queueTracksForDownload(tracks);
     setDownloadBusy(false);
     toast(
       result.queued > 0
@@ -471,6 +307,25 @@ export function PlaylistScreen({
               disabled={downloadBusy || tracks.length === 0}
               onPress={() => void downloadAll()}
             />
+            {playlist.providerIds?.deezer ? (
+              <QuickAction
+                icon="open-outline"
+                label="Open in Deezer"
+                onPress={() =>
+                  void Linking.openURL(`https://www.deezer.com/playlist/${playlist.providerIds.deezer}`)
+                }
+              />
+            ) : playlist.providerIds?.spotify ? (
+              <QuickAction
+                icon="open-outline"
+                label="Open in Spotify"
+                onPress={() =>
+                  void openSpotifyUrl(
+                    `https://open.spotify.com/playlist/${playlist.providerIds.spotify}`
+                  )
+                }
+              />
+            ) : null}
           </>
         ) : null
       }
@@ -500,7 +355,6 @@ export function MixScreen({
   const { mix: routeMix, mixId } = route.params;
   const userId = useAuthStore((state) => state.user.id);
   const addPlaylist = useLibraryStore((state) => state.addPlaylist);
-  const downloadTrack = useDownloadsStore((state) => state.downloadTrack);
   const downloadedIds = useDownloadedIds();
   const currentTrack = usePlayerStore(selectCurrentTrack);
   const playing = usePlayerStore((state) => state.status === 'playing');
@@ -559,9 +413,7 @@ export function MixScreen({
   const downloadAll = async () => {
     if (!mix) return;
     setDownloadBusy(true);
-    const result = await queueDownloads(mix.tracks, downloadedIds, (track, opts) =>
-      downloadTrack(track, opts)
-    );
+    const result = await queueTracksForDownload(mix.tracks);
     setDownloadBusy(false);
     toast(
       result.queued > 0
@@ -653,7 +505,6 @@ export function LocalPlaylistScreen({
   const duplicatePlaylist = useLibraryStore((state) => state.duplicatePlaylist);
   const deletePlaylist = useLibraryStore((state) => state.deletePlaylist);
   const recordPlaylistPlayed = useLibraryStore((state) => state.recordPlaylistPlayed);
-  const downloadTrack = useDownloadsStore((state) => state.downloadTrack);
   const downloadedIds = useDownloadedIds();
   const currentTrack = usePlayerStore(selectCurrentTrack);
   const playing = usePlayerStore((state) => state.status === 'playing');
@@ -661,6 +512,7 @@ export function LocalPlaylistScreen({
   const [actionsOpen, setActionsOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [downloadBusy, setDownloadBusy] = useState(false);
+  const [selectionActive, setSelectionActive] = useState(false);
 
   const tracks = playlist?.tracks ?? [];
   const cover = playlist?.coverArtworkUrl ?? playlistArtworkUrl(tracks);
@@ -677,9 +529,7 @@ export function LocalPlaylistScreen({
   const downloadAll = async () => {
     if (!playlist) return;
     setDownloadBusy(true);
-    const result = await queueDownloads(tracks, downloadedIds, (track, opts) =>
-      downloadTrack(track, opts)
-    );
+    const result = await queueTracksForDownload(tracks);
     setDownloadBusy(false);
     toast(
       result.queued > 0
@@ -746,6 +596,12 @@ export function LocalPlaylistScreen({
         downloadedIds={downloadedIds}
         currentTrackId={currentTrack?.id}
         isPlaying={playing}
+        selectionEnabled={!reorderMode}
+        onSelectionActiveChange={setSelectionActive}
+        onSelectionRemove={(selected) => {
+          for (const track of selected) removeFromPlaylist(playlist.id, track.id);
+        }}
+        selectionRemoveLabel="Remove"
         headerRight={
           <IconButton
             icon="ellipsis-horizontal"
@@ -783,6 +639,7 @@ export function LocalPlaylistScreen({
                 icon="swap-vertical"
                 label={reorderMode ? 'Done' : 'Reorder'}
                 active={reorderMode}
+                disabled={selectionActive}
                 onPress={() => setReorderMode((value) => !value)}
               />
             </View>

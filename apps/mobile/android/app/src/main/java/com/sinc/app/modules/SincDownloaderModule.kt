@@ -192,7 +192,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
         promise,
       )
     } catch (e: Exception) {
-      SincDownloads.end(jobId)
+      SincDownloads.end(jobId, SincDownloads.OUTCOME_FAILED, e.message)
       Log.w("SincDownloader", "download config rejected for $jobId: ${e.message}")
       promise.reject("DOWNLOAD_BAD_CONFIG", e.message ?: "Malformed download request", e)
     }
@@ -239,6 +239,8 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
     SincDownloads.begin(
       jobId,
       metaTitle ?: target.nameWithoutExtension,
+      artist = metaArtist,
+      artworkUrl = metaArtworkUrl,
       kill = call::cancel,
       cleanup = { part.delete() },
     )
@@ -252,13 +254,14 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
       private fun fail(code: String, message: String?) {
         val stopped = isStopped(jobId)
         releaseSelf()
-        SincDownloads.end(jobId)
         clearSpeedSample(jobId)
         if (stopped) {
+          SincDownloads.end(jobId, SincDownloads.OUTCOME_CANCELLED)
           Log.i(LOG_TAG, "download cancelled jobId=$jobId")
           promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
           return
         }
+        SincDownloads.end(jobId, SincDownloads.OUTCOME_FAILED, message ?: code)
         Log.w(LOG_TAG, "download failed jobId=$jobId: $code $message")
         promise.reject(code, message ?: "Download failed")
       }
@@ -267,7 +270,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
       private fun restartFromZero() {
         if (isStopped(jobId)) {
           releaseSelf()
-          SincDownloads.end(jobId)
+          SincDownloads.end(jobId, SincDownloads.OUTCOME_CANCELLED)
           clearSpeedSample(jobId)
           promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
           return
@@ -297,13 +300,14 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
         // offset instead of restarting the whole transfer.
         val stopped = isStopped(jobId)
         releaseSelf()
-        SincDownloads.end(jobId)
         clearSpeedSample(jobId)
         if (stopped) {
+          SincDownloads.end(jobId, SincDownloads.OUTCOME_CANCELLED)
           Log.i(LOG_TAG, "download cancelled jobId=$jobId: ${e.message}")
           promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
           return
         }
+        SincDownloads.end(jobId, SincDownloads.OUTCOME_FAILED, e.message)
         Log.w(LOG_TAG, "download failed jobId=$jobId: ${e.message}")
         promise.reject("DOWNLOAD_ERROR", e.message ?: "Download failed")
       }
@@ -363,7 +367,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
             // for a job the user has already stopped.
             if (isStopped(jobId)) {
               target.delete()
-              SincDownloads.end(jobId)
+              SincDownloads.end(jobId, SincDownloads.OUTCOME_CANCELLED)
               promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
               return
             }
@@ -386,7 +390,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
             )
             if (isStopped(jobId)) {
               finalFile.delete()
-              SincDownloads.end(jobId)
+              SincDownloads.end(jobId, SincDownloads.OUTCOME_CANCELLED)
               promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
               return
             }
@@ -403,7 +407,11 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
             val durationMs = SincAudioProbe.probeDuration(finalFile)
             if (durationMs <= 0L) {
               finalFile.delete()
-              SincDownloads.end(jobId)
+              SincDownloads.end(
+                jobId,
+                SincDownloads.OUTCOME_FAILED,
+                "Downloaded file is not readable audio",
+              )
               Log.w(LOG_TAG, "download rejected: unreadable audio for jobId=$jobId")
               promise.reject("DOWNLOAD_UNVERIFIED", "Downloaded file is not readable audio")
               return
@@ -414,7 +422,11 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
               !SincDownloadRules.isDurationAcceptable(durationMs, expectedMs)
             ) {
               finalFile.delete()
-              SincDownloads.end(jobId)
+              SincDownloads.end(
+                jobId,
+                SincDownloads.OUTCOME_FAILED,
+                "Downloaded file does not match the requested track length",
+              )
               Log.w(
                 LOG_TAG,
                 "download rejected: duration ${durationMs}ms != expected ${expectedMs}ms " +
@@ -441,7 +453,11 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
                   )
                 SincAudioFingerprint.Status.MISMATCH -> {
                   finalFile.delete()
-                  SincDownloads.end(jobId)
+                  SincDownloads.end(
+                    jobId,
+                    SincDownloads.OUTCOME_FAILED,
+                    "Downloaded audio does not match the selected recording",
+                  )
                   Log.w(
                     LOG_TAG,
                     "download rejected: fingerprint ${fingerprint.matches}/" +
@@ -455,7 +471,11 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
                 }
                 SincAudioFingerprint.Status.UNAVAILABLE -> {
                   finalFile.delete()
-                  SincDownloads.end(jobId)
+                  SincDownloads.end(
+                    jobId,
+                    SincDownloads.OUTCOME_FAILED,
+                    "Could not verify the downloaded audio against the catalog preview",
+                  )
                   Log.w(
                     LOG_TAG,
                     "download rejected: fingerprint unavailable (${fingerprint.reason}) " +
@@ -478,7 +498,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
             // still win over publishing.
             if (isStopped(jobId)) {
               finalFile.delete()
-              SincDownloads.end(jobId)
+              SincDownloads.end(jobId, SincDownloads.OUTCOME_CANCELLED)
               promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
               return
             }
@@ -490,7 +510,7 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
               metaAlbum,
               mimeType,
             )
-            SincDownloads.end(jobId)
+            SincDownloads.end(jobId, SincDownloads.OUTCOME_COMPLETED)
             promise.resolve(
               Arguments.createMap().apply {
                 putString("localUri", "file://${finalFile.absolutePath}")
@@ -503,12 +523,13 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
           } catch (e: Exception) {
             val stopped = isStopped(jobId)
             releaseSelf()
-            SincDownloads.end(jobId)
             clearSpeedSample(jobId)
             if (stopped) {
+              SincDownloads.end(jobId, SincDownloads.OUTCOME_CANCELLED)
               Log.i(LOG_TAG, "download cancelled jobId=$jobId: ${e.message}")
               promise.reject("DOWNLOAD_CANCELLED", "Download cancelled")
             } else {
+              SincDownloads.end(jobId, SincDownloads.OUTCOME_FAILED, e.message)
               promise.reject("DOWNLOAD_ERROR", e.message ?: "Download failed")
             }
           }
@@ -603,12 +624,18 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
       0.0
     }
     if (bytesTotal > 0) {
-      SincDownloads.update(jobId, (bytesDownloaded.toDouble() / bytesTotal * 100).toInt())
+      SincDownloads.updateBytes(
+        jobId,
+        (bytesDownloaded.toDouble() / bytesTotal * 100).toInt(),
+        bytesDownloaded,
+        bytesTotal,
+      )
     } else {
       // No Content-Length and no Content-Range total. Reporting 99% (the old
       // `total = 1` JS fallback) is a lie; keep the notification/UI
       // indeterminate until the transfer actually completes.
       SincDownloads.updateUnknown(jobId)
+      SincDownloads.updateBytes(jobId, null, bytesDownloaded, 0)
     }
     mainHandler.post {
       try {

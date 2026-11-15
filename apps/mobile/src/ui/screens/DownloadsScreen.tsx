@@ -22,6 +22,8 @@ import { playerService } from '../../services/player/PlayerService';
 import { openSongMenu } from '../songMenu/songMenuStore';
 import { shuffled } from '../../services/local/affinity';
 import { formatBytes } from '../../utils/format';
+import { TrackSelectionFooter } from '../selection/TrackSelectionFooter';
+import { useTrackSelection } from '../selection/useTrackSelection';
 import type { RootStackParamList } from '../../app/navigation/types';
 
 export function DownloadsScreen() {
@@ -39,8 +41,16 @@ export function DownloadsScreen() {
   const currentTrack = usePlayerStore(selectCurrentTrack);
   const playing = usePlayerStore((state) => state.status === 'playing');
   const [pendingRemove, setPendingRemove] = useState<DownloadRecord | null>(null);
+  const [pendingCancelAll, setPendingCancelAll] = useState(false);
+  const selection = useTrackSelection();
 
-  const active = downloads.filter((record) => isDownloadInProgress(record.phase));
+  // The concurrency cap is two *running* transfers, not a two-item queue.
+  // Keep queued rows in their own section so overflow is visibly waiting, not
+  // mistaken for a failure.
+  const active = downloads.filter(
+    (record) => isDownloadInProgress(record.phase) && record.phase !== 'queued'
+  );
+  const queued = downloads.filter((record) => record.phase === 'queued');
   const failed = downloads.filter((record) => record.phase === 'failed');
   const completed = useMemo(
     () =>
@@ -87,6 +97,124 @@ export function DownloadsScreen() {
     }
   };
 
+  const retryAll = () => {
+    const snapshot = failed;
+    if (snapshot.length === 0) return;
+    // Bulk rows keep their no-engine policy. A single-row Retry may opt into
+    // the engine, but Retry All must not mass-trigger it.
+    const retryable = snapshot.filter((record) => record.allowEngine !== false);
+    const blocked = snapshot.length - retryable.length;
+    if (retryable.length === 0) {
+      toast('These downloads need to be opened individually', 'default');
+      return;
+    }
+    toast(
+      blocked > 0
+        ? `Retrying ${retryable.length}; ${blocked} need individual download`
+        : `Retrying ${retryable.length} download${retryable.length === 1 ? '' : 's'}`,
+      'success'
+    );
+    for (const record of retryable) {
+      void retryDownload(record.jobId, {
+        allowEngine: record.allowEngine ?? true,
+      }).catch(() => undefined);
+    }
+  };
+
+  const cancelAll = async () => {
+    const snapshot = failed;
+    setPendingCancelAll(false);
+    if (snapshot.length === 0) return;
+    const results = await Promise.allSettled(
+      snapshot.map((record) => removeDownload(record.jobId))
+    );
+    const failures = results.filter((result) => result.status === 'rejected').length;
+    if (failures === 0) {
+      toast('Failed downloads cleared', 'success');
+    } else {
+      toast(`Cleared ${snapshot.length - failures}; ${failures} could not be removed`, 'error');
+    }
+  };
+
+  const renderDownloadCard = (record: DownloadRecord, waiting = false) => {
+    const paused = pausedIds.has(record.jobId);
+    const percent = Math.max(0, liveProgress[record.jobId] ?? record.progress);
+    const speed = liveSpeeds[record.jobId];
+    const indeterminate = !waiting && liveIndeterminate[record.jobId] === true;
+    const status = paused
+      ? 'Paused'
+      : waiting
+        ? 'Queued · waiting for a slot'
+        : record.error
+          ? record.error
+          : record.phase === 'source'
+            ? 'Finding source'
+            : record.phase === 'processing'
+              ? 'Processing audio…'
+              : record.phase === 'tagging'
+                ? 'Writing tags…'
+                : record.phase === 'validating'
+                  ? 'Verifying audio…'
+                  : indeterminate
+                    ? `Downloading…${speed ? ` · ${speed}` : ''}`
+                    : `${Math.round(percent)}%${speed ? ` · ${speed}` : ''}`;
+    return (
+      <View
+        key={record.jobId}
+        style={{
+          backgroundColor: colors.card,
+          borderRadius: radii.md,
+          padding: spacing.sm,
+          marginBottom: spacing.xs,
+          gap: spacing.sm,
+        }}
+      >
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+          <Artwork uri={record.track.artworkUrl} size={46} radius={7} />
+          <View style={{ flex: 1 }}>
+            <Text variant="bodyStrong" numberOfLines={1}>
+              {record.track.title}
+            </Text>
+            <Text variant="caption" numberOfLines={1}>
+              {record.track.artists.map((artist) => artist.name).join(', ')} · {status}
+            </Text>
+          </View>
+          <IconButton
+            icon={paused ? 'play' : 'pause'}
+            label={paused ? 'Resume download' : 'Pause download'}
+            size={36}
+            background={colors.backgroundRaised}
+            onPress={() => void togglePause(record)}
+          />
+          <IconButton
+            icon="close"
+            label="Cancel download"
+            size={36}
+            background={colors.backgroundRaised}
+            color={colors.error}
+            onPress={() => setPendingRemove(record)}
+          />
+        </View>
+        {waiting ? null : indeterminate && !paused ? (
+          <View style={{ height: 14, justifyContent: 'center' }}>
+            <ActivityIndicator size="small" color={colors.accent} />
+          </View>
+        ) : (
+          <View style={{ height: 4, borderRadius: 2, backgroundColor: colors.border }}>
+            <View
+              style={{
+                width: `${Math.min(100, Math.max(2, percent))}%`,
+                height: 4,
+                borderRadius: 2,
+                backgroundColor: paused ? colors.textMuted : colors.accent,
+              }}
+            />
+          </View>
+        )}
+      </View>
+    );
+  };
+
   const header = (
     <View>
       <View
@@ -118,92 +246,40 @@ export function DownloadsScreen() {
           <Text variant="micro" style={{ marginBottom: spacing.xs }}>
             IN PROGRESS · {active.length}
           </Text>
-          {active.map((record) => {
-            const paused = pausedIds.has(record.jobId);
-            const percent = Math.max(0, liveProgress[record.jobId] ?? record.progress);
-            const speed = liveSpeeds[record.jobId];
-            const indeterminate = liveIndeterminate[record.jobId] === true;
-            const status = paused
-              ? 'Paused'
-              : record.phase === 'queued'
-                ? 'Queued'
-                : record.error
-                  ? record.error
-                  : record.phase === 'source'
-                    ? 'Finding source'
-                    : record.phase === 'processing'
-                      ? 'Processing audio…'
-                      : record.phase === 'tagging'
-                        ? 'Writing tags…'
-                        : record.phase === 'validating'
-                          ? 'Verifying audio…'
-                          : indeterminate
-                            ? `Downloading…${speed ? ` · ${speed}` : ''}`
-                            : `${Math.round(percent)}%${speed ? ` · ${speed}` : ''}`;
-            return (
-              <View
-                key={record.jobId}
-                style={{
-                  backgroundColor: colors.card,
-                  borderRadius: radii.md,
-                  padding: spacing.sm,
-                  marginBottom: spacing.xs,
-                  gap: spacing.sm,
-                }}
-              >
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-                  <Artwork uri={record.track.artworkUrl} size={46} radius={7} />
-                  <View style={{ flex: 1 }}>
-                    <Text variant="bodyStrong" numberOfLines={1}>
-                      {record.track.title}
-                    </Text>
-                    <Text variant="caption" numberOfLines={1}>
-                      {record.track.artists.map((artist) => artist.name).join(', ')} · {status}
-                    </Text>
-                  </View>
-                  <IconButton
-                    icon={paused ? 'play' : 'pause'}
-                    label={paused ? 'Resume download' : 'Pause download'}
-                    size={36}
-                    background={colors.backgroundRaised}
-                    onPress={() => void togglePause(record)}
-                  />
-                  <IconButton
-                    icon="close"
-                    label="Cancel download"
-                    size={36}
-                    background={colors.backgroundRaised}
-                    color={colors.error}
-                    onPress={() => setPendingRemove(record)}
-                  />
-                </View>
-                {indeterminate && !paused ? (
-                  <View style={{ height: 14, justifyContent: 'center' }}>
-                    <ActivityIndicator size="small" color={colors.accent} />
-                  </View>
-                ) : (
-                  <View style={{ height: 4, borderRadius: 2, backgroundColor: colors.border }}>
-                    <View
-                      style={{
-                        width: `${Math.min(100, Math.max(2, percent))}%`,
-                        height: 4,
-                        borderRadius: 2,
-                        backgroundColor: paused ? colors.textMuted : colors.accent,
-                      }}
-                    />
-                  </View>
-                )}
-              </View>
-            );
-          })}
+          {active.map((record) => renderDownloadCard(record))}
+        </View>
+      ) : null}
+
+      {queued.length > 0 ? (
+        <View style={{ marginTop: spacing.md }}>
+          <Text variant="micro" style={{ marginBottom: spacing.xs }}>
+            QUEUED · {queued.length}
+          </Text>
+          {queued.map((record) => renderDownloadCard(record, true))}
         </View>
       ) : null}
 
       {failed.length > 0 ? (
         <View style={{ marginTop: spacing.md }}>
-          <Text variant="micro" style={{ marginBottom: spacing.xs }}>
-            NEEDS ATTENTION · {failed.length}
-          </Text>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: spacing.sm,
+              marginBottom: spacing.xs,
+            }}
+          >
+            <Text variant="micro">NEEDS ATTENTION · {failed.length}</Text>
+            <View style={{ flexDirection: 'row', gap: spacing.md }}>
+              <TextButton label="Retry all" onPress={retryAll} />
+              <TextButton
+                label="Cancel all"
+                color={colors.error}
+                onPress={() => setPendingCancelAll(true)}
+              />
+            </View>
+          </View>
           {failed.map((record) => (
             <View
               key={record.jobId}
@@ -256,6 +332,10 @@ export function DownloadsScreen() {
           <View style={{ flexDirection: 'row', gap: spacing.md }}>
             <TextButton label="Play" onPress={() => playAll(false)} />
             <TextButton label="Shuffle" onPress={() => playAll(true)} />
+            <TextButton
+              label={selection.active ? 'Done' : 'Select'}
+              onPress={selection.active ? selection.cancel : () => selection.begin()}
+            />
           </View>
         </View>
       ) : null}
@@ -265,13 +345,15 @@ export function DownloadsScreen() {
   return (
     <Screen padded>
       <FlatList
+        style={{ flex: 1 }}
         data={completed}
         keyExtractor={(item) => item.jobId}
+        extraData={selection.active ? selection.selectedIds : false}
         ListHeaderComponent={header}
         contentContainerStyle={{ paddingBottom: spacing.xxl + insets.bottom }}
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={
-          active.length === 0 && failed.length === 0 ? (
+          active.length === 0 && queued.length === 0 && failed.length === 0 ? (
             <EmptyState
               icon="cloud-download-outline"
               title="Nothing downloaded"
@@ -285,6 +367,8 @@ export function DownloadsScreen() {
           <SongRow
             track={item.track}
             downloaded
+            selectionMode={selection.active}
+            selected={selection.isSelected(item.track.id)}
             subtitle={`${item.track.artists.map((artist) => artist.name).join(', ')} · ${formatBytes(
               item.sizeBytes ?? 0
             )}${
@@ -294,14 +378,27 @@ export function DownloadsScreen() {
             }`}
             isCurrent={currentTrack?.id === item.track.id}
             isPlaying={playing}
+            onLongPress={() => selection.toggle(item.track.id)}
             onPress={() => {
+              if (selection.active) {
+                selection.toggle(item.track.id);
+                return;
+              }
               const index = completedTracks.findIndex((track) => track.id === item.track.id);
               void playerService.playQueue(completedTracks, Math.max(0, index));
             }}
-            onMore={() => openSongMenu(item.track, { sourceLabel: 'Downloaded' })}
+            onMore={
+              selection.active
+                ? undefined
+                : () => openSongMenu(item.track, { sourceLabel: 'Downloaded' })
+            }
           />
         )}
       />
+
+      {selection.active ? (
+        <TrackSelectionFooter selection={selection} tracks={completedTracks} showDownload={false} />
+      ) : null}
 
       <ConfirmDialog
         visible={pendingRemove != null}
@@ -327,6 +424,18 @@ export function DownloadsScreen() {
             )
             .catch(() => toast('Could not remove the download', 'error'));
         }}
+      />
+
+      <ConfirmDialog
+        visible={pendingCancelAll}
+        title="Cancel all failed downloads?"
+        message={`This removes ${failed.length} failed download${
+          failed.length === 1 ? '' : 's'
+        } and any temporary files. Completed downloads are not affected.`}
+        confirmLabel="Cancel all"
+        destructive
+        onCancel={() => setPendingCancelAll(false)}
+        onConfirm={() => void cancelAll()}
       />
     </Screen>
   );

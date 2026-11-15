@@ -26,12 +26,15 @@ export type RootStackParamList = {
   LocalPlaylist: { id: string };
   Mix: { mix?: DailyMix; mixId?: string };
   Profile: undefined;
+  EditProfile: undefined;
+  Appearance: undefined;
+  StorageDownloads: undefined;
   Notifications: undefined;
   Downloads: undefined;
   Settings: undefined;
   Security: undefined;
   About: undefined;
-  SpotifyImport: undefined;
+  SpotifyImport: { initialUrl?: string } | undefined;
   RecentlyPlayed: undefined;
   BrowseCategory: { kind: BrowseCategoryKind; title: string };
   PlaylistEditor: { playlistId?: string; mode?: 'create' | 'edit' } | undefined;

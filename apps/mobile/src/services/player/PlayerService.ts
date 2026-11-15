@@ -26,6 +26,7 @@ import { track } from '../analytics/analytics';
 import type { NativePlaybackState, NativeProgressEvent } from '../native/types';
 import { selectCurrentTrack, usePlayerStore } from './playerStore';
 import { usePlayerProgressStore } from './playerProgressStore';
+import { usePersonalizationStore } from '../local/personalizationStore';
 
 /**
  * Recently resolved stream URLs. googlevideo URLs live ~6h; entries younger
@@ -80,6 +81,11 @@ class PlayerService {
   private hasStarted = false;
   /** Id of the track already recorded as "recently played" for the current load. */
   private recordedTrackId: string | null = null;
+  /** Id of the track already credited for most played (>= 50% duration reached). */
+  private recordedFiftyPercentTrackId: string | null = null;
+  /** Track replay detection fields. */
+  private lastPlayedTrackId: string | null = null;
+  private lastPlayedTrackTime = 0;
   /** Bumped on every load so stale async work is discarded. */
   private generation = 0;
   /** Serializes commands to keep rapid taps from interleaving. */
@@ -260,7 +266,13 @@ class PlayerService {
       store.next();
       // Snapshot caveat: re-read after the mutation (see handleCompletion).
       if (usePlayerStore.getState().status === 'ended') {
-        await this.stopSoftly();
+        // Exhausted queue: silence the audio but keep the media session so the
+        // notification and lockscreen controls stay available (resume/replay).
+        try {
+          await nativeBridge.player.pause();
+        } catch {
+          // Native may already be idle; the store status is still correct.
+        }
         return;
       }
       await this.loadAndPlayCurrent();
@@ -309,7 +321,22 @@ class PlayerService {
     const duration = progress.durationMs;
     const early =
       progress.positionMs < 30_000 || (duration > 0 && progress.positionMs / duration < 0.25);
-    if (early) useLibraryStore.getState().recordSkip(current);
+    if (early) {
+      useLibraryStore.getState().recordSkip(current);
+      usePersonalizationStore.getState().recordEvent({
+        trackId: current.id,
+        trackTitle: current.title,
+        artistId: current.artists[0]?.id,
+        artistName: current.artists[0]?.name ?? 'Unknown Artist',
+        albumId: current.album?.id,
+        albumTitle: current.album?.title,
+        genres: current.artists[0]?.genres,
+        eventType: 'track_skipped',
+        playbackDurationMs: progress.positionMs,
+        trackDurationMs: duration || current.durationMs || 0,
+        completionRatio: duration > 0 ? Math.min(1, progress.positionMs / duration) : 0,
+      });
+    }
   }
 
   seekTo(positionMs: number): Promise<void> {
@@ -337,6 +364,7 @@ class PlayerService {
     this.generation += 1;
     this.hasStarted = false;
     this.staleTrackId = null;
+    this.recordedFiftyPercentTrackId = null;
   }
 
   private onProgress(event: NativeProgressEvent): void {
@@ -344,12 +372,47 @@ class PlayerService {
       this.hasStarted = true;
       if (event.trackId && this.recordedTrackId !== event.trackId) {
         this.recordedTrackId = event.trackId;
+        this.recordedFiftyPercentTrackId = null;
         const current = selectCurrentTrack(usePlayerStore.getState());
         if (current && current.id === event.trackId) {
           useLibraryStore.getState().recordPlayed(current);
-          useLibraryStore.getState().recordPlayStarted(current);
           recordPlay(current);
           track('playback:start', current.id);
+          const isReplay =
+            this.lastPlayedTrackId === current.id && Date.now() - this.lastPlayedTrackTime < 300_000;
+          this.lastPlayedTrackId = current.id;
+          this.lastPlayedTrackTime = Date.now();
+          usePersonalizationStore.getState().recordEvent({
+            trackId: current.id,
+            trackTitle: current.title,
+            artistId: current.artists[0]?.id,
+            artistName: current.artists[0]?.name ?? 'Unknown Artist',
+            albumId: current.album?.id,
+            albumTitle: current.album?.title,
+            genres: current.artists[0]?.genres,
+            eventType: isReplay ? 'track_replayed' : 'track_started',
+            playbackDurationMs: 0,
+            trackDurationMs: event.durationMs || current.durationMs || 0,
+            completionRatio: 0,
+          });
+        }
+      }
+
+      // Only credit the song and artist in "most played" stats once at least 50% of the song is played
+      const reachedFiftyPercent =
+        event.durationMs > 0
+          ? event.positionMs >= event.durationMs * 0.5
+          : event.positionMs >= 30_000;
+
+      if (
+        event.trackId &&
+        this.recordedFiftyPercentTrackId !== event.trackId &&
+        reachedFiftyPercent
+      ) {
+        this.recordedFiftyPercentTrackId = event.trackId;
+        const current = selectCurrentTrack(usePlayerStore.getState());
+        if (current && current.id === event.trackId) {
+          useLibraryStore.getState().recordPlayStarted(current);
         }
       }
     }
@@ -461,15 +524,37 @@ class PlayerService {
       return;
     }
 
+    // Ensure the 50% milestone is credited if playback reached completion
+    if (current && this.recordedFiftyPercentTrackId !== trackId) {
+      this.recordedFiftyPercentTrackId = trackId;
+      useLibraryStore.getState().recordPlayStarted(current);
+    }
+
     // The current track actually played to completion.
     useLibraryStore.getState().recordPlayCompleted(current);
     track('playback:complete', trackId);
+
+    const completionDuration =
+      current.durationMs || usePlayerProgressStore.getState().durationMs || 0;
+    usePersonalizationStore.getState().recordEvent({
+      trackId: current.id,
+      trackTitle: current.title,
+      artistId: current.artists[0]?.id,
+      artistName: current.artists[0]?.name ?? 'Unknown Artist',
+      albumId: current.album?.id,
+      albumTitle: current.album?.title,
+      genres: current.artists[0]?.genres,
+      eventType: 'track_completed',
+      playbackDurationMs: completionDuration,
+      trackDurationMs: completionDuration,
+      completionRatio: 1.0,
+    });
     store.next();
     // Re-read state: `store` is a snapshot — after next() the queue may have
-    // moved to 'ended' (repeat off, queue exhausted). Skipping this re-read
-    // made the stale check never fire and the last track loop forever.
+    // moved to 'ended' (repeat off, queue exhausted). Keep the media session
+    // alive on the last track so the notification/lockscreen controls remain:
+    // the native routing player rewinds to 0 when play is pressed from ENDED.
     if (usePlayerStore.getState().status === 'ended') {
-      await this.stopSoftly();
       return;
     }
     await this.loadAndPlayCurrent();
@@ -492,6 +577,7 @@ class PlayerService {
     const generation = ++this.generation;
     this.hasStarted = false;
     this.recordedTrackId = null;
+    this.recordedFiftyPercentTrackId = null;
     this.staleTrackId = null;
     store.setStatus('loading');
     store.setError(null);
@@ -524,6 +610,10 @@ class PlayerService {
       if (download?.localUri) {
         uri = download.localUri;
         mimeType = mimeForLocalUri(download.localUri);
+      } else if (download?.publishedName) {
+        // Fallback to the persistent Music/Sinc folder on Android
+        uri = `file:///storage/emulated/0/Music/Sinc/${download.publishedName}`;
+        mimeType = mimeForLocalUri(uri);
       } else {
         // A fresh cached URL (< 5h) plays instantly; otherwise resolve (with
         // retries for flaky mobile networks) and remember the URL for next time.

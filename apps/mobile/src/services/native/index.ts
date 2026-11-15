@@ -16,6 +16,12 @@ import type {
   NativeHttpModule,
   NativeYtModule,
   NativeYtProgressEvent,
+  NativeBackupModule,
+  BackupSaveResult,
+  BackupReadResult,
+  ScannedAudioFile,
+  StorageStatsResult,
+  CacheClearResult,
 } from './types';
 
 function unavailable(method: string): () => Promise<never> {
@@ -255,6 +261,31 @@ function createAudioOutput(): NativeAudioOutputModule {
   };
 }
 
+function createBackup(): NativeBackupModule {
+  const module = NativeModules.SincBackup;
+  if (!module) {
+    return {
+      available: () => false,
+      saveBackup: unavailable('backup.saveBackup'),
+      readBackup: unavailable('backup.readBackup'),
+      scanDownloadedFiles: unavailable('backup.scanDownloadedFiles'),
+      getStorageStats: unavailable('backup.getStorageStats'),
+      clearDownloadCache: unavailable('backup.clearDownloadCache'),
+    };
+  }
+  return {
+    available: () => true,
+    saveBackup: (jsonString: string) => module.saveBackup(jsonString),
+    readBackup: () => module.readBackup(),
+    scanDownloadedFiles: async () => {
+      const raw = await module.scanDownloadedFiles();
+      return Array.from(raw ?? []) as ScannedAudioFile[];
+    },
+    getStorageStats: () => module.getStorageStats(),
+    clearDownloadCache: () => module.clearDownloadCache(),
+  };
+}
+
 /**
  * Access point for the native modules. Falls back to throwing stubs when the
  * native side is not linked, so JS code and tests can always import it safely.
@@ -266,4 +297,5 @@ export const nativeBridge: NativeBridge = {
   downloads: createDownloadActions(),
   http: createHttp(),
   audioOutput: createAudioOutput(),
+  backup: createBackup(),
 };

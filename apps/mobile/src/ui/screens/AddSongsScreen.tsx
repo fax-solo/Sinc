@@ -6,20 +6,34 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery } from '@tanstack/react-query';
 import type { CanonicalTrack } from '@sinc/shared';
 import { Text } from '../components/Text';
-import { SearchInput } from '../components/Fields';
-import { IconButton } from '../components/Buttons';
+import { FilterChip, SearchInput } from '../components/Fields';
+import { IconButton, PrimaryButton } from '../components/Buttons';
 import { SongRow } from '../components/SongRow';
-import { toast } from '../components/Overlays';
+import { ConfirmDialog, toast } from '../components/Overlays';
 import { EmptyState, ErrorState, ListSkeleton } from '../components/State';
 import { colors, radii, spacing } from '../theme';
 import { musicApi } from '../../api/music';
 import { useLibraryStore } from '../../services/library/libraryStore';
 import { useDownloadsStore } from '../../services/library/downloadsStore';
 import { searchLocalLibrary } from './searchLocal';
+import {
+  addSongsSourceLabel,
+  completedDownloadTracks,
+  tracksForAddSongsSource,
+  type AddSongsSource,
+} from './addSongsLibrary';
+import { TrackSelectionBar } from '../selection/TrackSelectionBar';
+import { useTrackSelection } from '../selection/useTrackSelection';
 import type { RootStackParamList } from '../../app/navigation/types';
 
 const MIN_QUERY = 2;
-const MAX_SUGGESTIONS = 30;
+const LARGE_BATCH = 25;
+
+const SOURCES: Array<{ key: AddSongsSource; label: string }> = [
+  { key: 'downloaded', label: 'Downloaded' },
+  { key: 'liked', label: 'Liked' },
+  { key: 'recent', label: 'Recent' },
+];
 
 export function AddSongsScreen({
   route,
@@ -40,31 +54,32 @@ export function AddSongsScreen({
 
   const [input, setInput] = useState('');
   const [query, setQuery] = useState('');
+  const [source, setSource] = useState<AddSongsSource>('downloaded');
+  const [pendingAddAll, setPendingAddAll] = useState<CanonicalTrack[] | null>(null);
+  const selection = useTrackSelection();
+  const cancelSelection = selection.cancel;
 
   useEffect(() => {
     const timer = setTimeout(() => setQuery(input.trim()), 320);
     return () => clearTimeout(timer);
   }, [input]);
 
-  const downloadedTracks = useMemo(
-    () =>
-      downloads
-        .filter((record) => record.phase === 'completed' && record.localUri)
-        .map((record) => record.track),
-    [downloads]
-  );
+  useEffect(() => {
+    // Changing the visible library subset must not leave hidden songs selected.
+    cancelSelection();
+  }, [query, source, cancelSelection]);
 
-  const suggestions = useMemo(() => {
-    const seen = new Set<string>();
-    const result: CanonicalTrack[] = [];
-    for (const track of [...recentlyPlayed, ...favorites, ...downloadedTracks]) {
-      if (seen.has(track.id)) continue;
-      seen.add(track.id);
-      result.push(track);
-      if (result.length >= MAX_SUGGESTIONS) break;
-    }
-    return result;
-  }, [recentlyPlayed, favorites, downloadedTracks]);
+  const downloadedTracks = useMemo(() => completedDownloadTracks(downloads), [downloads]);
+
+  const sourceTracks = useMemo(
+    () =>
+      tracksForAddSongsSource(source, {
+        downloads,
+        favorites,
+        recentlyPlayed,
+      }),
+    [source, downloads, favorites, recentlyPlayed]
+  );
 
   const local = useMemo(
     () =>
@@ -76,6 +91,7 @@ export function AddSongsScreen({
         playlists,
         artists: followedArtists,
         albums: followedAlbums,
+        trackLimit: Number.POSITIVE_INFINITY,
       }),
     [query, recentlyPlayed, favorites, downloadedTracks, playlists, followedArtists, followedAlbums]
   );
@@ -88,7 +104,7 @@ export function AddSongsScreen({
   });
 
   const results = useMemo(() => {
-    if (query.length < MIN_QUERY) return suggestions;
+    if (query.length < MIN_QUERY) return sourceTracks;
     const seen = new Set<string>();
     const merged: CanonicalTrack[] = [];
     const remoteTracks = remote.data?.tracks?.data.map((row) => row.track) ?? [];
@@ -98,7 +114,7 @@ export function AddSongsScreen({
       merged.push(track);
     }
     return merged;
-  }, [query, suggestions, local.tracks, remote.data]);
+  }, [query, sourceTracks, local.tracks, remote.data]);
 
   const existingIds = useMemo(
     () => new Set(playlist?.tracks.map((track) => track.id) ?? []),
@@ -107,6 +123,15 @@ export function AddSongsScreen({
   const downloadedIds = useMemo(
     () => new Set(downloadedTracks.map((track) => track.id)),
     [downloadedTracks]
+  );
+  const addableIds = useMemo(
+    () => results.filter((track) => !existingIds.has(track.id)).map((track) => track.id),
+    [results, existingIds]
+  );
+  const selectedTracks = useMemo(
+    () =>
+      results.filter((track) => selection.selectedIds.has(track.id) && !existingIds.has(track.id)),
+    [results, selection.selectedIds, existingIds]
   );
 
   if (!playlist) {
@@ -146,19 +171,31 @@ export function AddSongsScreen({
     toast('Added to playlist', 'success');
   };
 
+  const addCandidates = (candidates: CanonicalTrack[]) => {
+    const added = addTracksToPlaylist(playlist.id, candidates);
+    toast(
+      added > 0 ? `Added ${added} song${added === 1 ? '' : 's'}` : 'No new songs to add',
+      added > 0 ? 'success' : 'default'
+    );
+    if (added > 0) selection.cancel();
+  };
+
   const addAll = () => {
     const candidates = results.filter((track) => !existingIds.has(track.id));
     if (candidates.length === 0) {
       toast('Every result is already in this playlist', 'default');
       return;
     }
-    const added = addTracksToPlaylist(playlist.id, candidates);
-    toast(
-      added > 0
-        ? `Added ${added} song${added === 1 ? '' : 's'}`
-        : 'No new songs to add',
-      added > 0 ? 'success' : 'default'
-    );
+    if (candidates.length > LARGE_BATCH) {
+      setPendingAddAll(candidates);
+      return;
+    }
+    addCandidates(candidates);
+  };
+
+  const addSelected = () => {
+    if (selectedTracks.length === 0) return;
+    addCandidates(selectedTracks);
   };
 
   const header = (
@@ -213,15 +250,45 @@ export function AddSongsScreen({
 
       <SearchInput
         value={input}
-        onChangeText={setInput}
+        onChangeText={(value) => {
+          setInput(value);
+          setPendingAddAll(null);
+        }}
         placeholder="Search songs to add"
-        onClear={() => setInput('')}
+        onClear={() => {
+          setInput('');
+          setPendingAddAll(null);
+        }}
         returnKeyType="search"
         onSubmitEditing={() => {
+          setPendingAddAll(null);
           setQuery(input.trim());
           Keyboard.dismiss();
         }}
       />
+
+      {query.length < MIN_QUERY ? (
+        <View style={{ flexDirection: 'row', gap: spacing.xs, marginTop: spacing.md }}>
+          {SOURCES.map((item) => (
+            <FilterChip
+              key={item.key}
+              label={item.label}
+              count={
+                item.key === 'downloaded'
+                  ? downloadedTracks.length
+                  : item.key === 'liked'
+                    ? favorites.length
+                    : recentlyPlayed.length
+              }
+              active={source === item.key}
+              onPress={() => {
+                setPendingAddAll(null);
+                setSource(item.key);
+              }}
+            />
+          ))}
+        </View>
+      ) : null}
 
       <View
         style={{
@@ -233,7 +300,7 @@ export function AddSongsScreen({
         }}
       >
         <Text variant="micro">
-          {query.length >= MIN_QUERY ? 'SEARCH RESULTS' : 'FROM YOUR LIBRARY'}
+          {query.length >= MIN_QUERY ? 'SEARCH RESULTS' : addSongsSourceLabel(source)}
         </Text>
         <Text variant="caption">
           {results.length} song{results.length === 1 ? '' : 's'}
@@ -255,20 +322,35 @@ export function AddSongsScreen({
     </View>
   );
 
+  const emptyTitle =
+    source === 'downloaded'
+      ? 'No downloaded songs'
+      : source === 'liked'
+        ? 'No liked songs'
+        : 'Nothing played yet';
+  const emptyMessage =
+    source === 'downloaded'
+      ? 'Download songs from Search, an album or a playlist and they will all show up here.'
+      : source === 'liked'
+        ? 'Tap the heart on a song and it will appear here.'
+        : 'Songs you play will show up here for quick access.';
+
   return (
     <View style={{ flex: 1, backgroundColor: colors.background }}>
       <FlatList
+        style={{ flex: 1 }}
         data={results}
         keyExtractor={(item) => item.id}
         ListHeaderComponent={header}
         contentContainerStyle={{
           paddingTop: insets.top + spacing.xs,
           paddingHorizontal: 20,
-          paddingBottom: insets.bottom + spacing.xxl,
+          paddingBottom: spacing.xxl,
         }}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
+        extraData={selection.active ? selection.selectedIds : false}
         ListEmptyComponent={
           query.length >= MIN_QUERY && !remote.isFetching && !remote.isError ? (
             <EmptyState
@@ -276,21 +358,37 @@ export function AddSongsScreen({
               title="No songs found"
               message="Try a different title or artist."
             />
-          ) : query.length < MIN_QUERY && suggestions.length === 0 ? (
-            <EmptyState
-              icon="musical-notes-outline"
-              title="Search the catalog"
-              message="Type a song or artist name. Songs you like, play or download appear here for quick access."
-            />
+          ) : query.length < MIN_QUERY ? (
+            <EmptyState icon="musical-notes-outline" title={emptyTitle} message={emptyMessage} />
           ) : null
         }
         renderItem={({ item }) => {
           const added = existingIds.has(item.id);
+          const selected = selection.isSelected(item.id);
           return (
             <SongRow
               track={item}
               downloaded={downloadedIds.has(item.id)}
-              onPress={() => add(item)}
+              selectionMode={selection.active}
+              selected={selected}
+              onLongPress={() => {
+                if (added) {
+                  toast('Already in this playlist', 'default');
+                  return;
+                }
+                selection.toggle(item.id);
+              }}
+              onPress={() => {
+                if (selection.active) {
+                  if (added) {
+                    toast('Already in this playlist', 'default');
+                    return;
+                  }
+                  selection.toggle(item.id);
+                  return;
+                }
+                add(item);
+              }}
               trailing={
                 <View
                   style={{
@@ -311,6 +409,42 @@ export function AddSongsScreen({
               }
             />
           );
+        }}
+      />
+
+      {selection.active ? (
+        <TrackSelectionBar
+          count={selectedTracks.length}
+          totalCount={addableIds.length}
+          allSelected={addableIds.length > 0 && selectedTracks.length === addableIds.length}
+          onCancel={selection.cancel}
+          onSelectAll={() => selection.selectAll(addableIds)}
+          onDeselectAll={selection.deselectAll}
+        >
+          <PrimaryButton
+            compact
+            label={
+              selectedTracks.length > 0
+                ? `Add ${selectedTracks.length} song${selectedTracks.length === 1 ? '' : 's'}`
+                : 'Add selected'
+            }
+            disabled={selectedTracks.length === 0}
+            onPress={addSelected}
+            style={{ flex: 1 }}
+          />
+        </TrackSelectionBar>
+      ) : null}
+
+      <ConfirmDialog
+        visible={pendingAddAll != null}
+        title="Add all songs?"
+        message={`Add ${pendingAddAll?.length ?? 0} songs to “${playlist.name}”?`}
+        confirmLabel="Add all"
+        onCancel={() => setPendingAddAll(null)}
+        onConfirm={() => {
+          const candidates = pendingAddAll;
+          setPendingAddAll(null);
+          if (candidates) addCandidates(candidates);
         }}
       />
     </View>

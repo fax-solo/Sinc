@@ -6,11 +6,13 @@ import type { CanonicalTrack } from '@sinc/shared';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from './Text';
 import { Artwork } from './Artwork';
-import { IconButton } from './Buttons';
+import { IconButton, TextButton } from './Buttons';
 import { SongRow } from './SongRow';
 import { EmptyState, ErrorState, ListSkeleton, SkeletonBlock } from './State';
 import { colors, radii, spacing } from '../theme';
 import { playerService } from '../../services/player/PlayerService';
+import { TrackSelectionFooter } from '../selection/TrackSelectionFooter';
+import { useTrackSelection } from '../selection/useTrackSelection';
 
 interface CollectionScaffoldProps {
   label: string;
@@ -43,6 +45,12 @@ interface CollectionScaffoldProps {
   renderTrailing?: (track: CanonicalTrack, index: number) => ReactNode;
   trackIndexOffset?: number;
   tracklistLabel?: string;
+  /** Static collections allow bulk actions without any extra setup. */
+  selectionEnabled?: boolean;
+  selectionShowDownload?: boolean;
+  onSelectionRemove?: (tracks: CanonicalTrack[]) => void;
+  selectionRemoveLabel?: string;
+  onSelectionActiveChange?: (active: boolean) => void;
 }
 
 export function CollectionScaffold({
@@ -76,8 +84,18 @@ export function CollectionScaffold({
   renderTrailing,
   trackIndexOffset = 0,
   tracklistLabel = 'TRACKLIST',
+  selectionEnabled = true,
+  selectionShowDownload = true,
+  onSelectionRemove,
+  selectionRemoveLabel,
+  onSelectionActiveChange,
 }: CollectionScaffoldProps) {
   const insets = useSafeAreaInsets();
+  const selection = useTrackSelection();
+
+  useEffect(() => {
+    onSelectionActiveChange?.(selection.active);
+  }, [selection.active, onSelectionActiveChange]);
 
   // Opening a collection is the strongest signal of what plays next; warm the
   // head track so the first tap usually starts from the prefetch cache.
@@ -266,7 +284,15 @@ export function CollectionScaffold({
         }}
       >
         <Text variant="micro">{tracklistLabel}</Text>
-        <Text variant="caption">{tracks.length} songs</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+          <Text variant="caption">{tracks.length} songs</Text>
+          {selectionEnabled && tracks.length > 0 ? (
+            <TextButton
+              label={selection.active ? 'Done' : 'Select'}
+              onPress={selection.active ? selection.cancel : () => selection.begin()}
+            />
+          ) : null}
+        </View>
       </View>
     </View>
   );
@@ -275,11 +301,16 @@ export function CollectionScaffold({
     <View style={{ flex: 1, backgroundColor: colors.background }}>
       {topBar}
       <FlatList
+        style={{ flex: 1 }}
         data={tracks}
         keyExtractor={(track, index) => `${track.id}-${index}`}
+        extraData={selection.active ? selection.selectedIds : false}
         ListHeaderComponent={header}
         ListFooterComponent={afterTracks ? <>{afterTracks}</> : null}
-        contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: spacing.xxl + insets.bottom }}
+        contentContainerStyle={{
+          paddingHorizontal: 20,
+          paddingBottom: spacing.xxl + insets.bottom,
+        }}
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={
           <EmptyState
@@ -297,12 +328,43 @@ export function CollectionScaffold({
             downloaded={downloadedIds?.has(item.id)}
             isCurrent={currentTrackId === item.id}
             isPlaying={isPlaying}
-            onPress={() => onPlayTrack(item, index)}
-            onMore={onMoreTrack ? () => onMoreTrack(item, index) : undefined}
+            selectionMode={selection.active}
+            selected={selection.isSelected(item.id)}
+            onLongPress={
+              selectionEnabled
+                ? () => selection.toggle(item.id)
+                : onMoreTrack
+                  ? () => onMoreTrack(item, index)
+                  : undefined
+            }
+            onPress={() => {
+              if (selection.active) {
+                selection.toggle(item.id);
+                return;
+              }
+              onPlayTrack(item, index);
+            }}
+            onMore={
+              selection.active
+                ? undefined
+                : onMoreTrack
+                  ? () => onMoreTrack(item, index)
+                  : undefined
+            }
             trailing={renderTrailing?.(item, index)}
           />
         )}
       />
+
+      {selection.active ? (
+        <TrackSelectionFooter
+          selection={selection}
+          tracks={tracks}
+          showDownload={selectionShowDownload}
+          onRemoveSelected={onSelectionRemove}
+          removeLabel={selectionRemoveLabel}
+        />
+      ) : null}
     </View>
   );
 }

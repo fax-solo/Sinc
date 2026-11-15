@@ -5,7 +5,14 @@ import type {
   CanonicalPlaylist,
   CanonicalTrack,
 } from '@sinc/shared';
-import { AppError, NotFoundError, ValidationError } from '@sinc/shared';
+import {
+  AppError,
+  NotFoundError,
+  ValidationError,
+  scoreTrack,
+  mergeAndDedupeTracks,
+  isNonLatin,
+} from '@sinc/shared';
 import type { ItunesAdapter } from '../../lib/itunes.js';
 import type { DeezerAdapter } from '../../lib/deezer.js';
 import type { YtdlpResolver } from '../../lib/ytdlp.js';
@@ -85,23 +92,6 @@ function meta(page: number, limit: number, total = 0): Paginated<unknown>['meta'
   return { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) };
 }
 
-function score(query: string, track: CanonicalTrack): number {
-  const q = query.toLowerCase();
-  const title = track.title.toLowerCase();
-  let s = 0;
-  if (title === q) s += 100;
-  else if (title.startsWith(q)) s += 80;
-  else if (title.includes(q)) s += 60;
-  if (track.artists.some((a) => a.name.toLowerCase().includes(q))) s += 40;
-  return s;
-}
-
-function isNonLatin(query: string): boolean {
-  return /[\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Devanagari}\p{Script=Hangul}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Greek}\p{Script=Cyrillic}]/u.test(
-    query
-  );
-}
-
 /** Coalesces concurrent requests for the same cache key into a single upstream
  *  fetch (single-flight), so duplicate search keystrokes never fan out to the
  *  catalog APIs. */
@@ -155,13 +145,15 @@ async function buildSearchPool(
   // iTunes frequently returns unrelated popular tracks for non-Latin queries
   // (its search API does not index Arabic well), so Deezer's results take
   // precedence there.
-  const merged = isNonLatin(query)
-    ? mergeTrackResults(deezerTracks, itunesTracks)
-    : mergeTrackResults(itunesTracks, deezerTracks);
+  const poolTracks = isNonLatin(query)
+    ? [...deezerTracks, ...itunesTracks]
+    : [...itunesTracks, ...deezerTracks];
+  const merged = mergeAndDedupeTracks(poolTracks, query);
   return {
-    tracks: merged
-      .map((track) => ({ track, score: score(query, track) }))
-      .sort((a, b) => b.score - a.score),
+    tracks: merged.map((track) => {
+      const scored = scoreTrack(query, track);
+      return { track, score: scored.score };
+    }),
     artists: itunesArtists,
     albums: itunesAlbums,
     playlists: itunesPlaylists,
@@ -184,21 +176,6 @@ function slicePool(
   if (type === 'all' || type === 'albums') result.albums = slice(pool.albums);
   if (type === 'all' || type === 'playlists') result.playlists = slice(pool.playlists);
   return result;
-}
-
-/** Merges iTunes + Deezer results, deduping by normalized title+artist. */
-function mergeTrackResults(a: CanonicalTrack[], b: CanonicalTrack[]): CanonicalTrack[] {
-  const seen = new Set<string>();
-  const merged: CanonicalTrack[] = [];
-  const push = (t: CanonicalTrack) => {
-    const key = `${normalizeText(t.title)}|${normalizeText(t.artists[0]?.name ?? '')}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    merged.push(t);
-  };
-  for (const t of a) push(t);
-  for (const t of b) push(t);
-  return merged;
 }
 
 async function resolveStream(

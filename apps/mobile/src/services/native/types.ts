@@ -239,6 +239,50 @@ export interface NativeHttpModule {
   ): Promise<NativeHttpResult>;
 }
 
+export interface BackupSaveResult {
+  success: boolean;
+  path: string;
+  timestamp: number;
+  sizeBytes: number;
+}
+
+export interface BackupReadResult {
+  exists: boolean;
+  data?: string;
+  path?: string;
+  timestamp?: number;
+  sizeBytes?: number;
+}
+
+export interface ScannedAudioFile {
+  fileName: string;
+  uri: string;
+  sizeBytes: number;
+  lastModified: number;
+}
+
+export interface StorageStatsResult {
+  totalBytes: number;
+  freeBytes: number;
+  usedBytes: number;
+  sincBytes: number;
+  songCount: number;
+}
+
+export interface CacheClearResult {
+  success: boolean;
+  freedBytes: number;
+}
+
+export interface NativeBackupModule {
+  available(): boolean;
+  saveBackup(jsonString: string): Promise<BackupSaveResult>;
+  readBackup(): Promise<BackupReadResult>;
+  scanDownloadedFiles(): Promise<ScannedAudioFile[]>;
+  getStorageStats(): Promise<StorageStatsResult>;
+  clearDownloadCache(): Promise<CacheClearResult>;
+}
+
 export interface NativeBridge {
   player: NativePlayerModule;
   downloader: NativeDownloaderModule;
@@ -246,6 +290,7 @@ export interface NativeBridge {
   downloads: NativeDownloadActionsModule;
   http: NativeHttpModule;
   audioOutput: NativeAudioOutputModule;
+  backup: NativeBackupModule;
 }
 
 /** One physical output (speaker, headphones, Bluetooth…) visible to Android. */

@@ -27,6 +27,7 @@ export const linking: LinkingOptions<RootStackParamList> = {
       // Notification/lockscreen Show Lyrics action; expects an already-restored
       // player session and never starts playback itself.
       Lyrics: 'lyrics',
+      Downloads: 'downloads',
     },
   },
 };

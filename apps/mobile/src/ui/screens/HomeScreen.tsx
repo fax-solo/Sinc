@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Pressable,
   RefreshControl,
@@ -25,6 +25,8 @@ import { selectCurrentTrack, usePlayerStore } from '../../services/player/player
 import { playerService } from '../../services/player/PlayerService';
 import { openSongMenu } from '../songMenu/songMenuStore';
 import { playlistArtworkUrl } from '../../components/PlaylistCover';
+import { TastePickerModal } from '../components/TastePickerModal';
+import { usePersonalizationStore } from '../../services/local/personalizationStore';
 import type { RootStackParamList } from '../../app/navigation/types';
 
 function greeting(): string {
@@ -64,6 +66,14 @@ export function HomeScreen() {
   const updateStatus = useUpdateStore((state) => state.softStatus);
   const bannerDismissedFor = useUpdateStore((state) => state.bannerDismissedFor);
   const dismissUpdateBanner = useUpdateStore((state) => state.dismissBanner);
+  const onboardingCompleted = usePersonalizationStore((state) => state.onboardingCompleted);
+  const [pickerDismissed, setPickerDismissed] = useState(false);
+
+  const showTastePicker =
+    !onboardingCompleted &&
+    !pickerDismissed &&
+    recentlyPlayed.length === 0 &&
+    favoriteTracks.length === 0;
 
   const mixes = useMemo(
     () => sections.flatMap((section) => (section.kind === 'mixes' ? section.mixes : [])).slice(0, 8),
@@ -558,6 +568,10 @@ export function HomeScreen() {
           <Text variant="caption">Made on your device by Sinc</Text>
         </View>
       </View>
+      <TastePickerModal
+        visible={showTastePicker}
+        onDismiss={() => setPickerDismissed(true)}
+      />
     </Screen>
   );
 }

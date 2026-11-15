@@ -109,7 +109,7 @@ interface DownloadsState {
   resumeDownload: (jobId: string) => Promise<void>;
   cancelDownload: (jobId: string) => Promise<void>;
   /** Re-runs a failed job (transient failures already auto-retry). */
-  retryDownload: (jobId: string) => Promise<void>;
+  retryDownload: (jobId: string, opts?: { allowEngine?: boolean }) => Promise<void>;
   setPhaseTransfer: (jobId: string) => void;
   removeDownload: (jobId: string) => Promise<void>;
   resumeInFlight: () => Promise<void>;
@@ -1177,18 +1177,19 @@ export const useDownloadsStore = create<DownloadsState>()(
           await cleanup;
         },
 
-        retryDownload: async (jobId) => {
+        retryDownload: async (jobId, opts) => {
           const record = recordByJobId(jobId);
           if (!record) return;
           if (record.phase !== 'failed') return;
           // Transient errors already auto-retry; this is the manual path for
           // definitive failures (extraction blocked, no validated source…).
-          // Retry is an explicit individual action, so it may use the engine
-          // fallback even when the original task came from a bulk import.
+          // A single-row Retry is an explicit individual action, so it may use
+          // the engine fallback. Retry All passes the stored policy instead so
+          // a bulk import cannot mass-trigger the engine.
           await get().downloadTrack(record.track, {
             resumePart: true,
             priority: 'user',
-            allowEngine: true,
+            allowEngine: opts?.allowEngine ?? true,
           });
         },
 

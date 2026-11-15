@@ -16,6 +16,7 @@ class SincPackage : ReactPackage {
       SincDownloadActionsModule(reactContext),
       SincHttpModule(reactContext),
       SincAudioOutputModule(reactContext),
+      SincBackupModule(reactContext),
     )
 
   override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> =

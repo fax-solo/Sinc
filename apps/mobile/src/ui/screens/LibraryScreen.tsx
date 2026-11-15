@@ -1,9 +1,5 @@
 import { useEffect, useMemo, useState, type ComponentProps } from 'react';
-import {
-  FlatList,
-  Pressable,
-  View,
-} from 'react-native';
+import { FlatList, Pressable, View } from 'react-native';
 import Ionicons from '@react-native-vector-icons/ionicons';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useNavigation, useRoute, type RouteProp } from '@react-navigation/native';
@@ -24,7 +20,13 @@ import { playerService } from '../../services/player/PlayerService';
 import { openSongMenu } from '../songMenu/songMenuStore';
 import { shuffled } from '../../services/local/affinity';
 import { playlistArtworkUrl } from '../../components/PlaylistCover';
-import type { LibraryCategory, MainTabParamList, RootStackParamList } from '../../app/navigation/types';
+import { TrackSelectionFooter } from '../selection/TrackSelectionFooter';
+import { useTrackSelection } from '../selection/useTrackSelection';
+import type {
+  LibraryCategory,
+  MainTabParamList,
+  RootStackParamList,
+} from '../../app/navigation/types';
 
 type Category = LibraryCategory;
 
@@ -53,6 +55,8 @@ export function LibraryScreen() {
   const [playlistActions, setPlaylistActions] = useState<LocalPlaylist | null>(null);
   const [savedActions, setSavedActions] = useState<LibraryItem | null>(null);
   const [pendingDelete, setPendingDelete] = useState<LocalPlaylist | null>(null);
+  const selection = useTrackSelection();
+  const cancelSelection = selection.cancel;
 
   const playlists = useLibraryStore((state) => state.playlists);
   const favoriteTracks = useLibraryStore((state) => state.favoriteTracks);
@@ -138,12 +142,14 @@ export function LibraryScreen() {
         .filter((record) =>
           matches(record.track.title, record.track.artists.map((artist) => artist.name).join(' '))
         )
-        .map((record) => ({ type: 'track' as const, track: record.track, source: 'download' as const }));
+        .map((record) => ({
+          type: 'track' as const,
+          track: record.track,
+          source: 'download' as const,
+        }));
     }
     return favoriteTracks
-      .filter((track) =>
-        matches(track.title, track.artists.map((artist) => artist.name).join(' '))
-      )
+      .filter((track) => matches(track.title, track.artists.map((artist) => artist.name).join(' ')))
       .sort((a, b) => (sort === 'az' ? a.title.localeCompare(b.title) : 0))
       .map((track) => ({ type: 'track' as const, track, source: 'liked' as const }));
   }, [
@@ -165,12 +171,15 @@ export function LibraryScreen() {
 
   /** The visible, filtered subset is also what Play/Shuffle act on. */
   const visibleTracks = useMemo(
-    () =>
-      items.flatMap((item) =>
-        item.type === 'track' ? [item.track] : []
-      ),
+    () => items.flatMap((item) => (item.type === 'track' ? [item.track] : [])),
     [items]
   );
+
+  useEffect(() => {
+    // Filters are a different visible set; stale hidden selections would make
+    // the footer count actions the user cannot see.
+    cancelSelection();
+  }, [category, trimmed, cancelSelection]);
 
   const playTrackList = (tracks: CanonicalTrack[], startIndex = 0, shuffle = false) => {
     if (tracks.length === 0) return;
@@ -309,18 +318,29 @@ export function LibraryScreen() {
           <Text variant="bodyStrong">{category}</Text>
           <Text variant="caption">{items.length}</Text>
         </View>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-          {(category === 'Downloads' || category === 'Liked') &&
-          visibleTracks.length > 0 ? (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+          {(category === 'Downloads' || category === 'Liked') && visibleTracks.length > 0 ? (
             <>
               <TextButton label="Play" onPress={playSelected} />
               <TextButton label="Shuffle" onPress={shuffleSelected} />
+              <TextButton
+                label={selection.active ? 'Done' : 'Select'}
+                onPress={selection.active ? selection.cancel : () => selection.begin()}
+              />
             </>
           ) : null}
           {category !== 'Playlists' ? (
-            <ToolbarButton icon="swap-vertical" label="Sort library" onPress={() => setSortOpen(true)} />
+            <ToolbarButton
+              icon="swap-vertical"
+              label="Sort library"
+              onPress={() => setSortOpen(true)}
+            />
           ) : (
-            <ToolbarButton icon="swap-vertical" label="Sort playlists" onPress={() => setSortOpen(true)} />
+            <ToolbarButton
+              icon="swap-vertical"
+              label="Sort playlists"
+              onPress={() => setSortOpen(true)}
+            />
           )}
         </View>
       </View>
@@ -336,50 +356,51 @@ export function LibraryScreen() {
       onAction={() => setQuery('')}
     />
   ) : category === 'Playlists' ? (
-      <EmptyState
-        icon="list-outline"
-        title="No playlists yet"
-        message="Create a playlist for a mood, a drive, or the songs you keep coming back to."
-        actionLabel="Create playlist"
-        onAction={() => navigation.navigate('PlaylistEditor', { mode: 'create' })}
-      />
-    ) : category === 'Albums' ? (
-      <EmptyState
-        icon="disc-outline"
-        title="No saved albums"
-        message="Save albums from their detail page to find them here."
-        actionLabel="Explore music"
-        onAction={() => navigation.navigate('Main', { screen: 'Search' })}
-      />
-    ) : category === 'Artists' ? (
-      <EmptyState
-        icon="people-outline"
-        title="No followed artists"
-        message="Follow an artist to keep their music close."
-        actionLabel="Explore artists"
-        onAction={() => navigation.navigate('Main', { screen: 'Search' })}
-      />
-    ) : category === 'Downloads' ? (
-      <EmptyState
-        icon="cloud-download-outline"
-        title="Nothing downloaded"
-        message="Download songs to listen without a connection."
-        actionLabel="Find music"
-        onAction={() => navigation.navigate('Main', { screen: 'Search' })}
-      />
-    ) : (
-      <EmptyState
-        icon="heart-outline"
-        title="No liked songs"
-        message="Tap the heart on a song and it will appear here."
-        actionLabel="Find music"
-        onAction={() => navigation.navigate('Main', { screen: 'Search' })}
-      />
-    );
+    <EmptyState
+      icon="list-outline"
+      title="No playlists yet"
+      message="Create a playlist for a mood, a drive, or the songs you keep coming back to."
+      actionLabel="Create playlist"
+      onAction={() => navigation.navigate('PlaylistEditor', { mode: 'create' })}
+    />
+  ) : category === 'Albums' ? (
+    <EmptyState
+      icon="disc-outline"
+      title="No saved albums"
+      message="Save albums from their detail page to find them here."
+      actionLabel="Explore music"
+      onAction={() => navigation.navigate('Main', { screen: 'Search' })}
+    />
+  ) : category === 'Artists' ? (
+    <EmptyState
+      icon="people-outline"
+      title="No followed artists"
+      message="Follow an artist to keep their music close."
+      actionLabel="Explore artists"
+      onAction={() => navigation.navigate('Main', { screen: 'Search' })}
+    />
+  ) : category === 'Downloads' ? (
+    <EmptyState
+      icon="cloud-download-outline"
+      title="Nothing downloaded"
+      message="Download songs to listen without a connection."
+      actionLabel="Find music"
+      onAction={() => navigation.navigate('Main', { screen: 'Search' })}
+    />
+  ) : (
+    <EmptyState
+      icon="heart-outline"
+      title="No liked songs"
+      message="Tap the heart on a song and it will appear here."
+      actionLabel="Find music"
+      onAction={() => navigation.navigate('Main', { screen: 'Search' })}
+    />
+  );
 
   return (
     <Screen padded={false}>
       <FlatList
+        style={{ flex: 1 }}
         data={items}
         keyExtractor={(item) =>
           item.type === 'playlist'
@@ -390,6 +411,7 @@ export function LibraryScreen() {
                 ? `artist-${item.artist.id}`
                 : `track-${item.track.id}`
         }
+        extraData={selection.active ? selection.selectedIds : false}
         ListHeaderComponent={<View style={{ paddingHorizontal: 20 }}>{header}</View>}
         ListEmptyComponent={<View style={{ paddingHorizontal: 20 }}>{empty}</View>}
         contentContainerStyle={{ paddingBottom: spacing.xxl }}
@@ -444,14 +466,24 @@ export function LibraryScreen() {
                 downloaded={downloadedIds.has(item.track.id)}
                 isCurrent={currentTrack?.id === item.track.id}
                 isPlaying={playing}
+                selectionMode={selection.active}
+                selected={selection.isSelected(item.track.id)}
+                onLongPress={() => selection.toggle(item.track.id)}
                 onPress={() => {
+                  if (selection.active) {
+                    selection.toggle(item.track.id);
+                    return;
+                  }
                   const index = visibleTracks.findIndex((track) => track.id === item.track.id);
                   playTrackList(visibleTracks, index >= 0 ? index : 0);
                 }}
-                onMore={() =>
-                  openSongMenu(item.track, {
-                    sourceLabel: item.source === 'download' ? 'Downloaded' : 'Liked Songs',
-                  })
+                onMore={
+                  selection.active
+                    ? undefined
+                    : () =>
+                        openSongMenu(item.track, {
+                          sourceLabel: item.source === 'download' ? 'Downloaded' : 'Liked Songs',
+                        })
                 }
               />
             </View>
@@ -459,11 +491,16 @@ export function LibraryScreen() {
         }}
       />
 
-      <BottomSheet
-        visible={sortOpen}
-        onClose={() => setSortOpen(false)}
-        title="Sort by"
-      >
+      {selection.active ? (
+        <TrackSelectionFooter
+          selection={selection}
+          tracks={visibleTracks}
+          showDownload={category !== 'Downloads'}
+          bottomInset={spacing.sm}
+        />
+      ) : null}
+
+      <BottomSheet visible={sortOpen} onClose={() => setSortOpen(false)} title="Sort by">
         <SheetRow
           icon={sort === 'recent' ? 'checkmark' : 'time-outline'}
           label={
@@ -533,7 +570,8 @@ export function LibraryScreen() {
           onPress={() => {
             const playlist = playlistActions;
             setPlaylistActions(null);
-            if (playlist) navigation.navigate('PlaylistEditor', { playlistId: playlist.id, mode: 'edit' });
+            if (playlist)
+              navigation.navigate('PlaylistEditor', { playlistId: playlist.id, mode: 'edit' });
           }}
         />
         <SheetRow
@@ -542,7 +580,10 @@ export function LibraryScreen() {
           onPress={() => {
             if (playlistActions) {
               const id = duplicatePlaylist(playlistActions.id);
-              toast(id ? 'Playlist duplicated' : 'Could not duplicate playlist', id ? 'success' : 'error');
+              toast(
+                id ? 'Playlist duplicated' : 'Could not duplicate playlist',
+                id ? 'success' : 'error'
+              );
             }
             setPlaylistActions(null);
           }}

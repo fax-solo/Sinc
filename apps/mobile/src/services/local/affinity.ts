@@ -225,6 +225,15 @@ export function localDayKey(nowMs: number): string {
   return `${d.getFullYear()}-${month}-${day}`;
 }
 
+/** YYYY-WW in local time; the unit of weekly mix stability ("Your Weekly Mix"). */
+export function localWeekKey(nowMs: number): string {
+  const d = new Date(nowMs);
+  const startOfYear = new Date(d.getFullYear(), 0, 1);
+  const days = Math.floor((d.getTime() - startOfYear.getTime()) / (24 * 60 * 60 * 1000));
+  const weekNumber = Math.ceil((days + startOfYear.getDay() + 1) / 7);
+  return `${d.getFullYear()}-W${String(weekNumber).padStart(2, '0')}`;
+}
+
 /** Fisher–Yates over a copy. Replaces the biased sort-by-random "shuffle". */
 export function shuffled<T>(items: readonly T[], rand: () => number): T[] {
   const out = [...items];

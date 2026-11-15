@@ -16,6 +16,7 @@ import {
 import { useAuthStore } from '../auth/authStore';
 import { useDownloadsStore } from '../../services/library/downloadsStore';
 import { useLibraryStore } from '../../services/library/libraryStore';
+import { usePersonalizationStore } from '../../services/local/personalizationStore';
 import { useLocalDigest } from './localDigest';
 import { buildLibraryPayload } from './libraryPayload';
 
@@ -200,6 +201,8 @@ export function useHomeFeed() {
   const hiddenTrackIds = useLibraryStore((s) => s.hiddenTrackIds);
   const hiddenArtistNames = useLibraryStore((s) => s.hiddenArtistNames);
   const discoveryPreference = useLibraryStore((s) => s.discoveryPreference);
+  const personalizationEnabled = usePersonalizationStore((s) => s.enabled);
+  const discoveryMode = usePersonalizationStore((s) => s.discoveryMode);
   const completedDownloads = downloads.filter(
     (record) => record.phase === 'completed' && record.localUri
   ).length;
@@ -208,7 +211,7 @@ export function useHomeFeed() {
   // must refresh immediately instead of waiting for a later natural fetch.
   const libraryVersion = useMemo(
     () =>
-      `${playlists.length}:${recentlyPlayedPlaylistIds.length}:${followedArtists.length}:${followedAlbums.length}:${favoriteTracks.length}:${downloads.length}:${completedDownloads}:${Object.keys(thumbsUp).length}:${Object.keys(thumbsDown).length}:${hiddenTrackIds.length}:${hiddenArtistNames.length}:${discoveryPreference.toFixed(2)}`,
+      `${playlists.length}:${recentlyPlayedPlaylistIds.length}:${followedArtists.length}:${followedAlbums.length}:${favoriteTracks.length}:${downloads.length}:${completedDownloads}:${Object.keys(thumbsUp).length}:${Object.keys(thumbsDown).length}:${hiddenTrackIds.length}:${hiddenArtistNames.length}:${discoveryPreference.toFixed(2)}:${personalizationEnabled}:${discoveryMode}`,
     [
       playlists,
       recentlyPlayedPlaylistIds,
@@ -222,6 +225,8 @@ export function useHomeFeed() {
       hiddenTrackIds,
       hiddenArtistNames,
       discoveryPreference,
+      personalizationEnabled,
+      discoveryMode,
     ]
   );
 
@@ -249,7 +254,7 @@ export function useHomeFeed() {
     },
     initialData: cachedPersonalized?.data,
     initialDataUpdatedAt: cachedPersonalized?.at,
-    enabled: signedIn && Boolean(userId),
+    enabled: signedIn && Boolean(userId) && personalizationEnabled,
     staleTime: 5 * 60 * 1000,
     retry: 1,
   });

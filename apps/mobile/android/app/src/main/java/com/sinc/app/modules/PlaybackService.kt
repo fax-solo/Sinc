@@ -10,6 +10,7 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -67,6 +68,11 @@ class PlaybackService : MediaSessionService() {
       return ExoPlayer.Builder(context)
         .setAudioAttributes(AudioAttributes.DEFAULT, true)
         .setHandleAudioBecomingNoisy(true)
+        // Audio-only background playback: keep a partial wake lock (and the
+        // Wi-Fi lock for streaming) while the player is actually playing, so
+        // Doze/deep sleep cannot starve the renderer when the screen is off.
+        // ExoPlayer releases it on pause/stop.
+        .setWakeMode(C.WAKE_MODE_NETWORK)
         .build()
         .apply { addListener(playerListener) }
         .also { exoPlayer = it }
@@ -185,7 +191,7 @@ class PlaybackService : MediaSessionService() {
         .setNotificationId(DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID)
         .build()
     notificationProvider.setSmallIcon(R.drawable.ic_sinc_notification)
-    setMediaNotificationProvider(notificationProvider)
+    setMediaNotificationProvider(SincNotificationProvider(this, notificationProvider))
 
     val player = getPlayer(this)
 
@@ -283,12 +289,10 @@ class PlaybackService : MediaSessionService() {
   }
 
   private fun customLayout(): List<CommandButton> {
-    val lyricsButton =
-      CommandButton.Builder(CommandButton.ICON_UNDEFINED)
-        .setIconResId(R.drawable.ic_sinc_lyrics)
-        .setDisplayName("Show lyrics")
-        .setSessionCommand(SessionCommand(LYRICS_CUSTOM_ACTION, Bundle.EMPTY))
-        .build()
+    // "Show lyrics" is not a session button on purpose: it is added to the
+    // notification as an activity PendingIntent by SincNotificationProvider,
+    // because Android 14 blocks activity launches from a background media
+    // service. Favorite stays a session command (no activity launch needed).
     val favoriteButton =
       CommandButton.Builder(
         if (currentFavorite) CommandButton.ICON_HEART_FILLED else CommandButton.ICON_HEART_UNFILLED,
@@ -299,7 +303,7 @@ class PlaybackService : MediaSessionService() {
         .setEnabled(activeModule != null)
         .setSessionCommand(SessionCommand(FAVORITE_CUSTOM_ACTION, Bundle.EMPTY))
         .build()
-    return listOf(lyricsButton, favoriteButton)
+    return listOf(favoriteButton)
   }
 
   private fun refreshCustomLayout() {
