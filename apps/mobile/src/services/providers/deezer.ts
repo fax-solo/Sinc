@@ -154,9 +154,22 @@ interface ErrorPayload {
   error?: { type?: string; message?: string; code?: number };
 }
 
+export interface ProviderSearchOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  offset?: number;
+}
+
 /** Fetch a Deezer collection endpoint, throwing on provider-reported errors. */
-async function fetchPaged<T>(path: string): Promise<T[]> {
-  const json = await providerFetchJson<Paged<T> & ErrorPayload>(`${BASE_URL}${path}`);
+async function fetchPaged<T>(
+  path: string,
+  options?: { signal?: AbortSignal; timeoutMs?: number }
+): Promise<T[]> {
+  const json = await providerFetchJson<Paged<T> & ErrorPayload>(
+    `${BASE_URL}${path}`,
+    options?.signal ? { signal: options.signal } : undefined,
+    options?.timeoutMs
+  );
   if (json.error) {
     throw new DeezerError(
       json.error.message ?? `Deezer ${json.error.type ?? 'error'}`,
@@ -175,17 +188,28 @@ async function fetchDeezerAlbums(artistId: string): Promise<DeezerAlbum[]> {
 }
 
 export const deezer = {
-  async searchTracks(query: string, limit = 25): Promise<CanonicalTrack[]> {
+  async searchTracks(
+    query: string,
+    limit = 25,
+    options?: ProviderSearchOptions
+  ): Promise<CanonicalTrack[]> {
     const n = clamp(1, limit, 50);
+    const index = options?.offset && options.offset > 0 ? `&index=${options.offset}` : '';
     const tracks = await fetchPaged<DeezerTrack>(
-      `/search/track?q=${encodeURIComponent(query)}&limit=${n}`
+      `/search/track?q=${encodeURIComponent(query)}&limit=${n}${index}`,
+      options
     );
     return tracks.map(toTrack);
   },
 
-  async lookupTrack(id: string): Promise<CanonicalTrack | null> {
+  async lookupTrack(
+    id: string,
+    options?: { signal?: AbortSignal; timeoutMs?: number }
+  ): Promise<CanonicalTrack | null> {
     const track = await providerFetchJson<DeezerTrack>(
-      `${BASE_URL}/track/${encodeURIComponent(id)}`
+      `${BASE_URL}/track/${encodeURIComponent(id)}`,
+      options?.signal ? { signal: options.signal } : undefined,
+      options?.timeoutMs
     );
     if (!track.id && !track.title) return null;
     return toTrack(track);
@@ -215,18 +239,30 @@ export const deezer = {
     return playlists.map(toPlaylist);
   },
 
-  async searchPlaylists(query: string, limit = 25): Promise<CanonicalPlaylist[]> {
+  async searchPlaylists(
+    query: string,
+    limit = 25,
+    options?: ProviderSearchOptions
+  ): Promise<CanonicalPlaylist[]> {
     const n = clamp(1, limit, 50);
+    const index = options?.offset && options.offset > 0 ? `&index=${options.offset}` : '';
     const playlists = await fetchPaged<DeezerPlaylist>(
-      `/search/playlist?q=${encodeURIComponent(query)}&limit=${n}`
+      `/search/playlist?q=${encodeURIComponent(query)}&limit=${n}${index}`,
+      options
     );
     return playlists.map(toPlaylist);
   },
 
-  async searchArtists(query: string, limit = 25): Promise<CanonicalArtist[]> {
+  async searchArtists(
+    query: string,
+    limit = 25,
+    options?: ProviderSearchOptions
+  ): Promise<CanonicalArtist[]> {
     const n = clamp(1, limit, 50);
+    const index = options?.offset && options.offset > 0 ? `&index=${options.offset}` : '';
     const artists = await fetchPaged<DeezerArtist>(
-      `/search/artist?q=${encodeURIComponent(query)}&limit=${n}`
+      `/search/artist?q=${encodeURIComponent(query)}&limit=${n}${index}`,
+      options
     );
     return artists.map(toArtist);
   },

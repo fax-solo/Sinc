@@ -5,6 +5,7 @@
  * refreshes in the background. Search entries are LRU-capped to keep the
  * storage bounded.
  */
+import { normalizeText } from '@sinc/shared';
 import { storage, STORAGE_KEYS } from '../utils/storage';
 import type { HomeFeed, PersonalizedHomeFeed, SearchResults, SearchType } from './music';
 
@@ -33,7 +34,7 @@ function writeIndex(index: string[]): void {
 }
 
 function searchKey(query: string, type: SearchType): string {
-  return `${STORAGE_KEYS.SEARCH_CACHE}:${type}:${query}`;
+  return `${STORAGE_KEYS.SEARCH_CACHE}:${type}:${normalizeText(query)}`;
 }
 
 function read<T>(key: string): CacheEntry<T> | null {

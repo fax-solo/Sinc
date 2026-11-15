@@ -120,37 +120,74 @@ function toAlbum(a: iTunesAlbumRow): CanonicalAlbum {
   };
 }
 
-async function request<T>(path: string): Promise<T> {
-  return providerFetchJson<T>(`${BASE_URL}${path}`);
+export interface ProviderSearchOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  offset?: number;
 }
 
-function searchPath(term: string, entity: string, limit: number): string {
-  return `/search?term=${encodeURIComponent(term)}&media=music&entity=${entity}&limit=${limit}&country=${COUNTRY}`;
+async function request<T>(
+  path: string,
+  options?: { signal?: AbortSignal; timeoutMs?: number }
+): Promise<T> {
+  return providerFetchJson<T>(
+    `${BASE_URL}${path}`,
+    options?.signal ? { signal: options.signal } : undefined,
+    options?.timeoutMs
+  );
+}
+
+function searchPath(term: string, entity: string, limit: number, offset = 0): string {
+  const base = `/search?term=${encodeURIComponent(term)}&media=music&entity=${entity}&limit=${limit}&country=${COUNTRY}`;
+  return offset > 0 ? `${base}&offset=${offset}` : base;
 }
 
 export const itunes = {
-  async searchTracks(query: string, limit = 25): Promise<CanonicalTrack[]> {
-    const json = await request<{ results?: iTunesTrack[] }>(searchPath(query, 'song', limit));
+  async searchTracks(
+    query: string,
+    limit = 25,
+    options?: ProviderSearchOptions
+  ): Promise<CanonicalTrack[]> {
+    const json = await request<{ results?: iTunesTrack[] }>(
+      searchPath(query, 'song', limit, options?.offset ?? 0),
+      options
+    );
     return (json.results ?? []).map((t) => toTrack(t));
   },
 
   /** Exactly one track by numeric id (server-parity lookup, not a text search). */
-  async lookupTrack(trackId: string): Promise<CanonicalTrack | null> {
+  async lookupTrack(
+    trackId: string,
+    options?: { signal?: AbortSignal; timeoutMs?: number }
+  ): Promise<CanonicalTrack | null> {
     const json = await request<{ results?: iTunesTrack[] }>(
-      `/lookup?id=${encodeURIComponent(trackId)}&entity=song&limit=1&country=${COUNTRY}`
+      `/lookup?id=${encodeURIComponent(trackId)}&entity=song&limit=1&country=${COUNTRY}`,
+      options
     );
     const row = (json.results ?? []).find((r) => r.wrapperType === 'track' && r.kind === 'song');
     return row ? toTrack(row) : null;
   },
 
-  async searchAlbums(query: string, limit = 25): Promise<CanonicalAlbum[]> {
-    const json = await request<{ results?: iTunesAlbumRow[] }>(searchPath(query, 'album', limit));
+  async searchAlbums(
+    query: string,
+    limit = 25,
+    options?: ProviderSearchOptions
+  ): Promise<CanonicalAlbum[]> {
+    const json = await request<{ results?: iTunesAlbumRow[] }>(
+      searchPath(query, 'album', limit, options?.offset ?? 0),
+      options
+    );
     return (json.results ?? []).map(toAlbum);
   },
 
-  async searchArtists(query: string, limit = 25): Promise<CanonicalArtist[]> {
+  async searchArtists(
+    query: string,
+    limit = 25,
+    options?: ProviderSearchOptions
+  ): Promise<CanonicalArtist[]> {
     const json = await request<{ results?: iTunesArtistRow[] }>(
-      searchPath(query, 'musicArtist', limit)
+      searchPath(query, 'musicArtist', limit, options?.offset ?? 0),
+      options
     );
     const artists = (json.results ?? []).map((ar) => toArtist(ar));
     if (artists.length === 0) return artists;
@@ -159,7 +196,8 @@ export const itunes = {
     try {
       const ids = artists.map((a) => a.providerIds.itunes).join(',');
       const lookup = await request<{ results?: iTunesAlbumRow[] }>(
-        `/lookup?id=${encodeURIComponent(ids)}&entity=album&limit=1&country=${COUNTRY}`
+        `/lookup?id=${encodeURIComponent(ids)}&entity=album&limit=1&country=${COUNTRY}`,
+        options
       );
       const byArtist = new Map<number, string>();
       for (const row of lookup.results ?? []) {
@@ -177,8 +215,15 @@ export const itunes = {
   },
 
   /** No real iTunes playlist entity exists; synths albums as playlists (server-compatible). */
-  async searchPlaylists(query: string, limit = 25): Promise<CanonicalPlaylist[]> {
-    const json = await request<{ results?: iTunesAlbumRow[] }>(searchPath(query, 'album', limit));
+  async searchPlaylists(
+    query: string,
+    limit = 25,
+    options?: ProviderSearchOptions
+  ): Promise<CanonicalPlaylist[]> {
+    const json = await request<{ results?: iTunesAlbumRow[] }>(
+      searchPath(query, 'album', limit, options?.offset ?? 0),
+      options
+    );
     return (json.results ?? []).map((a) => ({
       id: `itunes:${a.collectionId}`,
       name: a.collectionName ?? 'Unknown Playlist',

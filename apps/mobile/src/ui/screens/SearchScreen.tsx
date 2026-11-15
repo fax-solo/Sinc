@@ -1,10 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import {
-  Keyboard,
-  Pressable,
-  ScrollView,
-  View,
-} from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Keyboard, Pressable, ScrollView, View } from 'react-native';
 import Ionicons from '@react-native-vector-icons/ionicons';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useNavigation, useRoute, type RouteProp } from '@react-navigation/native';
@@ -14,6 +9,7 @@ import type {
   CanonicalPlaylist,
   CanonicalTrack,
 } from '@sinc/shared';
+import { normalizeText } from '@sinc/shared';
 import { Screen, SectionHeader } from '../components/Screen';
 import { Text } from '../components/Text';
 import { SearchInput, FilterChip } from '../components/Fields';
@@ -42,6 +38,7 @@ const FILTERS: Array<{ label: string; value: SearchType }> = [
 ];
 
 const PAGE_SIZE = 8;
+const SEARCH_DEBOUNCE_MS = 250;
 
 export function SearchScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
@@ -57,6 +54,26 @@ export function SearchScreen() {
 
   const [input, setInput] = useState(route.params?.query ?? storedQuery);
   const [visibleTracks, setVisibleTracks] = useState(PAGE_SIZE);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelDebounce = useCallback(() => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+  }, []);
+
+  const triggerImmediateSearch = useCallback(
+    (raw: string) => {
+      cancelDebounce();
+      const trimmed = raw.trim();
+      if (!trimmed) return;
+      setVisibleTracks(PAGE_SIZE);
+      setInput(trimmed);
+      submit(trimmed);
+    },
+    [cancelDebounce, submit]
+  );
 
   const recentlyPlayed = useLibraryStore((state) => state.recentlyPlayed);
   const favorites = useLibraryStore((state) => state.favoriteTracks);
@@ -68,28 +85,28 @@ export function SearchScreen() {
   const playing = usePlayerStore((state) => state.status === 'playing');
 
   const downloadedTracks = useMemo(
-    () =>
-      downloads
-        .filter((record) => record.phase === 'completed')
-        .map((record) => record.track),
+    () => downloads.filter((record) => record.phase === 'completed').map((record) => record.track),
     [downloads]
   );
 
   // Debounce what the network sees, but keep the field itself instant.
   useEffect(() => {
     const trimmed = input.trim();
-    const timer = setTimeout(() => {
+    cancelDebounce();
+    if (trimmed === storedQuery) return;
+    debounceTimerRef.current = setTimeout(() => {
       setVisibleTracks(PAGE_SIZE);
       setQuery(trimmed);
-    }, 320);
-    return () => clearTimeout(timer);
-  }, [input, setQuery]);
+      debounceTimerRef.current = null;
+    }, SEARCH_DEBOUNCE_MS);
+    return cancelDebounce;
+  }, [input, storedQuery, setQuery, cancelDebounce]);
 
   useEffect(() => {
     const requested = route.params?.query;
     if (!requested) return;
     // One-shot request from browse/mood tiles.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    cancelDebounce();
     setInput(requested);
     setVisibleTracks(PAGE_SIZE);
     submit(requested);
@@ -99,7 +116,41 @@ export function SearchScreen() {
         setParams: (params: Record<string, unknown>) => void;
       }
     ).setParams({ query: undefined });
-  }, [route.params?.query, submit, navigation]);
+  }, [route.params?.query, submit, navigation, cancelDebounce]);
+
+  const suggestions = useMemo(() => {
+    const raw = input.trim();
+    if (raw.length < 2) return [];
+    const norm = normalizeText(raw);
+    const seen = new Set<string>();
+    const list: Array<{ label: string; kind: 'recent' | 'artist' | 'track' }> = [];
+
+    for (const recent of recentSearches) {
+      if (normalizeText(recent).includes(norm) && !seen.has(recent.toLowerCase())) {
+        seen.add(recent.toLowerCase());
+        list.push({ label: recent, kind: 'recent' });
+        if (list.length >= 5) return list;
+      }
+    }
+
+    for (const artist of followedArtists) {
+      if (normalizeText(artist.name).includes(norm) && !seen.has(artist.name.toLowerCase())) {
+        seen.add(artist.name.toLowerCase());
+        list.push({ label: artist.name, kind: 'artist' });
+        if (list.length >= 5) return list;
+      }
+    }
+
+    for (const track of [...favorites, ...downloadedTracks]) {
+      if (normalizeText(track.title).includes(norm) && !seen.has(track.title.toLowerCase())) {
+        seen.add(track.title.toLowerCase());
+        list.push({ label: track.title, kind: 'track' });
+        if (list.length >= 5) return list;
+      }
+    }
+
+    return list;
+  }, [input, recentSearches, followedArtists, favorites, downloadedTracks]);
 
   const local = useMemo(
     () =>
@@ -112,7 +163,15 @@ export function SearchScreen() {
         artists: followedArtists,
         albums: followedAlbums,
       }),
-    [storedQuery, recentlyPlayed, favorites, downloadedTracks, playlists, followedArtists, followedAlbums]
+    [
+      storedQuery,
+      recentlyPlayed,
+      favorites,
+      downloadedTracks,
+      playlists,
+      followedArtists,
+      followedAlbums,
+    ]
   );
 
   const search = useSearch(storedQuery, type);
@@ -168,9 +227,7 @@ export function SearchScreen() {
       : [];
   const remotePlaylists =
     type === 'all' || type === 'playlists'
-      ? (data?.playlists?.data ?? []).filter(
-          (playlist) => !localPlaylistIds.has(playlist.id)
-        )
+      ? (data?.playlists?.data ?? []).filter((playlist) => !localPlaylistIds.has(playlist.id))
       : [];
   const noResults =
     ready &&
@@ -197,7 +254,16 @@ export function SearchScreen() {
   };
 
   const sourceFor = (track: CanonicalTrack): string => {
-    const source = track.providerIds.deezer ? 'Deezer' : track.providerIds.itunes ? 'iTunes' : 'Sinc';
+    const hasDeezer = Boolean(track.providerIds?.deezer);
+    const hasItunes = Boolean(track.providerIds?.itunes);
+    const source =
+      hasDeezer && hasItunes
+        ? 'iTunes & Deezer'
+        : hasDeezer
+          ? 'Deezer'
+          : hasItunes
+            ? 'iTunes'
+            : 'Sinc';
     return `${track.artists.map((artist) => artist.name).join(', ')} · ${source}`;
   };
 
@@ -215,7 +281,11 @@ export function SearchScreen() {
   };
 
   return (
-    <Screen scroll padded={false} scrollProps={{ keyboardShouldPersistTaps: 'handled', keyboardDismissMode: 'on-drag' }}>
+    <Screen
+      scroll
+      padded={false}
+      scrollProps={{ keyboardShouldPersistTaps: 'handled', keyboardDismissMode: 'on-drag' }}
+    >
       <View style={{ paddingHorizontal: 20 }}>
         <View style={{ paddingTop: spacing.sm, marginBottom: spacing.lg }}>
           <Text variant="display">Search</Text>
@@ -228,22 +298,73 @@ export function SearchScreen() {
           value={input}
           onChangeText={(value) => {
             setInput(value);
-            if (!value.trim()) setQuery('');
+            if (!value.trim()) {
+              cancelDebounce();
+              setQuery('');
+            }
           }}
           onSubmitEditing={() => {
             if (input.trim()) {
-              setVisibleTracks(PAGE_SIZE);
-              submit(input);
+              triggerImmediateSearch(input);
             }
             Keyboard.dismiss();
           }}
           onClear={() => {
+            cancelDebounce();
             setInput('');
             setVisibleTracks(PAGE_SIZE);
             setQuery('');
           }}
           placeholder="What do you want to listen to?"
         />
+
+        {suggestions.length > 0 && input.trim() !== storedQuery ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{
+              gap: spacing.xs,
+              paddingTop: spacing.xs,
+              paddingBottom: spacing.xs,
+            }}
+          >
+            {suggestions.map((item) => (
+              <Pressable
+                key={`${item.kind}-${item.label}`}
+                onPress={() => triggerImmediateSearch(item.label)}
+                accessibilityRole="button"
+                accessibilityLabel={`Search for ${item.label}`}
+                style={({ pressed }) => ({
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 4,
+                  backgroundColor: colors.input,
+                  borderWidth: 1,
+                  borderColor: colors.borderSoft,
+                  paddingHorizontal: 12,
+                  paddingVertical: 6,
+                  borderRadius: 16,
+                  opacity: pressed ? 0.7 : 1,
+                })}
+              >
+                <Ionicons
+                  name={
+                    item.kind === 'recent'
+                      ? 'time-outline'
+                      : item.kind === 'artist'
+                        ? 'person-outline'
+                        : 'musical-note-outline'
+                  }
+                  size={13}
+                  color={colors.textSecondary}
+                />
+                <Text variant="small" numberOfLines={1}>
+                  {item.label}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        ) : null}
 
         {ready ? (
           <ScrollView
@@ -271,11 +392,7 @@ export function SearchScreen() {
           <>
             {recentSearches.length > 0 ? (
               <View style={{ marginBottom: spacing.xxl }}>
-                <SectionHeader
-                  title="Recent searches"
-                  actionLabel="Clear"
-                  onAction={clearRecent}
-                />
+                <SectionHeader title="Recent searches" actionLabel="Clear" onAction={clearRecent} />
                 {recentSearches.map((value) => (
                   <Pressable
                     key={value}
@@ -323,7 +440,10 @@ export function SearchScreen() {
                   colors={['#145A35', '#1ED760']}
                   icon={<Ionicons name="sparkles" size={28} color="rgba(255,255,255,0.6)" />}
                   onPress={() =>
-                    navigation.navigate('BrowseCategory', { kind: 'made-for-you', title: 'Made for you' })
+                    navigation.navigate('BrowseCategory', {
+                      kind: 'made-for-you',
+                      title: 'Made for you',
+                    })
                   }
                 />
                 <CategoryTile
@@ -343,7 +463,10 @@ export function SearchScreen() {
                   colors={['#123C4D', '#26B7D9']}
                   icon={<Ionicons name="albums" size={28} color="rgba(255,255,255,0.55)" />}
                   onPress={() =>
-                    navigation.navigate('BrowseCategory', { kind: 'new-releases', title: 'New releases' })
+                    navigation.navigate('BrowseCategory', {
+                      kind: 'new-releases',
+                      title: 'New releases',
+                    })
                   }
                 />
                 <CategoryTile
@@ -394,7 +517,11 @@ export function SearchScreen() {
             {search.isError && !data ? (
               <ErrorState
                 title="Search failed"
-                message={search.error instanceof Error ? search.error.message : 'Check your connection and try again.'}
+                message={
+                  search.error instanceof Error
+                    ? search.error.message
+                    : 'Check your connection and try again.'
+                }
                 onRetry={() => void search.refetch()}
               />
             ) : null}
@@ -414,7 +541,14 @@ export function SearchScreen() {
 
             {localTracks.length > 0 ? (
               <View style={{ marginTop: spacing.md, marginBottom: spacing.lg }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginBottom: spacing.xs }}>
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: spacing.xs,
+                    marginBottom: spacing.xs,
+                  }}
+                >
                   <Text variant="bodyStrong">From your library</Text>
                   <Pill label="Saved" />
                 </View>
@@ -545,7 +679,10 @@ export function SearchScreen() {
                     })}
                   >
                     <Artwork
-                      uri={playlist.coverArtworkUrl ?? playlist.tracks.find((track) => track.artworkUrl)?.artworkUrl}
+                      uri={
+                        playlist.coverArtworkUrl ??
+                        playlist.tracks.find((track) => track.artworkUrl)?.artworkUrl
+                      }
                       size={48}
                       radius={8}
                     />
@@ -553,9 +690,7 @@ export function SearchScreen() {
                       <Text variant="bodyStrong" numberOfLines={1}>
                         {playlist.name}
                       </Text>
-                      <Text variant="small">
-                        {playlist.tracks.length} songs · On this device
-                      </Text>
+                      <Text variant="small">{playlist.tracks.length} songs · On this device</Text>
                     </View>
                     <Ionicons name="chevron-forward" size={17} color={colors.textMuted} />
                   </Pressable>

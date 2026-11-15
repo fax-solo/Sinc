@@ -89,6 +89,10 @@ async function providerFetch(
   init?: RequestInit,
   timeoutMs: number = TIMEOUT_MS
 ): Promise<Response> {
+  if (init?.signal?.aborted) {
+    throw new ProviderError('Provider request aborted', 0);
+  }
+
   const native = await nativeFetch(url, init, timeoutMs);
   if (native) {
     if (!native.ok) {
@@ -97,18 +101,46 @@ async function providerFetch(
     return native;
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutController = new AbortController();
+  const timeout = setTimeout(() => timeoutController.abort(), timeoutMs);
+
+  let combinedSignal: AbortSignal;
+  let abortCleanup: (() => void) | undefined;
+
+  if (init?.signal) {
+    const signalAny = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal })
+      .any;
+    if (typeof signalAny === 'function') {
+      combinedSignal = signalAny([init.signal, timeoutController.signal]);
+    } else {
+      const bridgeController = new AbortController();
+      const onAbort = () => bridgeController.abort();
+      init.signal.addEventListener('abort', onAbort, { once: true });
+      timeoutController.signal.addEventListener('abort', onAbort, { once: true });
+      abortCleanup = () => {
+        init.signal?.removeEventListener('abort', onAbort);
+        timeoutController.signal.removeEventListener('abort', onAbort);
+      };
+      combinedSignal = bridgeController.signal;
+    }
+  } else {
+    combinedSignal = timeoutController.signal;
+  }
+
   try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
+    const response = await fetch(url, { ...init, signal: combinedSignal });
     if (!response.ok) {
       throw new ProviderError(`Provider request failed (${response.status})`, response.status);
     }
     return response;
   } catch (err) {
     if (err instanceof ProviderError) throw err;
+    if (init?.signal?.aborted) {
+      throw new ProviderError('Provider request aborted', 0);
+    }
     throw new ProviderError('Provider request failed', 0);
   } finally {
     clearTimeout(timeout);
+    abortCleanup?.();
   }
 }
