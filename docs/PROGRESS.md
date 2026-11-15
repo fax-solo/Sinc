@@ -265,6 +265,49 @@ Known limitations:
 - The foreground notification id belongs to the primary job; when it ends, the
   FGS card switches to the next job (same id, no duplicate).
 
+## Phase 7 — Background playback hardening 🕒 (code done, device matrix pending)
+
+Implemented:
+
+- **CPU/Wi-Fi wake lock while playing**: `ExoPlayer` is built with
+  `setWakeMode(C.WAKE_MODE_NETWORK)` and the app declares `WAKE_LOCK`.
+  Media3 holds a partial + Wi-Fi lock only while playback is actually running
+  and releases it on pause/stop, so Doze or a screen-off stream cannot starve
+  the renderer.
+- **Audio focus and noisy events** stay with Media3 by design:
+  `AudioAttributes.DEFAULT` + `handleAudioFocus=true` pauses on transient loss
+  and resumes on gain (unless the user paused first), and
+  `setHandleAudioBecomingNoisy(true)` pauses on headphone/Bluetooth unplug.
+  Every transition flows through the existing `onIsPlayingChanged` listener into
+  the same JS snapshot used by the UI, notification and lockscreen — playback
+  timing never depends on a JS timer.
+- **Download FGS wake lock**: `SincDownloadService` now holds a partial wake
+  lock for its own lifetime (released in `onDestroy`). The `dataSync` FGS keeps
+  the process alive, but a long yt-dlp/ffmpeg run also needs the CPU out of
+  deep sleep.
+- **Lifecycle policy kept**: swipe-away keeps an ongoing session playing and
+  stops an idle/paused one; end-of-queue keeps the MediaSession with the queue
+  intact; media buttons/lockscreen transport call the same real player and
+  queue routing already verified in earlier phases.
+
+Verification matrix (A–G):
+
+| Area                                                                         | Status                                    |
+| ---------------------------------------------------------------------------- | ----------------------------------------- |
+| A. Audio focus — transient loss/gain, duck, permanent loss                   | 🕒 device                                 |
+| B. Headphone/Bluetooth disconnect pauses and stays paused                    | 🕒 device                                 |
+| C. Interruptions — resume after call/app, user pause sticks                  | 🕒 device                                 |
+| D. Completion, auto-advance, repeat, end-of-queue play                       | ✅ end-of-queue (earlier); other modes 🕒 |
+| E. Media buttons + lockscreen transport/favorite/lyrics                      | ✅ earlier phases                         |
+| F. Service lifecycle — screen off, swipe-away, FGS coexistence               | 🕒 device                                 |
+| G. Cross-surface state (UI / notification / lockscreen / lyrics / downloads) | ✅ playback basics, 🕒 full pass          |
+
+Checks:
+
+- `./gradlew :app:compileDebugKotlin` ✅
+- `./gradlew :app:assembleRelease` ✅
+- Device pass: 🕒 blocked until the phone is reconnected (USB `adb` was lost).
+
 ## Device findings (Samsung Galaxy A05, Android 14, release build)
 
 Verified on hardware:

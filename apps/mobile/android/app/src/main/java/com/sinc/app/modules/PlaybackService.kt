@@ -10,6 +10,7 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -67,6 +68,11 @@ class PlaybackService : MediaSessionService() {
       return ExoPlayer.Builder(context)
         .setAudioAttributes(AudioAttributes.DEFAULT, true)
         .setHandleAudioBecomingNoisy(true)
+        // Audio-only background playback: keep a partial wake lock (and the
+        // Wi-Fi lock for streaming) while the player is actually playing, so
+        // Doze/deep sleep cannot starve the renderer when the screen is off.
+        // ExoPlayer releases it on pause/stop.
+        .setWakeMode(C.WAKE_MODE_NETWORK)
         .build()
         .apply { addListener(playerListener) }
         .also { exoPlayer = it }
