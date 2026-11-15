@@ -26,6 +26,9 @@ export type RootStackParamList = {
   LocalPlaylist: { id: string };
   Mix: { mix?: DailyMix; mixId?: string };
   Profile: undefined;
+  EditProfile: undefined;
+  Appearance: undefined;
+  StorageDownloads: undefined;
   Notifications: undefined;
   Downloads: undefined;
   Settings: undefined;
