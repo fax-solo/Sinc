@@ -1,3 +1,4 @@
+import type { ComponentProps } from 'react';
 import { Pressable, ScrollView, Switch, View } from 'react-native';
 import Ionicons from '@react-native-vector-icons/ionicons';
 import { useNavigation } from '@react-navigation/native';
@@ -15,7 +16,11 @@ export function AppearanceScreen() {
   const insets = useSafeAreaInsets();
   const profile = useProfileStore();
 
-  const THEMES: Array<{ mode: ThemeMode; label: string; icon: string }> = [
+  const THEMES: Array<{
+    mode: ThemeMode;
+    label: string;
+    icon: ComponentProps<typeof Ionicons>['name'];
+  }> = [
     { mode: 'dark', label: 'Dark', icon: 'moon-outline' },
     { mode: 'light', label: 'Light', icon: 'sunny-outline' },
     { mode: 'system', label: 'System', icon: 'contrast-outline' },
@@ -87,7 +92,7 @@ export function AppearanceScreen() {
                   })}
                 >
                   <Ionicons
-                    name={t.icon as any}
+                    name={t.icon}
                     size={28}
                     color={isSelected ? colors.accent : colors.textSecondary}
                     style={{ marginBottom: spacing.xs }}

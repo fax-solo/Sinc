@@ -54,11 +54,9 @@ export function SecurityScreen() {
   const setDiscoveryMode = usePersonalizationStore((state) => state.setDiscoveryMode);
   const resetTasteProfile = usePersonalizationStore((state) => state.resetTasteProfile);
   const clearRecommendationFeedback = useLibraryStore((state) => state.clearRecommendationFeedback);
-  const clearHistory = useLibraryStore((state) => state.clearHistory);
 
   const [resetTasteOpen, setResetTasteOpen] = useState(false);
   const [clearFeedbackOpen, setClearFeedbackOpen] = useState(false);
-  const [clearHistoryOpen, setClearHistoryOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;

@@ -23,7 +23,6 @@ import {
   scorePlaylist,
   mergeAndDedupeTracks,
   deduplicateAlbums,
-  parseQuery,
 } from '@sinc/shared';
 import { config } from '../../app/config';
 import { useLibraryStore } from '../../services/library/libraryStore';
@@ -180,18 +179,6 @@ export interface SpotifyImportResult {
 }
 
 /** --- text matching helpers (delegated to @sinc/shared) ---------------------- */
-
-function score(query: string, track: CanonicalTrack): number {
-  return scoreTrack(query, track).score;
-}
-
-function mergeTrackResults(
-  a: CanonicalTrack[],
-  b: CanonicalTrack[],
-  query?: string
-): CanonicalTrack[] {
-  return mergeAndDedupeTracks([...a, ...b], query);
-}
 
 function playlistScore(query: string, playlist: CanonicalPlaylist): number {
   return scorePlaylist(query, playlist);

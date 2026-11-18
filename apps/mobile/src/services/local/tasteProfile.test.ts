@@ -5,7 +5,6 @@ import {
   computeListeningInsights,
   mapDiscoveryMode,
   discoveryPreferenceForMode,
-  TASTE_WEIGHTS,
 } from './tasteProfile';
 
 const NOW = 1700000000000;

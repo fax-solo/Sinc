@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ComponentProps } from 'react';
 import {
   Image,
   Pressable,
@@ -40,10 +40,11 @@ export function ProfileScreen() {
   );
 
   const events = usePersonalizationStore((state) => state.events);
-  const insights = useMemo(
-    () => usePersonalizationStore.getState().getInsights('30d'),
-    [events, playStats]
-  );
+  const insights = useMemo(() => {
+    void events;
+    void playStats;
+    return usePersonalizationStore.getState().getInsights('30d');
+  }, [events, playStats]);
 
   // Total unique songs available
   const totalSongsCount = useMemo(() => {
@@ -409,7 +410,7 @@ function MenuRow({
   detail,
   onPress,
 }: {
-  icon: string;
+  icon: ComponentProps<typeof Ionicons>['name'];
   title: string;
   detail?: string;
   onPress: () => void;
@@ -440,7 +441,7 @@ function MenuRow({
           marginRight: spacing.md,
         }}
       >
-        <Ionicons name={icon as any} size={18} color={colors.textSecondary} />
+        <Ionicons name={icon} size={18} color={colors.textSecondary} />
       </View>
       <View style={{ flex: 1 }}>
         <Text style={{ fontSize: 15, fontWeight: '600', color: colors.text }}>{title}</Text>

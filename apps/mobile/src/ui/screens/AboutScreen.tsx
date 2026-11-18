@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import type { ComponentProps } from 'react';
 import { Linking, Pressable, ScrollView, View } from 'react-native';
 import Ionicons from '@react-native-vector-icons/ionicons';
 import { useNavigation } from '@react-navigation/native';
@@ -12,17 +12,9 @@ import { useUpdateStore } from '../../features/updates/updateStore';
 export function AboutScreen() {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
-  const latest = useUpdateStore((state) => state.latest);
   const softStatus = useUpdateStore((state) => state.softStatus);
   const checkSoft = useUpdateStore((state) => state.checkSoft);
   const checking = softStatus === 'checking';
-
-  const download = useCallback(() => {
-    if (!latest) return;
-    void Linking.openURL(latest.apkUrl).catch(() =>
-      toast('Could not open the download link', 'error')
-    );
-  }, [latest]);
 
   const openLink = (url: string) => {
     void Linking.openURL(url).catch(() => toast('Could not open link', 'error'));
@@ -165,7 +157,7 @@ function AboutRow({
   detail,
   onPress,
 }: {
-  icon: string;
+  icon: ComponentProps<typeof Ionicons>['name'];
   title: string;
   detail?: string;
   onPress: () => void;
@@ -183,7 +175,7 @@ function AboutRow({
         opacity: pressed ? 0.7 : 1,
       })}
     >
-      <Ionicons name={icon as any} size={20} color={colors.textSecondary} style={{ marginRight: spacing.md }} />
+      <Ionicons name={icon} size={20} color={colors.textSecondary} style={{ marginRight: spacing.md }} />
       <Text style={{ flex: 1, fontSize: 15, fontWeight: '600', color: colors.text }}>
         {title}
       </Text>

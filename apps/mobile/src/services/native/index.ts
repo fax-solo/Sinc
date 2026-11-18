@@ -17,11 +17,7 @@ import type {
   NativeYtModule,
   NativeYtProgressEvent,
   NativeBackupModule,
-  BackupSaveResult,
-  BackupReadResult,
   ScannedAudioFile,
-  StorageStatsResult,
-  CacheClearResult,
 } from './types';
 
 function unavailable(method: string): () => Promise<never> {

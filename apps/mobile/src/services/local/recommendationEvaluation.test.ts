@@ -2,13 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { CanonicalArtist, CanonicalTrack, ListeningEvent } from '@sinc/shared';
 import {
   computeTasteProfile,
-  computeListeningInsights,
-  mapDiscoveryMode,
   discoveryPreferenceForMode,
 } from './tasteProfile';
 import { selectFreshAwareMixTracks, selectMixTracks, trackSimilarity } from './mixSelection';
-import { blacklistedTrackIds, computeArtistAffinity, hasUsefulAffinity } from './affinity';
-import { rankPersonalizedTracks } from '@sinc/shared';
+import { blacklistedTrackIds } from './affinity';
 
 const NOW = 1700000000000;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -457,6 +454,17 @@ describe('Recommendation Intelligence & Personalization Evaluation', () => {
         completionRatio: 1.0,
       },
     ];
+    const initialProfile = computeTasteProfile({
+      events: initialEvents,
+      playStats: {},
+      skipStats: {},
+      artistPlayStats: {},
+      favoriteTracks: [],
+      followedArtists: [],
+      followedAlbums: [],
+      downloadedTracks: [],
+    });
+    expect(initialProfile.topArtists.length).toBeGreaterThan(0);
 
     // After reset, events array is emptied:
     const profileAfterReset = computeTasteProfile({

@@ -76,9 +76,12 @@ export function SpotifyImportScreen({
   };
 
   useEffect(() => {
-    if (route.params?.initialUrl) {
-      void fetchPlaylist(route.params.initialUrl);
+    const initialUrl = route.params?.initialUrl;
+    if (initialUrl) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      void fetchPlaylist(initialUrl);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.params?.initialUrl]);
 
   const savePlaylist = () => {

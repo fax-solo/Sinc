@@ -1,3 +1,4 @@
+import type { ComponentProps } from 'react';
 import {
   Modal,
   Pressable,
@@ -28,12 +29,15 @@ export function ProfileQuickSheet({ visible, onClose }: ProfileQuickSheetProps) 
   const selectedPreset =
     AVATAR_PRESETS.find((p) => p.id === profile.avatarId) ?? AVATAR_PRESETS[0];
 
-  const navigateTo = (screen: any, params?: any) => {
+  const navigateTo = (
+    screen: keyof RootStackParamList,
+    params?: RootStackParamList[keyof RootStackParamList]
+  ) => {
     onClose();
     if (params) {
-      navigation.navigate(screen, params);
+      (navigation.navigate as (s: string, p?: unknown) => void)(screen, params);
     } else {
-      navigation.navigate(screen);
+      (navigation.navigate as (s: string) => void)(screen);
     }
   };
 
@@ -203,7 +207,7 @@ function SheetRow({
   title,
   onPress,
 }: {
-  icon: string;
+  icon: ComponentProps<typeof Ionicons>['name'];
   title: string;
   onPress: () => void;
 }) {
@@ -220,7 +224,7 @@ function SheetRow({
       })}
     >
       <View style={{ width: 32, alignItems: 'flex-start' }}>
-        <Ionicons name={icon as any} size={20} color={colors.textSecondary} />
+        <Ionicons name={icon} size={20} color={colors.textSecondary} />
       </View>
       <Text style={{ flex: 1, fontSize: 15, fontWeight: '600', color: colors.text }}>
         {title}

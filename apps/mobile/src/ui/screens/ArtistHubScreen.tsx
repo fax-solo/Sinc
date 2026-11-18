@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
 import {
-  FlatList,
   Image,
   Linking,
   Pressable,
@@ -12,14 +11,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery } from '@tanstack/react-query';
 import Ionicons from '@react-native-vector-icons/ionicons';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
-import type { CanonicalAlbum, CanonicalTrack } from '@sinc/shared';
+import type { CanonicalAlbum } from '@sinc/shared';
 import { Text } from '../components/Text';
 import { IconButton, PrimaryButton } from '../components/Buttons';
 import { FilterChip } from '../components/Fields';
 import { SongRow } from '../components/SongRow';
 import { MediaCard, ArtistCard, SectionRail } from '../components/Cards';
 import { SectionHeader } from '../components/Screen';
-import { EmptyState, ErrorState, ListSkeleton, Pill } from '../components/State';
+import { ErrorState, ListSkeleton } from '../components/State';
 import { toast } from '../components/Overlays';
 import { colors, radii, spacing } from '../theme';
 import { musicApi } from '../../api/music';

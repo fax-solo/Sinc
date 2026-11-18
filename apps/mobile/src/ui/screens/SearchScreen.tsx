@@ -114,6 +114,7 @@ export function SearchScreen() {
     if (!requested) return;
     // One-shot request from browse/mood tiles.
     cancelDebounce();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setInput(requested);
     setVisibleTracks(PAGE_SIZE);
     submit(requested);

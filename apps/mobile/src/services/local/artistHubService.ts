@@ -76,7 +76,7 @@ export const artistHubService = {
     }
 
     let deezerId: string | null = isDeezerId(id) ? stripDeezerPrefix(id) : null;
-    let itunesId: string | null = id.startsWith('itunes:') ? stripItunesPrefix(id) : null;
+    const itunesId: string | null = id.startsWith('itunes:') ? stripItunesPrefix(id) : null;
     let artistName: string = fallbackName ?? '';
 
     let baseArtist: CanonicalArtist | null = null;

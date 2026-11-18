@@ -4,8 +4,6 @@ import { useQuery } from '@tanstack/react-query';
 import Ionicons from '@react-native-vector-icons/ionicons';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { CollectionScaffold } from '../components/CollectionScaffold';
-import { SectionHeader } from '../components/Screen';
-import { MediaCard, SectionRail } from '../components/Cards';
 import { Text } from '../components/Text';
 import { IconButton } from '../components/Buttons';
 import { BottomSheet, ConfirmDialog, SheetRow, toast } from '../components/Overlays';

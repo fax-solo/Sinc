@@ -1,3 +1,4 @@
+import type { ComponentProps } from 'react';
 import {
   Image,
   Pressable,
@@ -193,7 +194,7 @@ function SettingsRow({
   value,
   onPress,
 }: {
-  icon: string;
+  icon: ComponentProps<typeof Ionicons>['name'];
   title: string;
   value?: string;
   onPress: () => void;
@@ -211,7 +212,7 @@ function SettingsRow({
         opacity: pressed ? 0.7 : 1,
       })}
     >
-      <Ionicons name={icon as any} size={20} color={colors.textSecondary} style={{ marginRight: spacing.md }} />
+      <Ionicons name={icon} size={20} color={colors.textSecondary} style={{ marginRight: spacing.md }} />
       <Text style={{ flex: 1, fontSize: 15, fontWeight: '600', color: colors.text }}>
         {title}
       </Text>

@@ -235,7 +235,7 @@ export function computeTasteProfile(input: TasteProfileInput): MusicTasteProfile
           a.shortTermScore += TASTE_WEIGHTS.REPLAY * stDecay;
           a.longTermScore += TASTE_WEIGHTS.REPLAY * ltDecay;
           break;
-        case 'track_skipped':
+        case 'track_skipped': {
           a.skipCount += 1;
           // Rule 13: Never treat a single skip as proof of dislike.
           // Mild penalty for early skips, and repeated skips apply full penalty.
@@ -246,6 +246,7 @@ export function computeTasteProfile(input: TasteProfileInput): MusicTasteProfile
           a.shortTermScore += skipPenalty * stDecay;
           a.longTermScore += skipPenalty * ltDecay * 0.5;
           break;
+        }
         case 'track_liked':
           a.shortTermScore += TASTE_WEIGHTS.EXPLICIT_LIKE * stDecay;
           a.longTermScore += TASTE_WEIGHTS.EXPLICIT_LIKE * ltDecay;
@@ -424,7 +425,7 @@ export function computeListeningInsights(
   // If few/no rich events exist yet (e.g. legacy listening before event tracking),
   // supplement play count and estimated minutes from playStats safely without fabricating fake numbers.
   if (inWindowEvents.length === 0 && range === 'all') {
-    for (const [trackId, stat] of Object.entries(playStats)) {
+    for (const [, stat] of Object.entries(playStats)) {
       if (stat.lastPlayedAt >= cutoffMs) {
         totalPlays += stat.count;
         completions += stat.completedCount;

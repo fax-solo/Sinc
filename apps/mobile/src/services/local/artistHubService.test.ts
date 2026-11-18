@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { artistHubService } from './artistHubService';
 import { deezer } from '../providers/deezer';
-import { itunes } from '../providers/itunes';
 import { musicBrainz } from '../providers/musicbrainz';
 import { lastFm } from '../providers/lastfm';
 import { useLibraryStore } from '../library/libraryStore';
