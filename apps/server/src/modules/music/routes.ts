@@ -4,6 +4,7 @@ import type {
   CanonicalArtist,
   CanonicalPlaylist,
   CanonicalTrack,
+  ListeningEvent,
 } from '@sinc/shared';
 import {
   AppError,
@@ -524,7 +525,7 @@ export function buildMusicRoutes(
       const { userId } = (request as AuthenticatedRequest).auth;
       const body = (request.body ?? {}) as { events?: unknown };
       const rawEvents = Array.isArray(body.events) ? body.events : [];
-      const result = await signals.recordListeningEvents(userId, rawEvents as any);
+      const result = await signals.recordListeningEvents(userId, rawEvents as ListeningEvent[]);
       return { ok: true, ...result };
     }
   );

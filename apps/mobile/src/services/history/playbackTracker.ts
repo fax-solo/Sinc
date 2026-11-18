@@ -262,7 +262,7 @@ export class PlaybackTracker {
       eventType: 'track_skipped',
       timestamp: nowMs,
       positionMs: session.lastPositionMs,
-      meaningfulPlayQualified: session.meaningfulQualified,
+      meaningfulPlayQualified: !early && session.meaningfulQualified,
     });
 
     this.currentSession = null;

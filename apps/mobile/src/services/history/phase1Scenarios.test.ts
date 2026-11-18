@@ -26,10 +26,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CanonicalTrack, ListeningEvent } from '@sinc/shared';
-import {
-  computeUserTasteProfile,
-  DEFAULT_QUALIFICATION_CONFIG,
-} from '@sinc/shared';
+import { computeUserTasteProfile } from '@sinc/shared';
 import { PlaybackTracker } from './playbackTracker';
 import { listeningJournal } from './listeningJournal';
 import { storage } from '../../utils/storage';
@@ -38,9 +35,11 @@ function mockTrack(id: string, durationMs = 180_000, artistName = 'Test Artist',
   return {
     id,
     title: `Track ${id}`,
-    artists: [{ id: `art_${id}`, name: artistName, genres: [genre] }],
+    artists: [{ id: `art_${id}`, name: artistName, genres: [genre], providerIds: {} }],
     durationMs,
     artworkUrl: 'https://example.com/art.jpg',
+    providerIds: {},
+    explicit: false,
   };
 }
 
@@ -80,7 +79,7 @@ describe('Phase 1 Verification Suite (20 Scenarios)', () => {
     tracker.onProgress(0, 180_000, true, 1000);
 
     // Play continuously to 29 seconds -> not yet qualified
-    const ev29 = tracker.onProgress(29_000, 180_000, true, 30_000);
+    tracker.onProgress(29_000, 180_000, true, 30_000);
     expect(tracker.getCurrentSession()?.meaningfulQualified).toBe(false);
 
     // Reach 30 seconds continuous playback
@@ -198,7 +197,7 @@ describe('Phase 1 Verification Suite (20 Scenarios)', () => {
     for (let i = 1; i <= 5; i++) {
       const track = mockTrack(`t_rapid_${i}`, 180_000);
       tracker.startSession(track, 'stream', 1000 * i);
-      const skip = tracker.onSkip(1000 * i + 200);
+      tracker.onSkip(1000 * i + 200);
       // Not started yet, returns null and cleans up
       expect(tracker.getCurrentSession()).toBeNull();
     }
@@ -489,7 +488,7 @@ describe('Phase 1 Verification Suite (20 Scenarios)', () => {
     expect(profile.topArtists[0].name).toBe('Artist X');
     expect(profile.topArtists[0].score).toBeGreaterThan(0);
 
-    const skippedTrack = profile.skippedTracks.find((t) => t.artistName === 'Artist Y');
+    const skippedTrack = profile.skippedTracks?.find((t) => t.artistName === 'Artist Y');
     expect(skippedTrack?.count).toBe(1);
 
     // Artist Y does not enter topArtists due to negative feedback / early skip with 0 plays

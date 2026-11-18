@@ -293,7 +293,7 @@ export function computeUserTasteProfile(input: TasteEngineInput): MusicTasteProf
           a.shortTermScore += TASTE_SIGNAL_WEIGHTS.REPLAY * stDecay;
           a.longTermScore += TASTE_SIGNAL_WEIGHTS.REPLAY * ltDecay;
           break;
-        case 'track_skipped':
+        case 'track_skipped': {
           a.skipCount += 1;
           const penalty =
             a.skipCount >= REPEATED_SKIP_THRESHOLD
@@ -302,6 +302,7 @@ export function computeUserTasteProfile(input: TasteEngineInput): MusicTasteProf
           a.shortTermScore += penalty * stDecay;
           a.longTermScore += penalty * ltDecay * 0.5;
           break;
+        }
         case 'track_liked':
           a.shortTermScore += TASTE_SIGNAL_WEIGHTS.EXPLICIT_LIKE * stDecay;
           a.longTermScore += TASTE_SIGNAL_WEIGHTS.EXPLICIT_LIKE * ltDecay;

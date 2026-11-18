@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { ListeningEvent } from '@sinc/shared';
-import { listeningJournal, MAX_JOURNAL_EVENTS } from './listeningJournal';
+import { listeningJournal } from './listeningJournal';
 
 function makeEvent(id: string, trackId: string, eventType: ListeningEvent['eventType']): ListeningEvent {
   return {
