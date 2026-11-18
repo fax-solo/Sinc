@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { ListeningEvent } from '@sinc/shared';
 import { MusicSignalService } from './signals.js';
 
 function makeDb() {
@@ -154,7 +155,7 @@ describe('MusicSignalService', () => {
       db._fns.eventFindMany.mockResolvedValueOnce([{ idempotencyId: 'dup_1' }]);
 
       const service = new MusicSignalService(db as never);
-      const events: any[] = [
+      const events: Partial<ListeningEvent>[] = [
         {
           id: '1',
           sessionId: 's1',
@@ -177,7 +178,7 @@ describe('MusicSignalService', () => {
         },
       ];
 
-      const res = await service.recordListeningEvents('u1', events);
+      const res = await service.recordListeningEvents('u1', events as ListeningEvent[]);
       expect(res.processed).toBe(1);
       expect(res.duplicates).toBe(1);
 

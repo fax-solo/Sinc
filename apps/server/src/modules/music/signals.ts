@@ -5,7 +5,7 @@
  * never throw on missing/extra fields.
  */
 import { randomUUID } from 'node:crypto';
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient, ListeningEventLog } from '@prisma/client';
 import { prisma as defaultPrisma } from '../../lib/prisma.js';
 import {
   type ListeningEvent,
@@ -142,12 +142,12 @@ export class MusicSignalService {
   async getListeningEvents(
     userId: string,
     options: { page?: number; limit?: number; eventType?: string } = {}
-  ): Promise<{ data: any[]; total: number }> {
+  ): Promise<{ data: ListeningEventLog[]; total: number }> {
     const page = Math.max(1, options.page ?? 1);
     const limit = Math.min(100, Math.max(1, options.limit ?? 20));
     const skip = (page - 1) * limit;
 
-    const where: any = { userId };
+    const where: Prisma.ListeningEventLogWhereInput = { userId };
     if (options.eventType) {
       where.eventType = options.eventType;
     }
@@ -208,7 +208,7 @@ export class MusicSignalService {
       }),
       this.db.favorite.findMany({
         where: { userId, targetType: 'track' },
-        select: { targetId: true },
+        select: { targetId: true, targetTitle: true, targetSubtitle: true },
       }),
     ]);
 
@@ -233,9 +233,19 @@ export class MusicSignalService {
       idempotencyId: row.idempotencyId,
     }));
 
+    const favoriteTracks = favoritesData.map((f) => ({
+      id: f.targetId,
+      title: f.targetTitle ?? 'Favorite Track',
+      artists: [{ id: f.targetId, name: f.targetSubtitle ?? 'Unknown Artist', genres: [], providerIds: {} }],
+      durationMs: 0,
+      providerIds: {},
+      explicit: false,
+    }));
+
     const profile = computeUserTasteProfile({
       userId,
       events,
+      favoriteTracks,
       nowMs: Date.now(),
     });
 
@@ -244,11 +254,11 @@ export class MusicSignalService {
       create: {
         id: randomUUID(),
         userId,
-        profile: profile as any,
+        profile: profile as unknown as Prisma.InputJsonValue,
         version: 1,
       },
       update: {
-        profile: profile as any,
+        profile: profile as unknown as Prisma.InputJsonValue,
         version: 1,
       },
     });

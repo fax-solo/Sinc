@@ -196,7 +196,9 @@ export const useLibraryStore = create<LibraryState>()(
             completionRatio: 0,
             idempotencyId: `pref_${has ? 'unliked' : 'liked'}_${track.id}_${now}`,
           });
-        } catch {}
+        } catch {
+          // Journal persistence is best-effort
+        }
       },
 
       recordPlayed: (track) => {
@@ -234,7 +236,9 @@ export const useLibraryStore = create<LibraryState>()(
             completionRatio: 0,
             idempotencyId: `pref_${has ? 'unfollowed' : 'followed'}_${artist.id}_${now}`,
           });
-        } catch {}
+        } catch {
+          // Journal persistence is best-effort
+        }
       },
 
       isFollowedAlbum: (albumId) => get().followedAlbumIds.has(albumId),
@@ -264,7 +268,9 @@ export const useLibraryStore = create<LibraryState>()(
             completionRatio: 0,
             idempotencyId: `pref_${has ? 'unsaved' : 'saved'}_${album.id}_${now}`,
           });
-        } catch {}
+        } catch {
+          // Journal persistence is best-effort
+        }
       },
 
       addPlaylist: (name, tracks = [], description) => {
@@ -298,7 +304,9 @@ export const useLibraryStore = create<LibraryState>()(
             completionRatio: 0,
             idempotencyId: `pref_saved_playlist_${id}_${now}`,
           });
-        } catch {}
+        } catch {
+          // Journal persistence is best-effort
+        }
         return id;
       },
 

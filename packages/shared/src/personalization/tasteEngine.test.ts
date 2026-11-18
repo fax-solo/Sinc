@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { CanonicalArtist, CanonicalTrack, ListeningEvent, TasteScore } from '../types/index.js';
+import type { CanonicalArtist, ListeningEvent, TasteScore } from '../types/index.js';
 import { computeUserTasteProfile } from './tasteEngine.js';
 
 const NOW = 1_700_000_000_000;
