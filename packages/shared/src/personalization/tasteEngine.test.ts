@@ -160,7 +160,7 @@ describe('User Taste Engine', () => {
     });
 
     expect(profile.skippedTracks).toHaveLength(1);
-    expect(profile.skippedTracks[0]!.count).toBe(1);
+    expect(profile.skippedTracks![0]!.count).toBe(1);
     expect(profile.totalSkips).toBe(1);
   });
 

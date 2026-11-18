@@ -169,7 +169,7 @@ export type ListeningEventType =
 export interface ListeningEvent {
   id: string;
   userId?: string;
-  sessionId: string;
+  sessionId?: string;
   trackId: string;
   trackTitle?: string;
   artistId?: string;
@@ -179,13 +179,13 @@ export interface ListeningEvent {
   genres?: string[];
   eventType: ListeningEventType;
   timestamp: number;
-  positionMs: number;
+  positionMs?: number;
   playbackDurationMs: number;
   trackDurationMs: number;
   completionRatio: number;
   meaningfulPlayQualified?: boolean;
   playbackSource?: 'stream' | 'download' | 'local' | 'unknown' | string;
-  idempotencyId: string;
+  idempotencyId?: string;
 }
 
 export type DiscoveryMode = 'familiar' | 'balanced' | 'exploration';
@@ -208,18 +208,18 @@ export interface MusicTasteProfile {
   topAlbums: TasteScore[];
   favoriteGenres: string[];
   favoriteArtists: string[];
-  frequentlyPlayedTracks: Array<{ trackId: string; title: string; artistName: string; count: number }>;
-  recentlyPlayedTracks: Array<{ trackId: string; title: string; artistName: string; lastPlayedAt: number }>;
-  repeatedlyPlayedTracks: Array<{ trackId: string; title: string; artistName: string; count: number }>;
-  skippedTracks: Array<{ trackId: string; title: string; artistName: string; count: number }>;
+  frequentlyPlayedTracks?: Array<{ trackId: string; title: string; artistName: string; count: number }>;
+  recentlyPlayedTracks?: Array<{ trackId: string; title: string; artistName: string; lastPlayedAt: number }>;
+  repeatedlyPlayedTracks?: Array<{ trackId: string; title: string; artistName: string; count: number }>;
+  skippedTracks?: Array<{ trackId: string; title: string; artistName: string; count: number }>;
   discoveryMode: DiscoveryMode;
   discoveryPreference: number;
   personalizationEnabled: boolean;
   totalListeningTimeMs: number;
-  totalQualifiedPlays: number;
-  totalCompletions: number;
-  totalSkips: number;
-  isEmpty: boolean;
+  totalQualifiedPlays?: number;
+  totalCompletions?: number;
+  totalSkips?: number;
+  isEmpty?: boolean;
   lastUpdated: number;
 }
 

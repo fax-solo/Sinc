@@ -38,9 +38,11 @@ function mockTrack(id: string, durationMs = 180_000, artistName = 'Test Artist',
   return {
     id,
     title: `Track ${id}`,
-    artists: [{ id: `art_${id}`, name: artistName, genres: [genre] }],
+    artists: [{ id: `art_${id}`, name: artistName, genres: [genre], providerIds: {} }],
     durationMs,
     artworkUrl: 'https://example.com/art.jpg',
+    providerIds: {},
+    explicit: false,
   };
 }
 
@@ -489,7 +491,7 @@ describe('Phase 1 Verification Suite (20 Scenarios)', () => {
     expect(profile.topArtists[0].name).toBe('Artist X');
     expect(profile.topArtists[0].score).toBeGreaterThan(0);
 
-    const skippedTrack = profile.skippedTracks.find((t) => t.artistName === 'Artist Y');
+    const skippedTrack = profile.skippedTracks?.find((t) => t.artistName === 'Artist Y');
     expect(skippedTrack?.count).toBe(1);
 
     // Artist Y does not enter topArtists due to negative feedback / early skip with 0 plays

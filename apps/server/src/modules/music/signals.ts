@@ -64,13 +64,15 @@ export class MusicSignalService {
     }
 
     const valid = events.filter(
-      (e) =>
-        e &&
-        typeof e.idempotencyId === 'string' &&
-        e.idempotencyId.length > 0 &&
-        typeof e.trackId === 'string' &&
-        e.trackId.length > 0 &&
-        typeof e.sessionId === 'string'
+      (e): e is ListeningEvent & { idempotencyId: string; sessionId: string } =>
+        Boolean(
+          e &&
+          typeof e.idempotencyId === 'string' &&
+          e.idempotencyId.length > 0 &&
+          typeof e.trackId === 'string' &&
+          e.trackId.length > 0 &&
+          typeof e.sessionId === 'string'
+        )
     );
 
     if (valid.length === 0) {
