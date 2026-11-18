@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import {
+  Image,
   Pressable,
   RefreshControl,
   View,
@@ -25,6 +26,7 @@ import { selectCurrentTrack, usePlayerStore } from '../../services/player/player
 import { playerService } from '../../services/player/PlayerService';
 import { openSongMenu } from '../songMenu/songMenuStore';
 import { playlistArtworkUrl } from '../../components/PlaylistCover';
+import { AVATAR_PRESETS, useProfileStore } from '../../features/profile/profileStore';
 import { TastePickerModal } from '../components/TastePickerModal';
 import { usePersonalizationStore } from '../../services/local/personalizationStore';
 import type { RootStackParamList } from '../../app/navigation/types';
@@ -50,7 +52,10 @@ function visibleRecommendationTracks(
 
 export function HomeScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-  const username = useAuthStore((state) => state.user.username);
+  const authUsername = useAuthStore((state) => state.user.username);
+  const profile = useProfileStore();
+  const username = profile.username || authUsername;
+  const avatarPreset = AVATAR_PRESETS.find((p) => p.id === profile.avatarId) ?? AVATAR_PRESETS[0];
   const unread = useNotificationStore(selectUnreadCount);
   const { home, personalized, sections } = useHomeFeed();
   const recentlyPlayed = useLibraryStore((state) => state.recentlyPlayed);
@@ -276,15 +281,23 @@ export function HomeScreen() {
                 width: 40,
                 height: 40,
                 borderRadius: 20,
-                backgroundColor: colors.accent,
+                overflow: 'hidden',
+                backgroundColor: avatarPreset?.backgroundColor ?? colors.accent,
                 alignItems: 'center',
                 justifyContent: 'center',
                 opacity: pressed ? 0.72 : 1,
               })}
             >
-              <Text variant="bodyStrong" style={{ color: colors.onAccent, fontWeight: '800' }}>
-                {initials}
-              </Text>
+              {avatarPreset?.url ? (
+                <Image
+                  source={{ uri: avatarPreset.url }}
+                  style={{ width: 40, height: 40, borderRadius: 20 }}
+                />
+              ) : (
+                <Text variant="bodyStrong" style={{ color: colors.onAccent, fontWeight: '800' }}>
+                  {initials}
+                </Text>
+              )}
             </Pressable>
           </View>
         </View>

@@ -168,8 +168,8 @@ describe('artistHubService', () => {
               explicit: false,
             },
           ],
-          createdAt: '',
-          updatedAt: '',
+          createdAt: 1000,
+          updatedAt: 1000,
         },
       ],
     });

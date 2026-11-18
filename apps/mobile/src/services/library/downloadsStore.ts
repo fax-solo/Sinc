@@ -542,33 +542,212 @@ async function isDeviceOnline(): Promise<boolean> {
 }
 
 /** Post-transfer length guards shared by both transfer paths. */
-const MIN_FULL_TRACK_MS = 45_000;
-const MAX_UNKNOWN_TRACK_MS = 20 * 60 * 1000;
-const MIN_DURATION_TOLERANCE_MS = 5_000;
-const DURATION_TOLERANCE_RATIO = 0.03;
+export const MIN_FULL_TRACK_MS = 45_000;
+export const MAX_UNKNOWN_TRACK_MS = 20 * 60 * 1000;
+export const MIN_DURATION_TOLERANCE_MS = 8_000;
+export const MAX_DURATION_TOLERANCE_MS = 15_000;
+export const DURATION_TOLERANCE_RATIO = 0.04;
+export const TRUNCATED_DURATION_RATIO = 0.50;
+
+export interface ValidationDiagnostic {
+  status: 'validation_passed' | 'validation_failed';
+  reason?:
+    | 'duration_mismatch'
+    | 'truncated_file'
+    | 'incorrect_version'
+    | 'invalid_audio'
+    | 'missing_metadata'
+    | 'ffprobe_failure'
+    | 'post_processing_failure';
+  sourceDuration?: number;
+  downloadedDuration?: number;
+  difference?: number;
+  differencePercentage?: number;
+  validationPolicy: string;
+  fileReadable: boolean;
+  hasAudioStream?: boolean;
+  message?: string;
+}
+
+export function durationToleranceMs(expectedMs: number): number {
+  const calculated = Math.round(expectedMs * DURATION_TOLERANCE_RATIO);
+  return Math.min(MAX_DURATION_TOLERANCE_MS, Math.max(MIN_DURATION_TOLERANCE_MS, calculated));
+}
+
+/**
+ * Validates a downloaded file's duration against the source/catalog metadata.
+ * Produces structured diagnostic information to distinguish between acceptable
+ * intro/outro discrepancies, truncated downloads, incorrect versions, unreadable
+ * audio, or missing metadata.
+ */
+export function validateDownloadDuration(
+  durationMs: number,
+  expectedDurationMs: number | null | undefined,
+  opts?: { fileReadable?: boolean; hasAudioStream?: boolean }
+): ValidationDiagnostic {
+  const fileReadable = opts?.fileReadable ?? true;
+  const hasAudioStream = opts?.hasAudioStream ?? true;
+  const actualSec = durationMs > 0 ? Math.round((durationMs / 1000) * 100) / 100 : 0;
+  const expectedSec =
+    expectedDurationMs && expectedDurationMs > 0
+      ? Math.round((expectedDurationMs / 1000) * 100) / 100
+      : undefined;
+
+  if (!fileReadable) {
+    return {
+      status: 'validation_failed',
+      reason: 'invalid_audio',
+      sourceDuration: expectedSec,
+      downloadedDuration: actualSec || undefined,
+      validationPolicy: 'duration_tolerance_v2',
+      fileReadable: false,
+      hasAudioStream: false,
+      message: 'Downloaded file is not readable audio',
+    };
+  }
+
+  if (!hasAudioStream) {
+    return {
+      status: 'validation_failed',
+      reason: 'invalid_audio',
+      sourceDuration: expectedSec,
+      downloadedDuration: actualSec,
+      validationPolicy: 'duration_tolerance_v2',
+      fileReadable: true,
+      hasAudioStream: false,
+      message: 'Downloaded file contains no audio stream',
+    };
+  }
+
+  if (!durationMs || durationMs <= 0) {
+    if (expectedDurationMs && expectedDurationMs > 0) {
+      return {
+        status: 'validation_failed',
+        reason: 'ffprobe_failure',
+        sourceDuration: expectedSec,
+        downloadedDuration: 0,
+        difference: expectedSec,
+        differencePercentage: 100,
+        validationPolicy: 'duration_tolerance_v2',
+        fileReadable: true,
+        hasAudioStream: true,
+        message: 'Could not determine audio duration from probe',
+      };
+    }
+    return {
+      status: 'validation_failed',
+      reason: 'missing_metadata',
+      downloadedDuration: 0,
+      validationPolicy: 'duration_tolerance_v2',
+      fileReadable: true,
+      hasAudioStream: true,
+      message: 'Duration unknown and no catalog reference available',
+    };
+  }
+
+  if (
+    durationMs < MIN_FULL_TRACK_MS &&
+    (!expectedDurationMs || expectedDurationMs >= MIN_FULL_TRACK_MS)
+  ) {
+    const diff = expectedSec != null ? Math.max(0, expectedSec - actualSec) : undefined;
+    const diffPct =
+      expectedSec != null ? Math.max(0, ((expectedSec - actualSec) / expectedSec) * 100) : undefined;
+    return {
+      status: 'validation_failed',
+      reason: 'truncated_file',
+      sourceDuration: expectedSec,
+      downloadedDuration: actualSec,
+      difference: diff != null ? Math.round(diff * 100) / 100 : undefined,
+      differencePercentage: diffPct != null ? Math.round(diffPct * 100) / 100 : undefined,
+      validationPolicy: 'duration_tolerance_v2',
+      fileReadable: true,
+      hasAudioStream: true,
+      message: `Audio file is shorter than minimum track length (${actualSec}s < 45s)`,
+    };
+  }
+
+  if (!expectedDurationMs || expectedDurationMs <= 0) {
+    if (durationMs > MAX_UNKNOWN_TRACK_MS) {
+      return {
+        status: 'validation_failed',
+        reason: 'duration_mismatch',
+        downloadedDuration: actualSec,
+        validationPolicy: 'duration_tolerance_v2',
+        fileReadable: true,
+        hasAudioStream: true,
+        message: `Audio exceeds maximum duration for unknown length (${actualSec}s > 1200s)`,
+      };
+    }
+    return {
+      status: 'validation_passed',
+      downloadedDuration: actualSec,
+      validationPolicy: 'duration_tolerance_v2',
+      fileReadable: true,
+      hasAudioStream: true,
+    };
+  }
+
+  // Check severely truncated relative to expected (< 50%)
+  if (durationMs < expectedDurationMs * TRUNCATED_DURATION_RATIO) {
+    const diff = Math.abs(actualSec - expectedSec!);
+    const diffPct = (diff / expectedSec!) * 100;
+    return {
+      status: 'validation_failed',
+      reason: 'truncated_file',
+      sourceDuration: expectedSec,
+      downloadedDuration: actualSec,
+      difference: Math.round(diff * 100) / 100,
+      differencePercentage: Math.round(diffPct * 100) / 100,
+      validationPolicy: 'duration_tolerance_v2',
+      fileReadable: true,
+      hasAudioStream: true,
+      message: 'Downloaded audio is severely truncated (< 50% of expected duration)',
+    };
+  }
+
+  const diffMs = Math.abs(durationMs - expectedDurationMs);
+  const diffSec = Math.round((diffMs / 1000) * 100) / 100;
+  const diffPct = Math.round((diffSec / expectedSec!) * 10000) / 100;
+  const tolerance = durationToleranceMs(expectedDurationMs);
+
+  if (diffMs > tolerance) {
+    const reason = diffPct > 20 || diffSec > 30 ? 'incorrect_version' : 'duration_mismatch';
+    return {
+      status: 'validation_failed',
+      reason,
+      sourceDuration: expectedSec,
+      downloadedDuration: actualSec,
+      difference: diffSec,
+      differencePercentage: diffPct,
+      validationPolicy: 'duration_tolerance_v2',
+      fileReadable: true,
+      hasAudioStream: true,
+      message: `Duration difference (${diffSec}s, ${diffPct}%) exceeds tolerance (${tolerance / 1000}s)`,
+    };
+  }
+
+  return {
+    status: 'validation_passed',
+    sourceDuration: expectedSec,
+    downloadedDuration: actualSec,
+    difference: diffSec,
+    differencePercentage: diffPct,
+    validationPolicy: 'duration_tolerance_v2',
+    fileReadable: true,
+    hasAudioStream: true,
+  };
+}
 
 /**
  * A finished direct-source file whose probed length is this far off the
  * expected track is a preview/compilation segment or the wrong song: reject.
- * The old 0.8-1.25x window accepted a 3:35 cover as a 2:55 song; this gate is
- * tight enough to catch a different recording while allowing a few seconds of
- * intro/outro silence.
- *
- * An unreadable probe (0) fails closed when the catalog length is known: an
- * unverified file is not saved as the song.
+ * Uses the configurable validateDownloadDuration policy.
  */
 export function isBadDownloadDuration(
   durationMs: number,
   expectedDurationMs: number | null | undefined
 ): boolean {
-  if (!durationMs || durationMs <= 0) return Boolean(expectedDurationMs && expectedDurationMs > 0);
-  if (durationMs < MIN_FULL_TRACK_MS) return true;
-  if (!expectedDurationMs || expectedDurationMs <= 0) return durationMs > MAX_UNKNOWN_TRACK_MS;
-  const tolerance = Math.max(
-    MIN_DURATION_TOLERANCE_MS,
-    expectedDurationMs * DURATION_TOLERANCE_RATIO
-  );
-  return Math.abs(durationMs - expectedDurationMs) > tolerance;
+  return validateDownloadDuration(durationMs, expectedDurationMs).status === 'validation_failed';
 }
 
 /**
@@ -912,7 +1091,16 @@ export const useDownloadsStore = create<DownloadsState>()(
                 // so the probed length is the acceptance gate: a preview or
                 // compilation segment must fall through to the yt-dlp path
                 // instead of being saved as the song.
-                if (isBadDownloadDuration(result.durationMs ?? 0, direct.expectedDurationMs)) {
+                const durationValidation = validateDownloadDuration(
+                  result.durationMs ?? 0,
+                  direct.expectedDurationMs
+                );
+                if (durationValidation.status === 'validation_failed') {
+                  console.warn(
+                    'Sinc direct source duration validation failed:',
+                    jobId,
+                    JSON.stringify(durationValidation)
+                  );
                   await nativeBridge.downloader.remove(jobId, privateName, publicName);
                   directJobSources.delete(jobId);
                   // fall through to the yt-dlp tier below
@@ -990,6 +1178,7 @@ export const useDownloadsStore = create<DownloadsState>()(
               completedAt: Date.now(),
               attempts: 0,
               retryAt: undefined,
+              error: undefined,
               publishedName: result.publishedName ?? publicFileName(track),
             });
           };

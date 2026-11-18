@@ -404,40 +404,26 @@ class SincDownloaderModule(reactContext: ReactApplicationContext) :
             // when the catalog length is known — the engine tier can still
             // fetch a verifiable copy. JS keeps a backstop for callers that
             // bypass this module.
-            val durationMs = SincAudioProbe.probeDuration(finalFile)
-            if (durationMs <= 0L) {
+            val probe = SincAudioProbe.probeAudio(finalFile)
+            val validation = SincDownloadRules.validateAudio(
+              actualMs = probe.durationMs,
+              expectedMs = expectedMs,
+              fileReadable = probe.readable,
+              hasAudioStream = probe.hasAudioStream,
+            )
+            if (!validation.isValid) {
               finalFile.delete()
+              val diagnosticJson = validation.toJson()
+              Log.w(LOG_TAG, "download validation failed for jobId=$jobId: $diagnosticJson")
               SincDownloads.end(
                 jobId,
                 SincDownloads.OUTCOME_FAILED,
-                "Downloaded file is not readable audio",
+                validation.message ?: "Downloaded file failed duration validation",
               )
-              Log.w(LOG_TAG, "download rejected: unreadable audio for jobId=$jobId")
-              promise.reject("DOWNLOAD_UNVERIFIED", "Downloaded file is not readable audio")
+              promise.reject("DOWNLOAD_UNVERIFIED", diagnosticJson)
               return
             }
-            if (
-              expectedMs != null &&
-              expectedMs > 0L &&
-              !SincDownloadRules.isDurationAcceptable(durationMs, expectedMs)
-            ) {
-              finalFile.delete()
-              SincDownloads.end(
-                jobId,
-                SincDownloads.OUTCOME_FAILED,
-                "Downloaded file does not match the requested track length",
-              )
-              Log.w(
-                LOG_TAG,
-                "download rejected: duration ${durationMs}ms != expected ${expectedMs}ms " +
-                  "for jobId=$jobId"
-              )
-              promise.reject(
-                "DOWNLOAD_UNVERIFIED",
-                "Downloaded file does not match the requested track length"
-              )
-              return
-            }
+            val durationMs = probe.durationMs
             // Length + metadata can still describe the wrong audio (covers,
             // tributes, same-length edits). Match the finished bytes against the
             // trusted catalog preview before publishing. No preview means there

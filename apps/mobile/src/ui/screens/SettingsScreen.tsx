@@ -137,6 +137,11 @@ export function SettingsScreen() {
               onPress={() => navigation.navigate('Notifications')}
             />
             <SettingsRow
+              icon="musical-notes-outline"
+              title="Import from Spotify"
+              onPress={() => navigation.navigate('SpotifyImport')}
+            />
+            <SettingsRow
               icon="server-outline"
               title="Data & Storage"
               onPress={() => navigation.navigate('StorageDownloads')}
