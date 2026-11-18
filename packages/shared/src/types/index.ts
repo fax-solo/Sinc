@@ -151,18 +151,25 @@ export interface TrackLyrics {
 
 export type ListeningEventType =
   | 'track_started'
+  | 'playback_progress'
   | 'track_completed'
   | 'track_skipped'
   | 'track_replayed'
   | 'track_liked'
   | 'track_unliked'
+  | 'artist_followed'
+  | 'artist_unfollowed'
+  | 'album_saved'
+  | 'album_unsaved'
+  | 'playlist_saved'
   | 'playlist_add'
   | 'playlist_remove'
-  | 'artist_followed'
   | 'album_played';
 
 export interface ListeningEvent {
   id: string;
+  userId?: string;
+  sessionId: string;
   trackId: string;
   trackTitle?: string;
   artistId?: string;
@@ -172,9 +179,13 @@ export interface ListeningEvent {
   genres?: string[];
   eventType: ListeningEventType;
   timestamp: number;
+  positionMs: number;
   playbackDurationMs: number;
   trackDurationMs: number;
   completionRatio: number;
+  meaningfulPlayQualified?: boolean;
+  playbackSource?: 'stream' | 'download' | 'local' | 'unknown' | string;
+  idempotencyId: string;
 }
 
 export type DiscoveryMode = 'familiar' | 'balanced' | 'exploration';
@@ -197,10 +208,18 @@ export interface MusicTasteProfile {
   topAlbums: TasteScore[];
   favoriteGenres: string[];
   favoriteArtists: string[];
+  frequentlyPlayedTracks: Array<{ trackId: string; title: string; artistName: string; count: number }>;
+  recentlyPlayedTracks: Array<{ trackId: string; title: string; artistName: string; lastPlayedAt: number }>;
+  repeatedlyPlayedTracks: Array<{ trackId: string; title: string; artistName: string; count: number }>;
+  skippedTracks: Array<{ trackId: string; title: string; artistName: string; count: number }>;
   discoveryMode: DiscoveryMode;
   discoveryPreference: number;
   personalizationEnabled: boolean;
   totalListeningTimeMs: number;
+  totalQualifiedPlays: number;
+  totalCompletions: number;
+  totalSkips: number;
+  isEmpty: boolean;
   lastUpdated: number;
 }
 

@@ -517,6 +517,53 @@ export function buildMusicRoutes(
     }
   );
 
+  app.post(
+    '/music/history/events',
+    { preHandler: authGuard(tokenService) },
+    async (request) => {
+      const { userId } = (request as AuthenticatedRequest).auth;
+      const body = (request.body ?? {}) as { events?: unknown };
+      const rawEvents = Array.isArray(body.events) ? body.events : [];
+      const result = await signals.recordListeningEvents(userId, rawEvents as any);
+      return { ok: true, ...result };
+    }
+  );
+
+  app.get(
+    '/music/history/events',
+    { preHandler: authGuard(tokenService) },
+    async (request) => {
+      const { userId } = (request as AuthenticatedRequest).auth;
+      const q = request.query as Record<string, unknown>;
+      const page = Math.max(1, Number(q.page ?? 1));
+      const limit = Math.min(100, Math.max(1, Number(q.limit ?? 20)));
+      const eventType = typeof q.eventType === 'string' ? q.eventType : undefined;
+
+      const { data, total } = await signals.getListeningEvents(userId, { page, limit, eventType });
+      return { data, meta: meta(page, limit, total) };
+    }
+  );
+
+  app.delete(
+    '/music/history',
+    { preHandler: authGuard(tokenService) },
+    async (request) => {
+      const { userId } = (request as AuthenticatedRequest).auth;
+      const result = await signals.deleteListeningHistory(userId);
+      return { ok: true, ...result };
+    }
+  );
+
+  app.get(
+    '/music/taste-profile',
+    { preHandler: authGuard(tokenService) },
+    async (request) => {
+      const { userId } = (request as AuthenticatedRequest).auth;
+      const profile = await signals.getUserTasteProfile(userId);
+      return { ok: true, profile };
+    }
+  );
+
   app.put('/music/favorites', { preHandler: authGuard(tokenService) }, async (request, reply) => {
     const { userId } = (request as AuthenticatedRequest).auth;
     const body = (request.body ?? {}) as { tracks?: unknown };

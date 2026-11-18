@@ -27,6 +27,8 @@ model User {
   favorites     Favorite[]
   playlists     Playlist[]
   history       History[]
+  listeningEvents ListeningEventLog[]
+  tasteSnapshot UserTasteSnapshot?
   downloads     DownloadJob[]
   auditLogs     AuditLog[]
   analytics     AnalyticsEvent[]
@@ -242,4 +244,51 @@ model AnalyticsEvent {
   @@index([event])
   @@index([event, createdAt])
   @@index([createdAt])
+}
+
+// Phase 1: Listening intelligence foundation
+// Discrete, append-only, idempotent telemetry events capturing user playback and preferences.
+model ListeningEventLog {
+  id                 String   @id @default(cuid())
+  idempotencyId      String   @unique
+  userId             String
+  sessionId          String
+  trackId            String
+  trackTitle         String
+  artistId           String?
+  artistName         String
+  albumId            String?
+  albumTitle         String?
+  genres             String[]
+  eventType          String
+  playbackPositionMs Int      @default(0)
+  listenDurationMs   Int      @default(0)
+  trackDurationMs    Int      @default(0)
+  completionRatio    Float    @default(0)
+  meaningfulPlay     Boolean  @default(false)
+  playbackSource     String   @default("stream")
+  timestamp          DateTime
+  createdAt          DateTime @default(now())
+
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, timestamp])
+  @@index([userId, eventType])
+  @@index([trackId])
+  @@index([artistId])
+  @@index([sessionId])
+}
+
+// Phase 1: Materialized taste profile snapshot for high-speed home & discovery queries.
+model UserTasteSnapshot {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  profile   Json
+  version   Int      @default(1)
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }

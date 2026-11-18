@@ -27,6 +27,8 @@ import type { NativePlaybackState, NativeProgressEvent } from '../native/types';
 import { selectCurrentTrack, usePlayerStore } from './playerStore';
 import { usePlayerProgressStore } from './playerProgressStore';
 import { usePersonalizationStore } from '../local/personalizationStore';
+import { playbackTracker } from '../history/playbackTracker';
+import { listeningJournal } from '../history/listeningJournal';
 
 /**
  * Recently resolved stream URLs. googlevideo URLs live ~6h; entries younger
@@ -229,6 +231,9 @@ class PlayerService {
 
       if (store.status === 'playing') {
         this.hasStarted = true;
+        try {
+          playbackTracker.onPause();
+        } catch {}
         await nativeBridge.player.pause();
         store.setStatus('paused');
         return;
@@ -240,6 +245,9 @@ class PlayerService {
       // in-flight load settles, so the pause always wins.
       if (store.status === 'loading') {
         this.invalidateLoad();
+        try {
+          playbackTracker.onPause();
+        } catch {}
         try {
           await nativeBridge.player.pause();
         } catch {
@@ -253,6 +261,9 @@ class PlayerService {
         await this.loadAndPlayCurrent();
         return;
       }
+      try {
+        playbackTracker.onResume();
+      } catch {}
       await nativeBridge.player.play();
       store.setStatus('playing');
     });
@@ -292,6 +303,9 @@ class PlayerService {
         (store.status === 'playing' || store.status === 'paused') &&
         progress.positionMs > 3_000
       ) {
+        try {
+          playbackTracker.onSeek(0);
+        } catch {}
         await nativeBridge.player.seekTo(0);
         progress.setProgress(0, progress.durationMs);
         return;
@@ -337,11 +351,22 @@ class PlayerService {
         completionRatio: duration > 0 ? Math.min(1, progress.positionMs / duration) : 0,
       });
     }
+    try {
+      const skipEvent = playbackTracker.onSkip();
+      if (skipEvent) {
+        listeningJournal.append(skipEvent);
+      }
+    } catch (err) {
+      console.warn('PlaybackTracker onSkip error:', err);
+    }
   }
 
   seekTo(positionMs: number): Promise<void> {
     this.initialize();
     return this.enqueue(async () => {
+      try {
+        playbackTracker.onSeek(positionMs);
+      } catch {}
       const progress = usePlayerProgressStore.getState();
       progress.setProgress(positionMs, progress.durationMs);
       await nativeBridge.player.seekTo(positionMs);
@@ -352,6 +377,9 @@ class PlayerService {
     this.initialize();
     return this.enqueue(async () => {
       this.invalidateLoad();
+      try {
+        playbackTracker.onFailureOrInterruption();
+      } catch {}
       await nativeBridge.player.stop();
       const store = usePlayerStore.getState();
       store.setStatus('idle');
@@ -395,6 +423,15 @@ class PlayerService {
             trackDurationMs: event.durationMs || current.durationMs || 0,
             completionRatio: 0,
           });
+
+          // Phase 1: Initialize listening tracker session
+          try {
+            const download = useDownloadsStore.getState().getDownload(current.id);
+            const sourceKind = download?.localUri ? 'download' : 'stream';
+            playbackTracker.startSession(current, sourceKind);
+          } catch (err) {
+            console.warn('PlaybackTracker start error:', err);
+          }
         }
       }
 
@@ -414,6 +451,20 @@ class PlayerService {
         if (current && current.id === event.trackId) {
           useLibraryStore.getState().recordPlayStarted(current);
         }
+      }
+
+      // Phase 1: Accrue continuous playback and record checkpoints/qualification
+      try {
+        const trackerEvents = playbackTracker.onProgress(
+          event.positionMs,
+          event.durationMs,
+          event.isPlaying
+        );
+        for (const ev of trackerEvents) {
+          listeningJournal.append(ev);
+        }
+      } catch (err) {
+        console.warn('PlaybackTracker progress error:', err);
       }
     }
     const store = usePlayerStore.getState();
@@ -452,8 +503,14 @@ class PlayerService {
       case 'ready':
         if (event.isPlaying) {
           if (store.status !== 'playing') store.setStatus('playing');
+          try {
+            playbackTracker.onResume();
+          } catch {}
         } else if (store.status === 'playing' || store.status === 'loading') {
           store.setStatus('paused');
+          try {
+            playbackTracker.onPause();
+          } catch {}
         }
         break;
       case 'buffering':
@@ -498,6 +555,9 @@ class PlayerService {
       return;
     }
     console.warn('Sinc player native error:', message);
+    try {
+      playbackTracker.onFailureOrInterruption();
+    } catch {}
     const store = usePlayerStore.getState();
     store.setError(message);
     store.setStatus('error');
@@ -549,6 +609,14 @@ class PlayerService {
       trackDurationMs: completionDuration,
       completionRatio: 1.0,
     });
+    try {
+      const compEvent = playbackTracker.onCompletion();
+      if (compEvent) {
+        listeningJournal.append(compEvent);
+      }
+    } catch (err) {
+      console.warn('PlaybackTracker onCompletion error:', err);
+    }
     store.next();
     // Re-read state: `store` is a snapshot — after next() the queue may have
     // moved to 'ended' (repeat off, queue exhausted). Keep the media session
@@ -665,6 +733,9 @@ class PlayerService {
       this.prefetchUpcoming();
     } catch (err) {
       if (generation !== this.generation) return;
+      try {
+        playbackTracker.onFailureOrInterruption();
+      } catch {}
       const message = err instanceof Error ? err.message : 'Failed to load track';
       console.warn('Sinc playback failed:', message);
       store.setError(message);

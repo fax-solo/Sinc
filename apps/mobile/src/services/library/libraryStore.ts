@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import type { CanonicalAlbum, CanonicalArtist, CanonicalTrack } from '@sinc/shared';
 import { storage, STORAGE_KEYS } from '../../utils/storage';
+import { listeningJournal } from '../history/listeningJournal';
 
 export interface LocalPlaylist {
   id: string;
@@ -175,6 +176,27 @@ export const useLibraryStore = create<LibraryState>()(
           ? favoriteTracks.filter((t) => t.id !== track.id)
           : [track, ...favoriteTracks];
         set({ favoriteTracks: next, favoriteIds: idsOf(next) });
+        try {
+          const now = Date.now();
+          listeningJournal.append({
+            id: `pref_${now}_${Math.random().toString(36).slice(2, 8)}`,
+            sessionId: `pref_${now}`,
+            trackId: track.id,
+            trackTitle: track.title,
+            artistId: track.artists[0]?.id,
+            artistName: track.artists[0]?.name ?? 'Unknown Artist',
+            albumId: track.album?.id,
+            albumTitle: track.album?.title,
+            genres: track.artists[0]?.genres,
+            eventType: has ? 'track_unliked' : 'track_liked',
+            timestamp: now,
+            positionMs: 0,
+            playbackDurationMs: 0,
+            trackDurationMs: track.durationMs || 0,
+            completionRatio: 0,
+            idempotencyId: `pref_${has ? 'unliked' : 'liked'}_${track.id}_${now}`,
+          });
+        } catch {}
       },
 
       recordPlayed: (track) => {
@@ -195,6 +217,24 @@ export const useLibraryStore = create<LibraryState>()(
           ? followedArtists.filter((a) => a.id !== artist.id)
           : [artist, ...followedArtists];
         set({ followedArtists: next, followedArtistIds: idsOf(next) });
+        try {
+          const now = Date.now();
+          listeningJournal.append({
+            id: `pref_${now}_${Math.random().toString(36).slice(2, 8)}`,
+            sessionId: `pref_${now}`,
+            trackId: `art-${artist.id}`,
+            artistId: artist.id,
+            artistName: artist.name,
+            genres: artist.genres,
+            eventType: has ? 'artist_unfollowed' : 'artist_followed',
+            timestamp: now,
+            positionMs: 0,
+            playbackDurationMs: 0,
+            trackDurationMs: 0,
+            completionRatio: 0,
+            idempotencyId: `pref_${has ? 'unfollowed' : 'followed'}_${artist.id}_${now}`,
+          });
+        } catch {}
       },
 
       isFollowedAlbum: (albumId) => get().followedAlbumIds.has(albumId),
@@ -206,6 +246,25 @@ export const useLibraryStore = create<LibraryState>()(
           ? followedAlbums.filter((a) => a.id !== album.id)
           : [album, ...followedAlbums];
         set({ followedAlbums: next, followedAlbumIds: idsOf(next) });
+        try {
+          const now = Date.now();
+          listeningJournal.append({
+            id: `pref_${now}_${Math.random().toString(36).slice(2, 8)}`,
+            sessionId: `pref_${now}`,
+            trackId: `alb-${album.id}`,
+            albumId: album.id,
+            albumTitle: album.title,
+            artistId: album.artist?.id,
+            artistName: album.artist?.name ?? 'Unknown Artist',
+            eventType: has ? 'album_unsaved' : 'album_saved',
+            timestamp: now,
+            positionMs: 0,
+            playbackDurationMs: 0,
+            trackDurationMs: 0,
+            completionRatio: 0,
+            idempotencyId: `pref_${has ? 'unsaved' : 'saved'}_${album.id}_${now}`,
+          });
+        } catch {}
       },
 
       addPlaylist: (name, tracks = [], description) => {
@@ -224,6 +283,22 @@ export const useLibraryStore = create<LibraryState>()(
             },
           ],
         });
+        try {
+          listeningJournal.append({
+            id: `pref_${now}_${Math.random().toString(36).slice(2, 8)}`,
+            sessionId: `pref_${now}`,
+            trackId: `pl-${id}`,
+            trackTitle: name.trim() || 'New playlist',
+            artistName: 'You',
+            eventType: 'playlist_saved',
+            timestamp: now,
+            positionMs: 0,
+            playbackDurationMs: 0,
+            trackDurationMs: 0,
+            completionRatio: 0,
+            idempotencyId: `pref_saved_playlist_${id}_${now}`,
+          });
+        } catch {}
         return id;
       },
 
