@@ -160,14 +160,16 @@ object SincDownloadRules {
       )
     }
 
+    val validExpectedSec = expectedMs / 1000.0
+
     // Check truncated relative to expected (< 50%)
     if (actualMs < (expectedMs * TRUNCATED_RATIO).toLong()) {
-      val diff = Math.abs(actualSec - expectedSec)
-      val pct = (diff / expectedSec) * 100.0
+      val diff = Math.abs(actualSec - validExpectedSec)
+      val pct = (diff / validExpectedSec) * 100.0
       return ValidationDiagnostic(
         status = "validation_failed",
         reason = "truncated_file",
-        sourceDuration = expectedSec,
+        sourceDuration = validExpectedSec,
         downloadedDuration = actualSec,
         difference = Math.round(diff * 100.0) / 100.0,
         differencePercentage = Math.round(pct * 100.0) / 100.0,
@@ -180,7 +182,7 @@ object SincDownloadRules {
 
     val diffMs = Math.abs(actualMs - expectedMs)
     val diffSec = diffMs / 1000.0
-    val diffPct = (diffSec / expectedSec) * 100.0
+    val diffPct = (diffSec / validExpectedSec) * 100.0
     val toleranceMs = durationToleranceMs(expectedMs)
 
     if (diffMs > toleranceMs) {
@@ -188,7 +190,7 @@ object SincDownloadRules {
       return ValidationDiagnostic(
         status = "validation_failed",
         reason = reason,
-        sourceDuration = expectedSec,
+        sourceDuration = validExpectedSec,
         downloadedDuration = actualSec,
         difference = Math.round(diffSec * 100.0) / 100.0,
         differencePercentage = Math.round(diffPct * 100.0) / 100.0,
@@ -196,14 +198,14 @@ object SincDownloadRules {
         fileReadable = true,
         hasAudioStream = true,
         message =
-          "Downloaded duration (${actualSec}s) differs from expected (${expectedSec}s) by ${Math.round(diffSec * 10.0) / 10.0}s (${Math.round(diffPct * 10.0) / 10.0}%), tolerance is ${toleranceMs / 1000.0}s",
+          "Downloaded duration (${actualSec}s) differs from expected (${validExpectedSec}s) by ${Math.round(diffSec * 10.0) / 10.0}s (${Math.round(diffPct * 10.0) / 10.0}%), tolerance is ${toleranceMs / 1000.0}s",
       )
     }
 
     return ValidationDiagnostic(
       status = "validation_passed",
       reason = null,
-      sourceDuration = expectedSec,
+      sourceDuration = validExpectedSec,
       downloadedDuration = actualSec,
       difference = Math.round(diffSec * 100.0) / 100.0,
       differencePercentage = Math.round(diffPct * 100.0) / 100.0,
