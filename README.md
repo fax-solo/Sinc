@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/fax-solo/Sinc/releases/latest"><img src="https://img.shields.io/badge/Release-v0.3.0-1ED760?style=for-the-badge&logo=android&logoColor=white" alt="Latest Release" /></a>
+  <a href="https://github.com/fax-solo/Sinc/releases/latest"><img src="https://img.shields.io/badge/Release-v0.4.0-1ED760?style=for-the-badge&logo=android&logoColor=white" alt="Latest Release" /></a>
   <a href="#architecture"><img src="https://img.shields.io/badge/Platform-Android_8.0+-black?style=for-the-badge&logo=android" alt="Android 8.0+" /></a>
   <a href="#developer-guide"><img src="https://img.shields.io/badge/React_Native-0.75-61DAFB?style=for-the-badge&logo=react&logoColor=black" alt="React Native 0.75" /></a>
   <a href="#developer-guide"><img src="https://img.shields.io/badge/TypeScript-5.7-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript 5.7" /></a>
@@ -256,7 +256,7 @@ Sinc separates **catalog metadata** from **audio stream resolution**:
 ### For Android Users (Recommended)
 
 1. Navigate to the [**Latest Sinc Release**](https://github.com/fax-solo/Sinc/releases/latest).
-2. Download the `sinc-0.3.0-*.apk` file.
+2. Download the `sinc-0.4.0-*.apk` file.
 3. Open the downloaded APK on your Android device. If prompted, grant permission to install apps from your browser or file manager.
 4. Launch **Sinc** and enjoy your music!
 
@@ -349,7 +349,7 @@ Sinc is designed to work completely out-of-the-box without required environment 
 
 | Setting / Variable    | Location                                         | Default       | Purpose                                                                  |
 | --------------------- | ------------------------------------------------ | ------------- | ------------------------------------------------------------------------ |
-| `APP_VERSION`         | `apps/mobile/src/services/updates/appUpdates.ts` | `0.3.0`       | Application release version used by update checker and CI release tagger |
+| `APP_VERSION`         | `apps/mobile/src/services/updates/appUpdates.ts` | `0.4.0`       | Application release version used by update checker and CI release tagger |
 | `DEFAULT_TEMPERATURE` | `apps/mobile/src/services/local/tasteProfile.ts` | `0.7`         | Discovery temperature balancing familiar and new music                   |
 | `DOWNLOAD_DIR`        | Android Storage                                  | `Music/Sinc/` | Destination folder for exported `.m4a` and `.mp3` files                  |
 | `LASTFM_API_KEY`      | Optional / Local Settings                        | `""`          | Optional API key to fetch extended Last.fm global playcounts             |
@@ -404,7 +404,13 @@ Sinc/
   - Local-first taste engine with exponential decay and Rule 13 skip safety.
   - Spotify playlist URL ingestion without developer credentials.
   - Biometric authentication and PBKDF2 cryptographic PIN protection.
-- [ ] **v0.4.0 (In Progress)**:
+- [x] **v0.4.0 — Listening Intelligence Foundation**:
+  - Full Personalization architecture & Phase 1 listening foundation.
+  - Authoritative playback lifecycle integration (track starts, progress checkpoints, completions, skips, replays).
+  - Resilient local listening journal with batch sync, disk fail-safe, and offline tolerance.
+  - User taste profile computation with short/long-term exponential decay and skip safeguards.
+  - Idempotent backend signals service with GDPR data clearing and history capping.
+- [ ] **v0.5.0 (In Progress)**:
   - Last.fm and ListenBrainz background scrobbling.
   - Offline lyrics caching.
   - Equalizer and custom audio presets.
