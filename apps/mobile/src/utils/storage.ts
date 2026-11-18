@@ -91,4 +91,5 @@ export const STORAGE_KEYS = {
   BACKUP_INFO: 'sinc.backupInfo',
   PERSONALIZATION: 'sinc.personalization',
   ONBOARDING: 'sinc.onboarding',
+  LISTENING_JOURNAL: 'sinc.listeningJournal',
 } as const;

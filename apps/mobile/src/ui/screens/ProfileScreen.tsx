@@ -354,6 +354,12 @@ export function ProfileScreen() {
             detail={`${completedDownloads.length} offline`}
             onPress={() => navigation.navigate('Downloads')}
           />
+          <MenuRow
+            icon="musical-notes-outline"
+            title="Import from Spotify"
+            detail="Bring public playlists into Sinc"
+            onPress={() => navigation.navigate('SpotifyImport')}
+          />
         </View>
 
         {/* Persistent Phone Storage Indicator Banner */}
@@ -411,6 +417,8 @@ function MenuRow({
   return (
     <Pressable
       onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${title}${detail ? `, ${detail}` : ''}`}
       style={({ pressed }) => ({
         minHeight: 56,
         flexDirection: 'row',

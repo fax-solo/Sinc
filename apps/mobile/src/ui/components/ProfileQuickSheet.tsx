@@ -132,6 +132,11 @@ export function ProfileQuickSheet({ visible, onClose }: ProfileQuickSheetProps) 
                 onPress={() => navigateTo('Main', { screen: 'Library' })}
               />
               <SheetRow
+                icon="musical-notes-outline"
+                title="Import from Spotify"
+                onPress={() => navigateTo('SpotifyImport')}
+              />
+              <SheetRow
                 icon="moon-outline"
                 title="Sleep Timer"
                 onPress={() => navigateTo('Settings')}

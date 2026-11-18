@@ -177,6 +177,7 @@ object SincDownloads {
     // beside the new progress card (it still gets the same id back on end).
     cancelNotification(resultNotifIds[jobId])
     loadArtwork(artworkUrl)
+    mainHandler.removeCallbacks(serviceStopRunnable)
     ensureServiceRunning()
     refresh()
   }
@@ -541,12 +542,40 @@ object SincDownloads {
     serviceStarted.set(true)
   }
 
+  private val serviceStopRunnable = Runnable {
+    synchronized(this) {
+      if (count() == 0 && serviceStarted.get()) {
+        val ctx = react ?: return@Runnable
+        serviceStarted.set(false)
+        cancelNotification(NOTIF_ID)
+        clearPersistedIds()
+        try {
+          ctx.stopService(Intent(ctx, SincDownloadService::class.java))
+        } catch (_: Exception) {
+        }
+      }
+    }
+  }
+
+  fun scheduleStopServiceIfIdle(delayMs: Long = 10_000L) {
+    mainHandler.removeCallbacks(serviceStopRunnable)
+    if (count() == 0 && serviceStarted.get()) {
+      mainHandler.postDelayed(serviceStopRunnable, delayMs)
+    }
+  }
+
   fun stopServiceIfIdle() {
+    mainHandler.removeCallbacks(serviceStopRunnable)
     if (!serviceStarted.get()) return
     val ctx = react ?: return
     if (count() == 0) {
       serviceStarted.set(false)
-      ctx.stopService(Intent(ctx, SincDownloadService::class.java))
+      cancelNotification(NOTIF_ID)
+      clearPersistedIds()
+      try {
+        ctx.stopService(Intent(ctx, SincDownloadService::class.java))
+      } catch (_: Exception) {
+      }
     }
   }
 
@@ -649,10 +678,11 @@ object SincDownloads {
       }
     }
     if (jobs.isEmpty()) {
-      cancelNotification(NOTIF_ID)
-      clearPersistedIds()
-      stopServiceIfIdle()
+      // Grace period before tearing down the foreground service so consecutive
+      // queued tasks do not cause service churn or notification flickering.
+      scheduleStopServiceIfIdle(10_000L)
     } else {
+      mainHandler.removeCallbacks(serviceStopRunnable)
       persistProgressIds()
     }
   }

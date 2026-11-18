@@ -645,19 +645,23 @@ class SincYtModule(reactContext: ReactApplicationContext) :
         // same source instead of silently switching uploads.
         resolvedJobTargets.remove(jobId)
         SincDownloads.postStage(jobId, "validating")
-        // Final length guard on the measured file. The old 0.5x-2x window
-        // accepted a different song that merely happened to be song-length;
-        // require the catalog duration (a few seconds of intro/outro slack),
-        // and reject an unreadable probe rather than tagging a guess.
-        val finalMs = result.durationMs
-        if (!SincDownloadRules.isDurationAcceptable(finalMs, expectedMs)) {
+        // Final length guard on the measured file. Use FFprobe/FFmpeg to verify
+        // that the file is readable, contains an audio stream, and matches the
+        // expected track length within sensible tolerances.
+        val probe = SincAudioProbe.probeAudio(result.file)
+        val validation = SincDownloadRules.validateAudio(
+          actualMs = probe.durationMs,
+          expectedMs = expectedMs,
+          fileReadable = probe.readable,
+          hasAudioStream = probe.hasAudioStream,
+        )
+        if (!validation.isValid) {
           result.file.delete()
-          // If the strict resolver cached this source, a manual retry would
-          // otherwise reuse the same wrong upload forever. Forget only this
-          // strict entry; playback/prefetch entries remain valid.
           forgetStrictResolution(query, expectedMs)
+          val diagnosticJson = validation.toJson()
+          Log.w(LOG_TAG, "yt-dlp validation failed for jobId=$jobId: $diagnosticJson")
           throw IllegalStateException(
-            "Downloaded file is too short, too long, or doesn't match the song's length"
+            validation.message ?: "Downloaded song was too short or too long compared to the original version"
           )
         }
         // Duration is not identity: a different recording/cover can pass every
